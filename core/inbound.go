@@ -429,25 +429,22 @@ func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCon
 	hysteriasetting := &coreConf.HysteriaConfig{
 		Version: 2,
 	}
-	var finalmask *coreConf.FinalMask
+	finalmask := &coreConf.FinalMask{}
 	if !s.Ignore_Client_Bandwidth && (s.UpMbps > 0 || s.DownMbps > 0) {
-		finalmask = &coreConf.FinalMask{
-			QuicParams: &coreConf.QuicParamsConfig{
-				Congestion: "force-brutal",
-				BrutalUp:   up,
-				BrutalDown: down,
-			},
+		finalmask.QuicParams = &coreConf.QuicParamsConfig{
+			Congestion: "force-brutal",
+			BrutalUp:   up,
+			BrutalDown: down,
 		}
 	}
 	if s.Obfs != "" && s.ObfsPassword != "" {
 		rawobfsJSON := json.RawMessage(fmt.Sprintf(`{"password":"%s"}`, s.ObfsPassword))
-		udp := []conf.Mask{
+		finalmask.Udp = []conf.Mask{
 			{
 				Type:     s.Obfs,
 				Settings: &rawobfsJSON,
 			},
 		}
-		finalmask.Udp = udp
 	}
 	inbound.StreamSetting.FinalMask = finalmask
 	sets, err := json.Marshal(settings)
