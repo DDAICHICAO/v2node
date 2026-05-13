@@ -86,6 +86,9 @@ func (vc *V2Core) CloseUserIP(tag string, uuid string, ip string) int {
 
 func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
 	trafficSlice := make([]panel.UserTraffic, 0)
+	trafficByUID := make(map[int]*panel.UserTraffic)
+	countersByUID := make(map[int][]*counter.TrafficStorage)
+	uidOrder := make([]int, 0)
 	vc.users.mapLock.RLock()
 	defer vc.users.mapLock.RUnlock()
 	if v, ok := vc.dispatcher.Counter.Load(tag); ok {
@@ -95,21 +98,39 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 			traffic := value.(*counter.TrafficStorage)
 			up := traffic.UpCounter.Load()
 			down := traffic.DownCounter.Load()
-			if up+down > int64(mintraffic*1000) {
-				traffic.UpCounter.Store(0)
-				traffic.DownCounter.Store(0)
-				if vc.users.uidMap[email] == 0 {
-					c.Delete(email)
-					return true
+			if vc.users.uidMap[email] == 0 {
+				c.Delete(email)
+				return true
+			}
+			if up+down > 0 {
+				uid := vc.users.uidMap[email]
+				if existing, ok := trafficByUID[uid]; ok {
+					existing.Upload += up
+					existing.Download += down
+				} else {
+					trafficByUID[uid] = &panel.UserTraffic{
+						UID:      uid,
+						Upload:   up,
+						Download: down,
+					}
+					uidOrder = append(uidOrder, uid)
 				}
-				trafficSlice = append(trafficSlice, panel.UserTraffic{
-					UID:      vc.users.uidMap[email],
-					Upload:   up,
-					Download: down,
-				})
+				countersByUID[uid] = append(countersByUID[uid], traffic)
 			}
 			return true
 		})
+		minBytes := int64(mintraffic * 1000)
+		for _, uid := range uidOrder {
+			traffic := trafficByUID[uid]
+			if traffic.Upload+traffic.Download <= minBytes {
+				continue
+			}
+			for _, storage := range countersByUID[uid] {
+				storage.UpCounter.Store(0)
+				storage.DownCounter.Store(0)
+			}
+			trafficSlice = append(trafficSlice, *traffic)
+		}
 		if len(trafficSlice) == 0 {
 			return nil, nil
 		}

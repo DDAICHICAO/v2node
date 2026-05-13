@@ -131,7 +131,12 @@ type UserTraffic struct {
 func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
 	data := make(map[int][]int64, len(userTraffic))
 	for i := range userTraffic {
-		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
+		if current, ok := data[userTraffic[i].UID]; ok {
+			current[0] += userTraffic[i].Upload
+			current[1] += userTraffic[i].Download
+		} else {
+			data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
+		}
 	}
 	const path = "/api/v1/server/UniProxy/push"
 	_, err := c.client.R().
