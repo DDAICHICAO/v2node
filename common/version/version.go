@@ -9,15 +9,24 @@ import (
 )
 
 func Current() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	executable, err := os.Executable()
 	if err != nil {
 		return ""
 	}
 
-	out, err := exec.CommandContext(ctx, executable, "version").Output()
+	return FromCommand(executable)
+}
+
+func FromCommand(binaryPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	binaryPath = strings.TrimSpace(binaryPath)
+	if binaryPath == "" {
+		return ""
+	}
+
+	out, err := exec.CommandContext(ctx, binaryPath, "version").Output()
 	if err != nil {
 		return ""
 	}

@@ -409,6 +409,10 @@ func scheduleServiceRestart() error {
 }
 
 func localVersion() string {
+	if currentVersion := selfversion.FromCommand(installedBinaryPath()); currentVersion != "" {
+		return currentVersion
+	}
+
 	return selfversion.Current()
 }
 
