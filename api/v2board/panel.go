@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/go-resty/resty/v2"
+	selfversion "github.com/wyx2685/v2node/common/version"
 	"github.com/wyx2685/v2node/conf"
 )
 
@@ -49,11 +50,15 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	})
 	client.SetBaseURL(c.APIHost)
 	// set params
-	client.SetQueryParams(map[string]string{
+	queryParams := map[string]string{
 		"node_type": "v2node",
 		"node_id":   strconv.Itoa(c.NodeID),
 		"token":     c.Key,
-	})
+	}
+	if currentVersion := selfversion.Current(); currentVersion != "" {
+		queryParams["current_version"] = currentVersion
+	}
+	client.SetQueryParams(queryParams)
 	return &Client{
 		client:   client,
 		Token:    c.Key,
