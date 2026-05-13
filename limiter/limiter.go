@@ -36,6 +36,7 @@ type UserLimitInfo struct {
 	DynamicSpeedLimit int
 	ExpireTime        int64
 	OverLimit         bool
+	BlockedIPs        map[string]struct{}
 }
 
 func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList map[int]int) *Limiter {
@@ -58,6 +59,7 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 		if users[i].DeviceLimit != 0 {
 			userLimit.DeviceLimit = users[i].DeviceLimit
 		}
+		userLimit.BlockedIPs = makeBlockedIPSet(users[i].BlockedIPs)
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
 	}
@@ -97,6 +99,7 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 			u := v.(*UserLimitInfo)
 			u.SpeedLimit = modified[i].SpeedLimit
 			u.DeviceLimit = modified[i].DeviceLimit
+			u.BlockedIPs = makeBlockedIPSet(modified[i].BlockedIPs)
 			l.UserLimitInfo.Store(format.UserTag(tag, modified[i].Uuid), u)
 		}
 		limit := int64(determineSpeedLimit(l.SpeedLimit, modified[i].SpeedLimit)) * 1000000 / 8
@@ -123,6 +126,7 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		if added[i].DeviceLimit != 0 {
 			userLimit.DeviceLimit = added[i].DeviceLimit
 		}
+		userLimit.BlockedIPs = makeBlockedIPSet(added[i].BlockedIPs)
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
 		l.UUIDtoUID[added[i].Uuid] = added[i].Id
@@ -142,7 +146,7 @@ func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire ti
 
 func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (DynamicBucket *rate.DynamicBucket, Reject bool) {
 	// check if ipv4 mapped ipv6
-	ip = strings.TrimPrefix(ip, "::ffff:")
+	ip = normalizeIP(ip)
 
 	// check and gen speed limit Bucket
 	nodeLimit := l.SpeedLimit
@@ -153,6 +157,9 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 		u := v.(*UserLimitInfo)
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
+		if _, blocked := u.BlockedIPs[ip]; blocked {
+			return nil, true
+		}
 		if u.ExpireTime < time.Now().Unix() && u.ExpireTime != 0 {
 			if u.SpeedLimit != 0 {
 				userLimit = u.SpeedLimit
@@ -224,7 +231,10 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 		ipMap := value.(*sync.Map)
 		ipMap.Range(func(key, value interface{}) bool {
 			uid := value.(int)
-			ip := key.(string)
+			ip := normalizeIP(key.(string))
+			if l.isIPBlocked(taguuid, ip) {
+				return true
+			}
 			l.OldUserOnline.Store(ip, uid)
 			onlineUser = append(onlineUser, panel.OnlineUser{UID: uid, IP: ip})
 			return true
@@ -239,4 +249,31 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 type UserIpList struct {
 	Uid    int      `json:"Uid"`
 	IpList []string `json:"Ips"`
+}
+
+func makeBlockedIPSet(ips []string) map[string]struct{} {
+	if len(ips) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		ip = normalizeIP(ip)
+		if ip != "" {
+			set[ip] = struct{}{}
+		}
+	}
+	return set
+}
+
+func normalizeIP(ip string) string {
+	return strings.TrimSpace(strings.TrimPrefix(ip, "::ffff:"))
+}
+
+func (l *Limiter) isIPBlocked(taguuid string, ip string) bool {
+	if v, ok := l.UserLimitInfo.Load(taguuid); ok {
+		u := v.(*UserLimitInfo)
+		_, blocked := u.BlockedIPs[normalizeIP(ip)]
+		return blocked
+	}
+	return false
 }

@@ -180,8 +180,9 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			return nil, nil, nil, errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
+		sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
 		w, reject := limit.CheckLimit(user.Email,
-			sessionInbound.Source.Address.IP().String(),
+			sourceIP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
 			errors.LogInfo(ctx, "Limited ", user.Email, " by conn or ip")
@@ -203,6 +204,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		managedWriter := &ManagedWriter{
 			writer:  uplinkWriter,
 			manager: lm,
+			source:  sourceIP,
 		}
 		lm.AddLink(managedWriter, outboundLink.Reader)
 		inboundLink.Writer = managedWriter
@@ -364,8 +366,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			return errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
+		sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
 		w, reject := limit.CheckLimit(user.Email,
-			sessionInbound.Source.Address.IP().String(),
+			sourceIP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
 			errors.LogInfo(ctx, "Limited ", user.Email, " by conn or ip")
@@ -385,6 +388,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,
 			manager: lm,
+			source:  sourceIP,
 		}
 		outbound.Writer = managedWriter
 		if w != nil {

@@ -84,7 +84,7 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []pane
 		if o, ok := oldMap[u.Uuid]; !ok {
 			added = append(added, u)
 		} else {
-			if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit {
+			if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit || !sameStringSet(o.BlockedIPs, u.BlockedIPs) {
 				modified = append(modified, u)
 			}
 			delete(oldMap, u.Uuid)
@@ -96,4 +96,39 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []pane
 	}
 
 	return deleted, added, modified
+}
+
+func (c *Controller) closeBlockedUserIPs(users []panel.UserInfo) {
+	for _, user := range users {
+		for _, ip := range user.BlockedIPs {
+			if closed := c.server.CloseUserIP(c.tag, user.Uuid, ip); closed > 0 {
+				log.WithFields(log.Fields{
+					"tag":    c.tag,
+					"uid":    user.Id,
+					"ip":     ip,
+					"closed": closed,
+				}).Info("Closed blocked user connections")
+			}
+		}
+	}
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	seen := make(map[string]int, len(a))
+	for _, item := range a {
+		seen[item]++
+	}
+	for _, item := range b {
+		seen[item]--
+		if seen[item] < 0 {
+			return false
+		}
+	}
+	return true
 }

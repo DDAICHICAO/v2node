@@ -72,6 +72,18 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 	return nil
 }
 
+func (vc *V2Core) CloseUserIP(tag string, uuid string, ip string) int {
+	if vc.dispatcher == nil {
+		return 0
+	}
+	user := format.UserTag(tag, uuid)
+	if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
+		lm := v.(*dispatcher.LinkManager)
+		return lm.CloseByIP(strings.TrimPrefix(strings.TrimSpace(ip), "::ffff:"))
+	}
+	return 0
+}
+
 func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
 	trafficSlice := make([]panel.UserTraffic, 0)
 	vc.users.mapLock.RLock()

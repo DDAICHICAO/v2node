@@ -10,6 +10,7 @@ import (
 type ManagedWriter struct {
 	writer  buf.Writer
 	manager *LinkManager
+	source  string
 }
 
 func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -39,10 +40,32 @@ func (m *LinkManager) RemoveWriter(writer *ManagedWriter) {
 }
 
 func (m *LinkManager) CloseAll() {
+	m.closeMatched(func(*ManagedWriter) bool { return true })
+}
+
+func (m *LinkManager) CloseByIP(ip string) int {
+	return m.closeMatched(func(w *ManagedWriter) bool {
+		return w.source == ip
+	})
+}
+
+func (m *LinkManager) closeMatched(match func(*ManagedWriter) bool) int {
+	var writers []*ManagedWriter
+	var readers []buf.Reader
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for w, r := range m.links {
-		common.Close(w)
-		common.Interrupt(r)
+		if match(w) {
+			writers = append(writers, w)
+			readers = append(readers, r)
+			delete(m.links, w)
+		}
 	}
+	m.mu.Unlock()
+
+	for i, w := range writers {
+		common.Close(w.writer)
+		common.Interrupt(readers[i])
+	}
+	return len(writers)
 }

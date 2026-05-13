@@ -140,6 +140,9 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted, modified)
+		if len(modified) > 0 {
+			c.closeBlockedUserIPs(modified)
+		}
 	}
 	c.userList = newU
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
