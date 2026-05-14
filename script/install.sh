@@ -257,14 +257,68 @@ EOF
         fi
 }
 
-install_v2node() {
-    local version_param="$1"
-    if [[ -e /usr/local/v2node/ ]]; then
-        rm -rf /usr/local/v2node/
+download_v2node_archive() {
+    local version="$1"
+    local target="$2"
+    local url="https://github.com/DDAICHICAO/v2node/releases/download/${version}/v2node-linux-${arch}.zip"
+
+    echo "Downloading v2node ${version} from ${url}"
+    if ! (set -o pipefail; curl -fL --connect-timeout 15 --retry 2 --retry-delay 2 "$url" | pv -s 30M -W -N "下载进度" > "$target"); then
+        echo -e "${red}Download failed: release asset not found or network error: ${url}${plain}"
+        return 1
     fi
 
-    mkdir /usr/local/v2node/ -p
-    cd /usr/local/v2node/
+    if [[ ! -s "$target" ]]; then
+        echo -e "${red}Download failed: empty archive${plain}"
+        return 1
+    fi
+
+    if ! unzip -tq "$target" >/dev/null 2>&1; then
+        echo -e "${red}Download failed: invalid zip archive. Please check the version and release asset.${plain}"
+        return 1
+    fi
+}
+
+replace_v2node_install_dir() {
+    local source_dir="$1"
+    local install_dir="/usr/local/v2node"
+    local backup_dir=""
+
+    for required_file in v2node geoip.dat geosite.dat; do
+        if [[ ! -f "${source_dir}/${required_file}" ]]; then
+            echo -e "${red}Install package is missing ${required_file}${plain}"
+            return 1
+        fi
+    done
+
+    if [[ -e "$install_dir" ]]; then
+        backup_dir="${install_dir}.bak.$(date +%s)"
+        if ! mv "$install_dir" "$backup_dir"; then
+            echo -e "${red}Failed to backup existing install directory${plain}"
+            return 1
+        fi
+    fi
+
+    if ! mkdir -p "$install_dir" || ! cp -a "${source_dir}/." "$install_dir/"; then
+        echo -e "${red}Failed to install v2node files${plain}"
+        rm -rf "$install_dir"
+        if [[ -n "$backup_dir" && -e "$backup_dir" ]]; then
+            mv "$backup_dir" "$install_dir" >/dev/null 2>&1 || true
+        fi
+        return 1
+    fi
+
+    if [[ -n "$backup_dir" && -e "$backup_dir" ]]; then
+        rm -rf "$backup_dir"
+    fi
+}
+
+install_v2node() {
+    local version_param="$1"
+    local work_dir
+    work_dir=$(mktemp -d /tmp/v2node-install.XXXXXX) || exit 1
+    local archive_path="${work_dir}/v2node-linux.zip"
+    local package_dir="${work_dir}/package"
 
     if  [[ -z "$version_param" ]] ; then
         last_version=$(curl -Ls "https://api.github.com/repos/DDAICHICAO/v2node/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
@@ -273,24 +327,31 @@ install_v2node() {
             exit 1
         fi
         echo -e "${green}检测到最新版本：${last_version}，开始安装...${plain}"
-        url="https://github.com/DDAICHICAO/v2node/releases/download/${last_version}/v2node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 v2node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
+        if ! download_v2node_archive "$last_version" "$archive_path"; then
+            rm -rf "$work_dir"
             exit 1
         fi
     else
     last_version=$version_param
-        url="https://github.com/DDAICHICAO/v2node/releases/download/${last_version}/v2node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 v2node $1 失败，请确保此版本存在${plain}"
+        if ! download_v2node_archive "$last_version" "$archive_path"; then
+            rm -rf "$work_dir"
             exit 1
         fi
     fi
 
-    unzip v2node-linux.zip
-    rm v2node-linux.zip -f
+    mkdir -p "$package_dir"
+    if ! unzip -q "$archive_path" -d "$package_dir"; then
+        echo -e "${red}Failed to extract v2node archive${plain}"
+        rm -rf "$work_dir"
+        exit 1
+    fi
+    if ! replace_v2node_install_dir "$package_dir"; then
+        rm -rf "$work_dir"
+        exit 1
+    fi
+    rm -rf "$work_dir"
+
+    cd /usr/local/v2node/ || exit 1
     chmod +x v2node
     mkdir /etc/v2node/ -p
     cp geoip.dat /etc/v2node/
