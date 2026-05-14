@@ -32,13 +32,14 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		}
 	}
 
-	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
+	if onlineDevice, onlineDeviceDetails, err := c.limiter.GetOnlineDeviceState(); err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
 		}).Info("Get online device failed")
 	} else if len(*onlineDevice) > 0 {
 		var result []panel.OnlineUser
+		var deviceResult []panel.OnlineDevice
 		var nocountUID = make(map[int]struct{})
 		for _, traffic := range userTraffic {
 			total := traffic.Upload + traffic.Download
@@ -49,6 +50,11 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		for _, online := range *onlineDevice {
 			if _, ok := nocountUID[online.UID]; !ok {
 				result = append(result, online)
+			}
+		}
+		for _, online := range *onlineDeviceDetails {
+			if _, ok := nocountUID[online.UID]; !ok {
+				deviceResult = append(deviceResult, online)
 			}
 		}
 		data := make(map[int][]string)
@@ -65,6 +71,30 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				}).Info("Report online users failed")
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return err
+				}
+			}
+		}
+		if c.supportsDeviceAliveReport() && len(deviceResult) != 0 {
+			deviceData := make(map[int][]panel.OnlineDeviceReportItem)
+			for _, online := range deviceResult {
+				if online.UUID == "" {
+					continue
+				}
+				deviceData[online.UID] = append(deviceData[online.UID], panel.OnlineDeviceReportItem{
+					UUID: online.UUID,
+					IP:   online.IP,
+				})
+			}
+			if len(deviceData) != 0 {
+				err := c.apiClient.ReportNodeOnlineDevices(ctx, &deviceData)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"tag": c.tag,
+						"err": err,
+					}).Info("Report online devices failed")
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						return err
+					}
 				}
 			}
 		}

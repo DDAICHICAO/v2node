@@ -106,6 +106,26 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if newA != nil {
 		c.limiter.AliveList = newA
 	}
+	if c.supportsDeviceLimitByUUID() {
+		newDeviceAlive, err := c.apiClient.GetUserDeviceAlive(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Get device alive list failed")
+			return nil
+		}
+		if newDeviceAlive != nil {
+			c.deviceAliveMap = newDeviceAlive
+			c.limiter.DeviceAliveList = newDeviceAlive
+			c.limiter.UseDeviceLimitByUUID = true
+		}
+	} else {
+		c.limiter.UseDeviceLimitByUUID = false
+	}
 	// node no changed, check users
 	if len(newU) == 0 {
 		log.WithField("tag", c.tag).Debug("User list no change")

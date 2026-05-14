@@ -3,7 +3,9 @@ package panel
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -14,6 +16,13 @@ import (
 )
 
 // Panel is the interface for different panel's api.
+
+var deviceLimitCapabilities = []string{
+	"device_uuid_users",
+	"uid_traffic_aggregate",
+	"device_alive_report",
+	"device_limit_by_uuid",
+}
 
 type Client struct {
 	client           *resty.Client
@@ -58,6 +67,10 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	if currentVersion := selfversion.Current(); currentVersion != "" {
 		queryParams["current_version"] = currentVersion
 	}
+	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
+		queryParams["instance_id"] = strings.TrimSpace(hostname)
+	}
+	queryParams["capabilities"] = strings.Join(deviceLimitCapabilities, ",")
 	client.SetQueryParams(queryParams)
 	return &Client{
 		client:   client,

@@ -17,6 +17,17 @@ type OnlineUser struct {
 	IP  string
 }
 
+type OnlineDevice struct {
+	UID  int
+	UUID string
+	IP   string
+}
+
+type OnlineDeviceReportItem struct {
+	UUID string `json:"uuid"`
+	IP   string `json:"ip"`
+}
+
 type UserInfo struct {
 	Id          int      `json:"id" msgpack:"id"`
 	Uuid        string   `json:"uuid" msgpack:"uuid"`
@@ -31,6 +42,10 @@ type UserListBody struct {
 
 type AliveMap struct {
 	Alive map[int]int `json:"alive"`
+}
+
+type DeviceAliveMap struct {
+	AliveDevices map[int]int `json:"alive_devices"`
 }
 
 // GetUserList will pull user from v2board
@@ -121,6 +136,36 @@ func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
 	return c.AliveMap.Alive, nil
 }
 
+func (c *Client) GetUserDeviceAlive(ctx context.Context) (map[int]int, error) {
+	deviceAlive := &DeviceAliveMap{}
+	const path = "/api/v1/server/UniProxy/deviceAliveList"
+	r, err := c.client.R().
+		SetContext(ctx).
+		ForceContentType("application/json").
+		Get(path)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		deviceAlive.AliveDevices = make(map[int]int)
+		return deviceAlive.AliveDevices, nil
+	}
+	if r == nil || r.RawResponse == nil || r.StatusCode() >= 399 {
+		deviceAlive.AliveDevices = make(map[int]int)
+		return deviceAlive.AliveDevices, nil
+	}
+	defer r.RawResponse.Body.Close()
+	if err := json.Unmarshal(r.Body(), deviceAlive); err != nil {
+		fmt.Printf("unmarshal user device alive list error: %s", err)
+		deviceAlive.AliveDevices = make(map[int]int)
+	}
+	if deviceAlive.AliveDevices == nil {
+		deviceAlive.AliveDevices = make(map[int]int)
+	}
+
+	return deviceAlive.AliveDevices, nil
+}
+
 type UserTraffic struct {
 	UID      int
 	Upload   int64
@@ -152,6 +197,21 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
+	_, err := c.client.R().
+		SetContext(ctx).
+		SetBody(data).
+		ForceContentType("application/json").
+		Post(path)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Client) ReportNodeOnlineDevices(ctx context.Context, data *map[int][]OnlineDeviceReportItem) error {
+	const path = "/api/v1/server/UniProxy/aliveDevices"
 	_, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).

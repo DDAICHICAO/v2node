@@ -71,10 +71,13 @@ type Route struct {
 }
 
 type BaseConfig struct {
-	PushInterval           any `json:"push_interval"`
-	PullInterval           any `json:"pull_interval"`
-	DeviceOnlineMinTraffic int `json:"device_online_min_traffic"`
-	NodeReportMinTraffic   int `json:"node_report_min_traffic"`
+	PushInterval               any    `json:"push_interval"`
+	PullInterval               any    `json:"pull_interval"`
+	DeviceOnlineMinTraffic     int    `json:"device_online_min_traffic"`
+	NodeReportMinTraffic       int    `json:"node_report_min_traffic"`
+	DeviceAliveReport          bool   `json:"device_alive_report"`
+	DeviceLimitByUUID          bool   `json:"device_limit_by_uuid"`
+	DeviceLimitEnforcementMode string `json:"device_limit_enforcement_mode"`
 }
 
 type TlsSettings struct {

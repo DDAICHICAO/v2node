@@ -20,6 +20,7 @@ type Controller struct {
 	limiter                 *limiter.Limiter
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
+	deviceAliveMap          map[int]int
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
 	nodeInfoMonitorPeriodic *task.Task
@@ -63,10 +64,17 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("failed to get user alive list: %s", err)
 	}
+	c.deviceAliveMap = make(map[int]int)
+	if c.supportsDeviceLimitByUUID() {
+		c.deviceAliveMap, err = c.apiClient.GetUserDeviceAlive(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to get user device alive list: %s", err)
+		}
+	}
 	c.tag = node.Tag
 
 	// add limiter
-	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
+	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap, c.deviceAliveMap, c.supportsDeviceLimitByUUID())
 	c.limiter = l
 	if node.Security == panel.Tls {
 		err = c.requestCert()
@@ -91,6 +99,20 @@ func (c *Controller) Start(x *core.V2Core) error {
 	c.info = node
 	c.startTasks(node)
 	return nil
+}
+
+func (c *Controller) supportsDeviceLimitByUUID() bool {
+	return c.info != nil &&
+		c.info.Common != nil &&
+		c.info.Common.BaseConfig != nil &&
+		c.info.Common.BaseConfig.DeviceLimitByUUID
+}
+
+func (c *Controller) supportsDeviceAliveReport() bool {
+	return c.info != nil &&
+		c.info.Common != nil &&
+		c.info.Common.BaseConfig != nil &&
+		c.info.Common.BaseConfig.DeviceAliveReport
 }
 
 // Close implement the Close() function of the service interface
