@@ -7,6 +7,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/netstat"
 	"github.com/wyx2685/v2node/common/task"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
@@ -21,6 +22,7 @@ type Controller struct {
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
 	deviceAliveMap          map[int]int
+	netSampler              *netstat.Sampler
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
 	nodeInfoMonitorPeriodic *task.Task
@@ -31,9 +33,10 @@ type Controller struct {
 // NewController return a Node controller with default parameters.
 func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInfo) *Controller {
 	controller := &Controller{
-		apiClient: api,
-		info:      info,
-		conf:      conf,
+		apiClient:  api,
+		info:       info,
+		conf:       conf,
+		netSampler: netstat.NewSampler(),
 	}
 	return controller
 }
@@ -96,6 +99,12 @@ func (c *Controller) Start(x *core.V2Core) error {
 		return fmt.Errorf("add users error: %s", err)
 	}
 	log.WithField("tag", c.tag).Infof("Added %d new users", added)
+	if _, _, err := c.netSampler.Sample(); err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Debug("Prime network throughput sampler failed")
+	}
 	c.info = node
 	c.startTasks(node)
 	return nil

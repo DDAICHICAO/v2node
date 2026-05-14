@@ -3,7 +3,6 @@ package panel
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/wyx2685/v2node/common/instance"
 	selfversion "github.com/wyx2685/v2node/common/version"
 	"github.com/wyx2685/v2node/conf"
 )
@@ -67,9 +67,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	if currentVersion := selfversion.Current(); currentVersion != "" {
 		queryParams["current_version"] = currentVersion
 	}
-	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
-		queryParams["instance_id"] = strings.TrimSpace(hostname)
-	}
+	queryParams["instance_id"] = instance.ResolveID(c.APIHost, c.NodeID)
 	queryParams["capabilities"] = strings.Join(deviceLimitCapabilities, ",")
 	client.SetQueryParams(queryParams)
 	return &Client{

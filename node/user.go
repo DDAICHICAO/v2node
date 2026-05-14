@@ -3,12 +3,16 @@ package node
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
+	c.reportNodeRuntimeStatus(ctx)
+
 	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
@@ -102,6 +106,41 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	}
 
 	return nil
+}
+
+func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
+	if c.netSampler == nil {
+		return
+	}
+	throughput, ok, err := c.netSampler.Sample()
+	if err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Debug("Sample network throughput failed")
+		return
+	}
+	if !ok || throughput == nil {
+		return
+	}
+
+	hostname, _ := os.Hostname()
+	status := panel.NodeRuntimeStatus{
+		Hostname:       strings.TrimSpace(hostname),
+		Interfaces:     throughput.Interfaces,
+		RxBps:          throughput.RxBps,
+		TxBps:          throughput.TxBps,
+		RxBytes:        throughput.RxBytes,
+		TxBytes:        throughput.TxBytes,
+		SampleInterval: throughput.IntervalSeconds,
+		SampledAt:      throughput.CapturedAt.Unix(),
+	}
+	if err := c.apiClient.ReportNodeRuntimeStatus(ctx, status); err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Debug("Report node runtime status failed")
+	}
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []panel.UserInfo) {
