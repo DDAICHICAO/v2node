@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type Throughput struct {
 }
 
 type Sampler struct {
+	mu       sync.Mutex
 	previous *Snapshot
 }
 
@@ -36,6 +38,9 @@ func NewSampler() *Sampler {
 }
 
 func (s *Sampler) Sample() (*Throughput, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	current, err := readSnapshot()
 	if err != nil {
 		return nil, false, err

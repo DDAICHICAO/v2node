@@ -5,14 +5,15 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
-func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
-	c.reportNodeRuntimeStatus(ctx)
+const nodeRuntimeStatusReportTimeout = 2 * time.Second
 
+func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
@@ -105,6 +106,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
 	}
 
+	c.reportNodeRuntimeStatus(ctx)
 	return nil
 }
 
@@ -124,6 +126,9 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
 		return
 	}
 
+	reportCtx, cancel := context.WithTimeout(ctx, nodeRuntimeStatusReportTimeout)
+	defer cancel()
+
 	hostname, _ := os.Hostname()
 	status := panel.NodeRuntimeStatus{
 		Hostname:       strings.TrimSpace(hostname),
@@ -135,7 +140,7 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
 		SampleInterval: throughput.IntervalSeconds,
 		SampledAt:      throughput.CapturedAt.Unix(),
 	}
-	if err := c.apiClient.ReportNodeRuntimeStatus(ctx, status); err != nil {
+	if err := c.apiClient.ReportNodeRuntimeStatus(reportCtx, status); err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,

@@ -18,9 +18,9 @@ const persistedIDFileName = "instance_id"
 // multiple panel nodes without sharing the same instance key.
 func ResolveID(apiHost string, nodeID int) string {
 	hostname := readHostname()
-	seed := readMachineID()
+	seed := readOrCreatePersistedID()
 	if seed == "" {
-		seed = readOrCreatePersistedID()
+		seed = readMachineID()
 	}
 	if seed == "" {
 		seed = hostname
