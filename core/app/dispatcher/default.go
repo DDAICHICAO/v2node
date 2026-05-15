@@ -39,6 +39,13 @@ type cachedReader struct {
 	cache  buf.MultiBuffer
 }
 
+func asTimeoutReader(reader buf.Reader) buf.TimeoutReader {
+	if timeoutReader, ok := reader.(buf.TimeoutReader); ok {
+		return timeoutReader
+	}
+	return &buf.TimeoutWrapperReader{Reader: reader}
+}
+
 func (r *cachedReader) Cache(b *buf.Buffer, deadline time.Duration) error {
 	mb, err := r.reader.ReadMultiBufferTimeout(deadline)
 	if err != nil {
@@ -421,7 +428,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		d.routedDispatch(ctx, outbound, destination)
 	} else {
 		cReader := &cachedReader{
-			reader: outbound.Reader.(buf.TimeoutReader),
+			reader: asTimeoutReader(outbound.Reader),
 		}
 		outbound.Reader = cReader
 		result, err := sniffer(ctx, cReader, sniffingRequest.MetadataOnly, destination.Network)
