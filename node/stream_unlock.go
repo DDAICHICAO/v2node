@@ -29,6 +29,8 @@ const (
 	streamUnlockResultTimeout  = "timeout"
 	streamUnlockResultError    = "error"
 	streamUnlockResultUnknown  = "unknown"
+
+	streamUnlockMaxConcurrency = 8
 )
 
 var (
@@ -238,33 +240,119 @@ func beginStreamUnlockTask(taskID string) bool {
 
 func (c *Controller) runStreamUnlockTask(task panel.StreamUnlockTask) {
 	started := time.Now()
+	finalStatus := streamUnlockStatusFailed
+	finalMessage := "stream unlock test aborted"
+	var results []panel.StreamUnlockResult
+	defer func() {
+		if r := recover(); r != nil {
+			finalStatus = streamUnlockStatusFailed
+			finalMessage = fmt.Sprintf("stream unlock test panic: %v", r)
+		}
+		c.reportStreamUnlockStatus(task.TaskID, finalStatus, finalMessage, results, time.Since(started))
+	}()
+
 	services := normalizeStreamUnlockServices(task.Services)
 	timeout := normalizeStreamUnlockTimeout(task.Timeout)
 	if len(services) == 0 {
-		c.reportStreamUnlockStatus(task.TaskID, streamUnlockStatusFailed, "no supported services selected", nil, time.Since(started))
+		finalMessage = "no supported services selected"
 		return
 	}
 
 	proxyAddress, cleanup, err := c.openStreamUnlockProbeProxy()
 	if err != nil {
-		c.reportStreamUnlockStatus(task.TaskID, streamUnlockStatusFailed, "start xray probe proxy failed: "+err.Error(), nil, time.Since(started))
+		finalMessage = "start xray probe proxy failed: " + err.Error()
 		return
 	}
 	defer cleanup()
 
 	c.reportStreamUnlockStatus(task.TaskID, streamUnlockStatusRunning, "stream unlock test started", nil, 0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout*time.Duration(len(services)+1)+10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamUnlockTaskTimeout(timeout, len(services)))
 	defer cancel()
 	ctx = context.WithValue(ctx, streamUnlockProxyContextKey{}, proxyAddress)
 
 	region := detectCloudflareRegion(ctx, timeout)
-	results := make([]panel.StreamUnlockResult, 0, len(services))
-	for _, service := range services {
-		results = append(results, runStreamUnlockCheck(ctx, service, region, timeout))
+	results = runStreamUnlockChecks(ctx, services, region, timeout)
+	if ctx.Err() != nil {
+		finalMessage = "stream unlock test timed out"
+		return
 	}
+	finalStatus = streamUnlockStatusSuccess
+	finalMessage = "stream unlock test finished"
+}
 
-	c.reportStreamUnlockStatus(task.TaskID, streamUnlockStatusSuccess, "stream unlock test finished", results, time.Since(started))
+func streamUnlockTaskTimeout(timeout time.Duration, serviceCount int) time.Duration {
+	if serviceCount < 1 {
+		serviceCount = 1
+	}
+	batches := (serviceCount + streamUnlockMaxConcurrency - 1) / streamUnlockMaxConcurrency
+	return timeout*time.Duration(batches+2) + 30*time.Second
+}
+
+func runStreamUnlockChecks(ctx context.Context, services []string, region string, timeout time.Duration) []panel.StreamUnlockResult {
+	results := make([]panel.StreamUnlockResult, len(services))
+	concurrency := streamUnlockMaxConcurrency
+	if len(services) < concurrency {
+		concurrency = len(services)
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for i, service := range services {
+		i, service := i, service
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[i] = streamUnlockTimeoutResult(service, region, 0)
+				return
+			}
+			results[i] = runStreamUnlockCheck(ctx, service, region, timeout)
+		}()
+	}
+	wg.Wait()
+
+	for i, service := range services {
+		if results[i].Service == "" {
+			results[i] = streamUnlockTimeoutResult(service, region, 0)
+		}
+	}
+	return results
+}
+
+func streamUnlockTimeoutResult(service string, region string, latencyMs int64) panel.StreamUnlockResult {
+	return streamUnlockResult(service, streamUnlockServiceTitle(service), streamUnlockResultTimeout, region, "test timed out", latencyMs)
+}
+
+func streamUnlockServiceTitle(service string) string {
+	switch service {
+	case "tls_rtt":
+		return "TLS RTT"
+	case "https_latency":
+		return "HTTPS Latency"
+	case "netflix":
+		return "Netflix"
+	case "disney_plus":
+		return "Disney+"
+	case "youtube":
+		return "YouTube Premium"
+	case "tiktok":
+		return "TikTok"
+	case "abema":
+		return "Abema"
+	case "steam":
+		return "Steam"
+	case "openai":
+		return "OpenAI"
+	default:
+		if definition, ok := genericStreamServices[service]; ok {
+			return definition.Title
+		}
+		return service
+	}
 }
 
 func (c *Controller) reportStreamUnlockStatus(taskID string, status string, message string, results []panel.StreamUnlockResult, duration time.Duration) {
