@@ -76,6 +76,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 	c.checkUpdateTask(ctx)
+	c.checkStreamUnlockTask(ctx)
 
 	// get user info
 	newU, err := c.apiClient.GetUserList(ctx)

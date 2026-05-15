@@ -22,6 +22,7 @@ var deviceLimitCapabilities = []string{
 	"uid_traffic_aggregate",
 	"device_alive_report",
 	"device_limit_by_uuid",
+	"stream_unlock_test",
 }
 
 type Client struct {

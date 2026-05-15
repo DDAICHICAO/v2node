@@ -42,6 +42,10 @@ func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 	return false
 }
 
+func routeInboundTags(tag string) []string {
+	return []string{tag, StreamUnlockProbeTag(tag)}
+}
+
 func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
 	//dns
 	queryStrategy := "UseIPv4v6"
@@ -100,7 +104,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				coreDnsConfig.Servers = append(coreDnsConfig.Servers, server)
 			case "block":
 				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
+					"inboundTag":  routeInboundTags(info.Tag),
 					"domain":      route.Match,
 					"outboundTag": "block",
 				}
@@ -111,7 +115,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "block_ip":
 				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
+					"inboundTag":  routeInboundTags(info.Tag),
 					"ip":          route.Match,
 					"outboundTag": "block",
 				}
@@ -122,7 +126,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "block_port":
 				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
+					"inboundTag":  routeInboundTags(info.Tag),
 					"port":        strings.Join(route.Match, ","),
 					"outboundTag": "block",
 				}
@@ -133,7 +137,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "protocol":
 				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
+					"inboundTag":  routeInboundTags(info.Tag),
 					"protocol":    route.Match,
 					"outboundTag": "block",
 				}
@@ -152,7 +156,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 					continue
 				}
 				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
+					"inboundTag":  routeInboundTags(info.Tag),
 					"domain":      route.Match,
 					"outboundTag": outbound.Tag,
 				}
@@ -179,7 +183,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 					continue
 				}
 				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
+					"inboundTag":  routeInboundTags(info.Tag),
 					"ip":          route.Match,
 					"outboundTag": outbound.Tag,
 				}
@@ -206,7 +210,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 					continue
 				}
 				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
+					"inboundTag":  routeInboundTags(info.Tag),
 					"network":     "tcp,udp",
 					"outboundTag": outbound.Tag,
 				}

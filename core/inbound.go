@@ -24,6 +24,10 @@ type NetworkSettingsProxyProtocol struct {
 	AcceptProxyProtocol bool `json:"acceptProxyProtocol"`
 }
 
+func StreamUnlockProbeTag(tag string) string {
+	return tag + "-stream-unlock-probe"
+}
+
 func (v *V2Core) removeInbound(tag string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -45,6 +49,47 @@ func (v *V2Core) addInbound(config *core.InboundHandlerConfig) error {
 		return err
 	}
 	return nil
+}
+
+func (v *V2Core) AddStreamUnlockProbeInbound(tag string, port int) error {
+	settings := &coreConf.SocksServerConfig{
+		AuthMethod: coreConf.AuthMethodNoAuth,
+		UDP:        false,
+	}
+	rawSettingsBytes, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	rawSettings := json.RawMessage(rawSettingsBytes)
+	in := &coreConf.InboundDetourConfig{
+		Protocol: "socks",
+		Tag:      StreamUnlockProbeTag(tag),
+		ListenOn: &coreConf.Address{
+			Address: net.ParseAddress("127.0.0.1"),
+		},
+		PortList: &coreConf.PortList{
+			Range: []coreConf.PortRange{
+				{
+					From: uint32(port),
+					To:   uint32(port),
+				},
+			},
+		},
+		Settings: &rawSettings,
+		SniffingConfig: &coreConf.SniffingConfig{
+			Enabled:      true,
+			DestOverride: coreConf.StringList{"http", "tls", "quic"},
+		},
+	}
+	config, err := in.Build()
+	if err != nil {
+		return err
+	}
+	return v.addInbound(config)
+}
+
+func (v *V2Core) RemoveStreamUnlockProbeInbound(tag string) error {
+	return v.removeInbound(StreamUnlockProbeTag(tag))
 }
 
 // BuildInbound build Inbound config for different protocol
