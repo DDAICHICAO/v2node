@@ -64,7 +64,7 @@ var genericStreamServices = map[string]streamServiceDefinition{
 	},
 	"bilibili": {
 		Title:          "Bilibili",
-		URL:            "https://www.bilibili.com/bangumi/",
+		URL:            "https://api.bilibili.com/pgc/player/web/playurl?avid=18281381&cid=29892777&qn=0&type=&otype=json&ep_id=183799&fourk=1&fnver=0&fnval=16&module=bangumi",
 		SuccessMessage: "site reachable",
 		BlockedPhrases: []string{"region restricted", "copyright restricted", "not available"},
 	},
@@ -441,6 +441,8 @@ func streamUnlockServiceTitle(service string) string {
 		return "Disney+"
 	case "youtube":
 		return "YouTube Premium"
+	case "bilibili":
+		return "Bilibili"
 	case "tiktok":
 		return "TikTok"
 	case "abema":
@@ -593,6 +595,8 @@ func runStreamUnlockCheck(ctx context.Context, service string, region string, ti
 		return checkDisneyUnlock(ctx, region, timeout)
 	case "youtube":
 		return checkYouTubeUnlock(ctx, region, timeout)
+	case "bilibili":
+		return checkBilibiliUnlock(ctx, region, timeout)
 	case "tiktok":
 		return checkTikTokUnlock(ctx, region, timeout)
 	case "abema":
@@ -697,6 +701,32 @@ func checkYouTubeUnlock(ctx context.Context, region string, timeout time.Duratio
 		return streamUnlockResult("youtube", "YouTube Premium", streamUnlockResultUnlocked, region, "premium page reachable", probe.LatencyMs)
 	}
 	return streamUnlockResult("youtube", "YouTube Premium", streamUnlockResultUnknown, region, fmt.Sprintf("HTTP %d", probe.StatusCode), probe.LatencyMs)
+}
+
+func checkBilibiliUnlock(ctx context.Context, region string, timeout time.Duration) panel.StreamUnlockResult {
+	probe := streamHTTPProbe(ctx, genericStreamServices["bilibili"].URL+"&session="+strconv.FormatInt(time.Now().UnixNano(), 36), timeout, 64*1024)
+	if probe.Err != nil {
+		return probeErrorResult("bilibili", "Bilibili", region, probe)
+	}
+
+	if probe.StatusCode < 200 || probe.StatusCode >= 400 {
+		return streamUnlockResult("bilibili", "Bilibili", streamUnlockResultUnknown, region, fmt.Sprintf("HTTP %d", probe.StatusCode), probe.LatencyMs)
+	}
+
+	code := ""
+	if found := regexp.MustCompile(`(?i)"code"\s*:\s*(-?\d+)`).FindStringSubmatch(probe.Body); len(found) == 2 {
+		code = found[1]
+	}
+	switch code {
+	case "0":
+		return streamUnlockResult("bilibili", "Bilibili", streamUnlockResultUnlocked, region, "HK/MO/TW content playable", probe.LatencyMs)
+	case "-10403":
+		return streamUnlockResult("bilibili", "Bilibili", streamUnlockResultBlocked, region, "region restricted", probe.LatencyMs)
+	case "":
+		return streamUnlockResult("bilibili", "Bilibili", streamUnlockResultUnknown, region, "missing api code", probe.LatencyMs)
+	default:
+		return streamUnlockResult("bilibili", "Bilibili", streamUnlockResultUnknown, region, "api code: "+code, probe.LatencyMs)
+	}
 }
 
 func checkTikTokUnlock(ctx context.Context, region string, timeout time.Duration) panel.StreamUnlockResult {
