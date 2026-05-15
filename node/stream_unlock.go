@@ -134,6 +134,36 @@ var genericStreamServices = map[string]streamServiceDefinition{
 		SuccessMessage: "site reachable",
 		BlockedPhrases: []string{"not available in your region", "not available in your country"},
 	},
+	"apple_tv": {
+		Title:          "Apple TV+",
+		URL:            "https://tv.apple.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your country", "not available in your region"},
+	},
+	"spotify": {
+		Title:          "Spotify",
+		URL:            "https://www.spotify.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your country", "not available in your region"},
+	},
+	"deezer": {
+		Title:          "Deezer",
+		URL:            "https://www.deezer.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your country", "not available in your region"},
+	},
+	"tidal": {
+		Title:          "TIDAL",
+		URL:            "https://tidal.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your country", "not available in your region"},
+	},
+	"rakuten_viki": {
+		Title:          "Rakuten Viki",
+		URL:            "https://www.viki.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
 	"u_next": {
 		Title:          "U-NEXT",
 		URL:            "https://video.unext.jp/",
@@ -167,6 +197,78 @@ var genericStreamServices = map[string]streamServiceDefinition{
 	"tvbanywhere": {
 		Title:          "TVBAnywhere+",
 		URL:            "https://www.tvbanywhere.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"mytv_super": {
+		Title:          "myTV SUPER",
+		URL:            "https://www.mytvsuper.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"kktv": {
+		Title:          "KKTV",
+		URL:            "https://www.kktv.me/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"line_tv": {
+		Title:          "LINE TV",
+		URL:            "https://www.linetv.tw/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"wavve": {
+		Title:          "Wavve",
+		URL:            "https://www.wavve.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"tving": {
+		Title:          "TVING",
+		URL:            "https://www.tving.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"watcha": {
+		Title:          "WATCHA",
+		URL:            "https://watcha.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"hotstar": {
+		Title:          "Hotstar",
+		URL:            "https://www.hotstar.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"jio_cinema": {
+		Title:          "JioCinema",
+		URL:            "https://www.jiocinema.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"sony_liv": {
+		Title:          "SonyLIV",
+		URL:            "https://www.sonyliv.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"zee5": {
+		Title:          "ZEE5",
+		URL:            "https://www.zee5.com/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"mewatch": {
+		Title:          "meWATCH",
+		URL:            "https://www.mewatch.sg/",
+		SuccessMessage: "site reachable",
+		BlockedPhrases: []string{"not available in your region", "not available in your country"},
+	},
+	"catchplay": {
+		Title:          "Catchplay+",
+		URL:            "https://www.catchplay.com/",
 		SuccessMessage: "site reachable",
 		BlockedPhrases: []string{"not available in your region", "not available in your country"},
 	},
@@ -440,6 +542,18 @@ func normalizeStreamUnlockServices(services []string) []string {
 			key = "u_next"
 		case "tvb":
 			key = "tvbanywhere"
+		case "apple", "appletv", "apple_tv_plus":
+			key = "apple_tv"
+		case "viki":
+			key = "rakuten_viki"
+		case "jiocinema", "jio":
+			key = "jio_cinema"
+		case "sonyliv":
+			key = "sony_liv"
+		case "linetv":
+			key = "line_tv"
+		case "mytv", "mytvsuper":
+			key = "mytv_super"
 		}
 		switch key {
 		case "tls_rtt", "https_latency", "netflix", "disney_plus", "youtube", "tiktok", "steam", "abema":
