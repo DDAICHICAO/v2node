@@ -160,7 +160,8 @@ func (i *Ingress) handleTCP(conn net.Conn) {
 		return
 	}
 	i.logAcceptedSession("tcp", target, request, token)
-	i.pipeTCP(conn, reader, upstream)
+	stats := i.pipeTCP(conn, reader, upstream)
+	i.logFinishedSession("tcp", target, request, token, stats)
 }
 
 func (i *Ingress) readUDP() {
@@ -306,7 +307,14 @@ func acceptedNativeNodeIDs(info *panel.NodeInfo) map[string]struct{} {
 	return accepted
 }
 
-func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream net.Conn) {
+type pipeStats struct {
+	clientToTargetBytes int64
+	targetToClientBytes int64
+	clientToTargetErr   error
+	targetToClientErr   error
+}
+
+func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream net.Conn) pipeStats {
 	var closeOnce sync.Once
 	closeBoth := func() {
 		closeOnce.Do(func() {
@@ -316,18 +324,20 @@ func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream 
 	}
 
 	var wg sync.WaitGroup
+	var stats pipeStats
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(upstream, clientReader)
+		stats.clientToTargetBytes, stats.clientToTargetErr = io.Copy(upstream, clientReader)
 		closeBoth()
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(client, upstream)
+		stats.targetToClientBytes, stats.targetToClientErr = io.Copy(client, upstream)
 		closeBoth()
 	}()
 	wg.Wait()
+	return stats
 }
 
 func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request connectRequest, token *panel.TransportTokenVerifyResult) {
@@ -367,6 +377,29 @@ func (i *Ingress) logAcceptedSession(network string, target string, request conn
 		fields["device_uuid"] = token.DeviceUUID
 	}
 	log.WithFields(fields).Info("SNTP native session accepted")
+}
+
+func (i *Ingress) logFinishedSession(network string, target string, request connectRequest, token *panel.TransportTokenVerifyResult, stats pipeStats) {
+	fields := log.Fields{
+		"tag":                    i.tag,
+		"network":                network,
+		"target":                 target,
+		"request_node":           request.NodeID,
+		"client_to_target_bytes": stats.clientToTargetBytes,
+		"target_to_client_bytes": stats.targetToClientBytes,
+	}
+	if token != nil {
+		fields["auth_node"] = token.NodeID
+		fields["uid"] = token.UID
+		fields["device_uuid"] = token.DeviceUUID
+	}
+	if stats.clientToTargetErr != nil {
+		fields["client_to_target_err"] = stats.clientToTargetErr.Error()
+	}
+	if stats.targetToClientErr != nil {
+		fields["target_to_client_err"] = stats.targetToClientErr.Error()
+	}
+	log.WithFields(fields).Info("SNTP native session finished")
 }
 
 func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream *net.UDPConn) {
