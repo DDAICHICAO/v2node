@@ -255,9 +255,14 @@ func buildSSUsers(tag string, userInfo []panel.UserInfo, cypher string, serverKe
 
 func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey string) (user *protocol.User) {
 	if serverKey == "" {
+		cipher, isSntpCipher := normalizeShadowsocksCipher(cypher)
+		password := userInfo.Uuid
+		if isSntpCipher {
+			password = deriveSntpShadowsocksPassword(password)
+		}
 		ssAccount := &shadowsocks.Account{
-			Password:   userInfo.Uuid,
-			CipherType: getCipherFromString(cypher),
+			Password:   password,
+			CipherType: getCipherFromString(cipher),
 		}
 		return &protocol.User{
 			Level:   0,
@@ -287,7 +292,7 @@ func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey 
 
 func getCipherFromString(c string) shadowsocks.CipherType {
 	switch strings.ToLower(c) {
-	case "aes-128-gcm", "aead_aes_128_gcm":
+	case "aes-128-gcm", "aead_aes_128_gcm", sntpShadowsocksCipherAES128GCM:
 		return shadowsocks.CipherType_AES_128_GCM
 	case "aes-256-gcm", "aead_aes_256_gcm":
 		return shadowsocks.CipherType_AES_256_GCM

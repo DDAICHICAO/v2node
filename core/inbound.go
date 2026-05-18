@@ -385,8 +385,9 @@ type ShadowsocksHTTPNetworkSettings struct {
 func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "shadowsocks"
 	s := nodeInfo.Common
+	cipher, isSntpCipher := normalizeShadowsocksCipher(s.Cipher)
 	settings := &coreConf.ShadowsocksServerConfig{
-		Cipher: s.Cipher,
+		Cipher: cipher,
 	}
 	p := make([]byte, 32)
 	_, err := rand.Read(p)
@@ -394,11 +395,12 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 		return fmt.Errorf("generate random password error: %s", err)
 	}
 	randomPasswd := hex.EncodeToString(p)
-	cipher := s.Cipher
 	if s.ServerKey != "" {
 		settings.Password = s.ServerKey
 		randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
 		cipher = ""
+	} else if isSntpCipher {
+		randomPasswd = deriveSntpShadowsocksPassword(randomPasswd)
 	}
 	defaultSSuser := &coreConf.ShadowsocksUserConfig{
 		Cipher:   cipher,
