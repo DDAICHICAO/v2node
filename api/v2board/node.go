@@ -168,9 +168,6 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":
 		node.Type = cm.Protocol
 		node.Security = cm.Tls
-	case "sntp-native":
-		node.Type = cm.Protocol
-		node.Security = cm.Tls
 	case "shadowsocks":
 		node.Type = cm.Protocol
 		node.Security = 0

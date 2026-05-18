@@ -21,11 +21,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
 	var userTraffic []panel.UserTraffic
-	if c.isNativeNode() && c.nativeIngress != nil {
-		userTraffic = c.nativeIngress.GetUserTrafficSlice(reportmin)
-	} else {
-		userTraffic, _ = c.server.GetUserTrafficSlice(c.tag, reportmin)
-	}
+	userTraffic, _ = c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {

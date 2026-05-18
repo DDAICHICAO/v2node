@@ -23,7 +23,6 @@ var deviceLimitCapabilities = []string{
 	"device_alive_report",
 	"device_limit_by_uuid",
 	"stream_unlock_test",
-	"sntp_native_ingress",
 }
 
 type Client struct {
