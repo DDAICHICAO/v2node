@@ -410,29 +410,43 @@ type pipeStats struct {
 }
 
 func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream net.Conn) pipeStats {
-	var closeOnce sync.Once
-	closeBoth := func() {
-		closeOnce.Do(func() {
-			_ = client.Close()
-			_ = upstream.Close()
-		})
-	}
-
 	var wg sync.WaitGroup
 	var stats pipeStats
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		stats.clientToTargetBytes, stats.clientToTargetErr = io.Copy(upstream, clientReader)
-		closeBoth()
+		closeWrite(upstream)
 	}()
 	go func() {
 		defer wg.Done()
 		stats.targetToClientBytes, stats.targetToClientErr = io.Copy(client, upstream)
-		closeBoth()
+		closeWrite(client)
 	}()
 	wg.Wait()
+	_ = client.Close()
+	_ = upstream.Close()
+	stats.clientToTargetErr = cleanPipeError(stats.clientToTargetErr)
+	stats.targetToClientErr = cleanPipeError(stats.targetToClientErr)
 	return stats
+}
+
+func closeWrite(conn net.Conn) {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.CloseWrite()
+		return
+	}
+	_ = conn.Close()
+}
+
+func cleanPipeError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "use of closed network connection") {
+		return nil
+	}
+	return err
 }
 
 func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request connectRequest, token *panel.TransportTokenVerifyResult) {
