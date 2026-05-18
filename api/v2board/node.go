@@ -38,16 +38,15 @@ type CommonNode struct {
 	Routes     []Route     `json:"routes"`
 	BaseConfig *BaseConfig `json:"base_config"`
 	//vless vmess trojan
-	Tls                   int         `json:"tls"`
-	TlsSettings           TlsSettings `json:"tls_settings"`
-	CertInfo              *CertInfo
-	Network               string          `json:"network"`
-	NetworkSettings       json.RawMessage `json:"network_settings"`
-	Encryption            string          `json:"encryption"`
-	EncryptionSettings    EncSettings     `json:"encryption_settings"`
-	ServerName            string          `json:"server_name"`
-	Flow                  string          `json:"flow"`
-	NativeAcceptedNodeIDs []string        `json:"native_accepted_node_ids"`
+	Tls                int         `json:"tls"`
+	TlsSettings        TlsSettings `json:"tls_settings"`
+	CertInfo           *CertInfo
+	Network            string          `json:"network"`
+	NetworkSettings    json.RawMessage `json:"network_settings"`
+	Encryption         string          `json:"encryption"`
+	EncryptionSettings EncSettings     `json:"encryption_settings"`
+	ServerName         string          `json:"server_name"`
+	Flow               string          `json:"flow"`
 	//shadowsocks
 	Cipher    string `json:"cipher"`
 	ServerKey string `json:"server_key"`
@@ -115,6 +114,7 @@ type EncSettings struct {
 	Ticket        string `json:"ticket"`
 	ServerPadding string `json:"server_padding"`
 	PrivateKey    string `json:"private_key"`
+	PublicKey     string `json:"public_key"`
 }
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
@@ -165,7 +165,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		return nil, fmt.Errorf("decode node params error: %s; body=%s", err, bodySnippet(r.Body()))
 	}
 	switch cm.Protocol {
-	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":
+	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless", "sntp-eclipse":
 		node.Type = cm.Protocol
 		node.Security = cm.Tls
 	case "shadowsocks":

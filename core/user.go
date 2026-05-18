@@ -43,6 +43,15 @@ func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
+	if server, ok := vc.eclipse[tag]; ok {
+		vc.users.mapLock.Lock()
+		for i := range users {
+			delete(vc.users.uidMap, format.UserTag(tag, users[i].Uuid))
+		}
+		vc.users.mapLock.Unlock()
+		server.DelUsers(users)
+		return nil
+	}
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
@@ -91,46 +100,20 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 	uidOrder := make([]int, 0)
 	vc.users.mapLock.RLock()
 	defer vc.users.mapLock.RUnlock()
+	if server, ok := vc.eclipse[tag]; ok {
+		collectTrafficCounters(
+			server.counter,
+			vc.users.uidMap,
+			trafficByUID,
+			countersByUID,
+			&uidOrder,
+		)
+		return flushTrafficCounters(trafficByUID, countersByUID, uidOrder, mintraffic), nil
+	}
 	if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 		c := v.(*counter.TrafficCounter)
-		c.Counters.Range(func(key, value interface{}) bool {
-			email := key.(string)
-			traffic := value.(*counter.TrafficStorage)
-			up := traffic.UpCounter.Load()
-			down := traffic.DownCounter.Load()
-			if vc.users.uidMap[email] == 0 {
-				c.Delete(email)
-				return true
-			}
-			if up+down > 0 {
-				uid := vc.users.uidMap[email]
-				if existing, ok := trafficByUID[uid]; ok {
-					existing.Upload += up
-					existing.Download += down
-				} else {
-					trafficByUID[uid] = &panel.UserTraffic{
-						UID:      uid,
-						Upload:   up,
-						Download: down,
-					}
-					uidOrder = append(uidOrder, uid)
-				}
-				countersByUID[uid] = append(countersByUID[uid], traffic)
-			}
-			return true
-		})
-		minBytes := int64(mintraffic * 1000)
-		for _, uid := range uidOrder {
-			traffic := trafficByUID[uid]
-			if traffic.Upload+traffic.Download <= minBytes {
-				continue
-			}
-			for _, storage := range countersByUID[uid] {
-				storage.UpCounter.Store(0)
-				storage.DownCounter.Store(0)
-			}
-			trafficSlice = append(trafficSlice, *traffic)
-		}
+		collectTrafficCounters(c, vc.users.uidMap, trafficByUID, countersByUID, &uidOrder)
+		trafficSlice = flushTrafficCounters(trafficByUID, countersByUID, uidOrder, mintraffic)
 		if len(trafficSlice) == 0 {
 			return nil, nil
 		}
@@ -144,6 +127,10 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	defer v.users.mapLock.Unlock()
 	for i := range p.Users {
 		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
+	}
+	if server, ok := v.eclipse[p.Tag]; ok {
+		server.AddUsers(p.Users)
+		return len(p.Users), nil
 	}
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
@@ -184,6 +171,63 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 		}
 	}
 	return len(users), nil
+}
+
+func collectTrafficCounters(
+	c *counter.TrafficCounter,
+	uidMap map[string]int,
+	trafficByUID map[int]*panel.UserTraffic,
+	countersByUID map[int][]*counter.TrafficStorage,
+	uidOrder *[]int,
+) {
+	c.Counters.Range(func(key, value interface{}) bool {
+		email := key.(string)
+		traffic := value.(*counter.TrafficStorage)
+		up := traffic.UpCounter.Load()
+		down := traffic.DownCounter.Load()
+		uid := uidMap[email]
+		if uid == 0 {
+			c.Delete(email)
+			return true
+		}
+		if up+down > 0 {
+			if existing, ok := trafficByUID[uid]; ok {
+				existing.Upload += up
+				existing.Download += down
+			} else {
+				trafficByUID[uid] = &panel.UserTraffic{
+					UID:      uid,
+					Upload:   up,
+					Download: down,
+				}
+				*uidOrder = append(*uidOrder, uid)
+			}
+			countersByUID[uid] = append(countersByUID[uid], traffic)
+		}
+		return true
+	})
+}
+
+func flushTrafficCounters(
+	trafficByUID map[int]*panel.UserTraffic,
+	countersByUID map[int][]*counter.TrafficStorage,
+	uidOrder []int,
+	mintraffic int,
+) []panel.UserTraffic {
+	trafficSlice := make([]panel.UserTraffic, 0)
+	minBytes := int64(mintraffic * 1000)
+	for _, uid := range uidOrder {
+		traffic := trafficByUID[uid]
+		if traffic.Upload+traffic.Download <= minBytes {
+			continue
+		}
+		for _, storage := range countersByUID[uid] {
+			storage.UpCounter.Store(0)
+			storage.DownCounter.Store(0)
+		}
+		trafficSlice = append(trafficSlice, *traffic)
+	}
+	return trafficSlice
 }
 
 func buildVmessUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
@@ -255,14 +299,9 @@ func buildSSUsers(tag string, userInfo []panel.UserInfo, cypher string, serverKe
 
 func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey string) (user *protocol.User) {
 	if serverKey == "" {
-		cipher, isSntpCipher := normalizeShadowsocksCipher(cypher)
-		password := userInfo.Uuid
-		if isSntpCipher {
-			password = deriveSntpShadowsocksPassword(password)
-		}
 		ssAccount := &shadowsocks.Account{
-			Password:   password,
-			CipherType: getCipherFromString(cipher),
+			Password:   userInfo.Uuid,
+			CipherType: getCipherFromString(cypher),
 		}
 		return &protocol.User{
 			Level:   0,
@@ -292,7 +331,7 @@ func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey 
 
 func getCipherFromString(c string) shadowsocks.CipherType {
 	switch strings.ToLower(c) {
-	case "aes-128-gcm", "aead_aes_128_gcm", sntpShadowsocksCipherAES128GCM:
+	case "aes-128-gcm", "aead_aes_128_gcm":
 		return shadowsocks.CipherType_AES_128_GCM
 	case "aes-256-gcm", "aead_aes_256_gcm":
 		return shadowsocks.CipherType_AES_256_GCM

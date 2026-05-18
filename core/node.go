@@ -7,6 +7,20 @@ import (
 )
 
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
+	if isSntpEclipseNode(info) {
+		if v.eclipse == nil {
+			v.eclipse = make(map[string]*SntpEclipseServer)
+		}
+		server, err := newSntpEclipseServer(tag, info)
+		if err != nil {
+			return err
+		}
+		if err := server.Start(); err != nil {
+			return err
+		}
+		v.eclipse[tag] = server
+		return nil
+	}
 	inBoundConfig, err := buildInbound(info, tag)
 	if err != nil {
 		return fmt.Errorf("build inbound error: %s", err)
@@ -19,6 +33,10 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 }
 
 func (v *V2Core) DelNode(tag string) error {
+	if server, ok := v.eclipse[tag]; ok {
+		delete(v.eclipse, tag)
+		return server.Close()
+	}
 	err := v.removeInbound(tag)
 	if err != nil {
 		return fmt.Errorf("remove in error: %s", err)
