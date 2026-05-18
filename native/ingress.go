@@ -133,14 +133,15 @@ func (i *Ingress) handleTCP(conn net.Conn) {
 		log.WithFields(log.Fields{"tag": i.tag, "err": err}).Debug("SNTP native bad tcp request")
 		return
 	}
-	if err := i.verifyToken(request); err != nil {
+	token, err := i.verifyToken(request)
+	if err != nil {
 		i.writeError(conn, "AUTH_FAILED")
 		log.WithFields(log.Fields{"tag": i.tag, "err": err}).Warn("SNTP native token verify failed")
 		return
 	}
 
 	if request.Network == "udp" {
-		i.handleUDPSession(conn, reader, request)
+		i.handleUDPSession(conn, reader, request, token)
 		return
 	}
 
@@ -158,6 +159,7 @@ func (i *Ingress) handleTCP(conn net.Conn) {
 	if _, err := conn.Write([]byte("SNTP_NATIVE_V1 OK\n")); err != nil {
 		return
 	}
+	i.logAcceptedSession("tcp", target, request, token)
 	i.pipeTCP(conn, reader, upstream)
 }
 
@@ -258,20 +260,20 @@ func validateConnectRequest(request connectRequest) error {
 	return nil
 }
 
-func (i *Ingress) verifyToken(request connectRequest) error {
+func (i *Ingress) verifyToken(request connectRequest) (*panel.TransportTokenVerifyResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	result, err := i.verifier.VerifyTransportToken(ctx, request.AccessToken)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if result == nil || !result.Valid {
 		code := "UNKNOWN"
 		if result != nil {
 			code = result.Code
 		}
-		return fmt.Errorf("panel rejected token: %s", code)
+		return nil, fmt.Errorf("panel rejected token: %s", code)
 	}
 	if request.NodeID != "" && result.NodeID != "" && request.NodeID != result.NodeID {
 		log.WithFields(log.Fields{
@@ -282,10 +284,10 @@ func (i *Ingress) verifyToken(request connectRequest) error {
 	}
 	if result.NodeID != "" && len(i.acceptedNodeIDs) > 0 {
 		if _, ok := i.acceptedNodeIDs[result.NodeID]; !ok {
-			return fmt.Errorf("node not accepted by this ingress: %s", result.NodeID)
+			return nil, fmt.Errorf("node not accepted by this ingress: %s", result.NodeID)
 		}
 	}
-	return nil
+	return result, nil
 }
 
 func acceptedNativeNodeIDs(info *panel.NodeInfo) map[string]struct{} {
@@ -328,7 +330,7 @@ func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream 
 	wg.Wait()
 }
 
-func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request connectRequest) {
+func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request connectRequest, token *panel.TransportTokenVerifyResult) {
 	target := net.JoinHostPort(request.Host, strconv.Itoa(request.Port))
 	udpAddr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
@@ -348,7 +350,23 @@ func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request 
 	if _, err := conn.Write([]byte("SNTP_NATIVE_V1 OK\n")); err != nil {
 		return
 	}
+	i.logAcceptedSession("udp", target, request, token)
 	i.pipeUDP(conn, reader, upstream)
+}
+
+func (i *Ingress) logAcceptedSession(network string, target string, request connectRequest, token *panel.TransportTokenVerifyResult) {
+	fields := log.Fields{
+		"tag":          i.tag,
+		"network":      network,
+		"target":       target,
+		"request_node": request.NodeID,
+	}
+	if token != nil {
+		fields["auth_node"] = token.NodeID
+		fields["uid"] = token.UID
+		fields["device_uuid"] = token.DeviceUUID
+	}
+	log.WithFields(fields).Info("SNTP native session accepted")
 }
 
 func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream *net.UDPConn) {
