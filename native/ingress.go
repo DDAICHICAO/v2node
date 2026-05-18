@@ -3,15 +3,20 @@ package native
 import (
 	"bufio"
 	"context"
+	crand "crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"math/rand"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,29 +195,73 @@ func listenTCP(address string, info *panel.NodeInfo) (net.Listener, error) {
 		return net.Listen("tcp", address)
 	}
 
-	certInfo := info.Common.CertInfo
-	if certInfo == nil || certInfo.CertFile == "" || certInfo.KeyFile == "" {
-		log.WithField("listen", address).Warn("SNTP native TLS requested without cert files; falling back to plain TCP")
-		return net.Listen("tcp", address)
-	}
-	if _, err := os.Stat(certInfo.CertFile); err != nil {
-		log.WithFields(log.Fields{"listen": address, "cert": certInfo.CertFile, "err": err}).Warn("SNTP native cert missing; falling back to plain TCP")
-		return net.Listen("tcp", address)
-	}
-	if _, err := os.Stat(certInfo.KeyFile); err != nil {
-		log.WithFields(log.Fields{"listen": address, "key": certInfo.KeyFile, "err": err}).Warn("SNTP native key missing; falling back to plain TCP")
-		return net.Listen("tcp", address)
-	}
-
-	cert, err := tls.LoadX509KeyPair(certInfo.CertFile, certInfo.KeyFile)
+	cert, err := loadTLSCertificate(address, info)
 	if err != nil {
-		return nil, fmt.Errorf("load tls cert: %w", err)
+		return nil, err
 	}
 	return tls.Listen("tcp", address, &tls.Config{
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{"sntp-native/1"},
 	})
+}
+
+func loadTLSCertificate(address string, info *panel.NodeInfo) (tls.Certificate, error) {
+	if info != nil && info.Common != nil && info.Common.CertInfo != nil {
+		certInfo := info.Common.CertInfo
+		if certInfo.CertFile != "" && certInfo.KeyFile != "" {
+			cert, err := tls.LoadX509KeyPair(certInfo.CertFile, certInfo.KeyFile)
+			if err == nil {
+				return cert, nil
+			}
+			log.WithFields(log.Fields{
+				"listen": address,
+				"cert":   certInfo.CertFile,
+				"key":    certInfo.KeyFile,
+				"err":    err,
+			}).Warn("SNTP native TLS cert load failed; using ephemeral self-signed cert")
+		}
+	}
+
+	log.WithField("listen", address).Warn("SNTP native TLS cert missing; using ephemeral self-signed cert")
+	cert, err := generateSelfSignedCertificate()
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate tls cert: %w", err)
+	}
+	return cert, nil
+}
+
+func generateSelfSignedCertificate() (tls.Certificate, error) {
+	key, err := rsa.GenerateKey(crand.Reader, 2048)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := crand.Int(crand.Reader, serialLimit)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	now := time.Now()
+	template := x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName: "sntp-native.local",
+		},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"sntp-native.local"},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(crand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
 func readConnectRequest(conn net.Conn) (connectRequest, *bufio.Reader, error) {
