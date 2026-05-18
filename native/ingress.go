@@ -146,7 +146,7 @@ func (i *Ingress) handleTCP(conn net.Conn) {
 	}
 
 	target := net.JoinHostPort(request.Host, strconv.Itoa(request.Port))
-	upstream, err := net.DialTimeout("tcp", target, 15*time.Second)
+	upstream, err := dialTCPTarget(request.Host, request.Port, 15*time.Second)
 	if err != nil {
 		i.writeError(conn, "DIAL_FAILED")
 		log.WithFields(log.Fields{"tag": i.tag, "target": target, "err": err}).Debug("SNTP native target dial failed")
@@ -307,6 +307,101 @@ func acceptedNativeNodeIDs(info *panel.NodeInfo) map[string]struct{} {
 	return accepted
 }
 
+func dialTCPTarget(host string, port int, timeout time.Duration) (net.Conn, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	addrs = preferIPv4(addrs)
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no address for %s", host)
+	}
+
+	attemptTimeout := timeout / time.Duration(len(addrs))
+	if attemptTimeout < 2*time.Second {
+		attemptTimeout = 2 * time.Second
+	}
+	if attemptTimeout > 5*time.Second {
+		attemptTimeout = 5 * time.Second
+	}
+
+	var lastErr error
+	for _, addr := range addrs {
+		target := net.JoinHostPort(addr.IP.String(), strconv.Itoa(port))
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, attemptTimeout)
+		conn, err := (&net.Dialer{}).DialContext(attemptCtx, "tcp", target)
+		attemptCancel()
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("dial %s failed", host)
+}
+
+func dialUDPTarget(host string, port int, timeout time.Duration) (*net.UDPConn, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return net.DialUDP("udp", nil, &net.UDPAddr{IP: ip, Port: port})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	addrs = preferIPv4(addrs)
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no address for %s", host)
+	}
+
+	var lastErr error
+	for _, addr := range addrs {
+		conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
+			IP:   addr.IP,
+			Port: port,
+			Zone: addr.Zone,
+		})
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("dial udp %s failed", host)
+}
+
+func preferIPv4(addrs []net.IPAddr) []net.IPAddr {
+	ordered := make([]net.IPAddr, 0, len(addrs))
+	for _, addr := range addrs {
+		if addr.IP.To4() != nil {
+			ordered = append(ordered, addr)
+		}
+	}
+	for _, addr := range addrs {
+		if addr.IP.To4() == nil {
+			ordered = append(ordered, addr)
+		}
+	}
+	return ordered
+}
+
 type pipeStats struct {
 	clientToTargetBytes int64
 	targetToClientBytes int64
@@ -342,13 +437,7 @@ func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream 
 
 func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request connectRequest, token *panel.TransportTokenVerifyResult) {
 	target := net.JoinHostPort(request.Host, strconv.Itoa(request.Port))
-	udpAddr, err := net.ResolveUDPAddr("udp", target)
-	if err != nil {
-		i.writeError(conn, "UDP_RESOLVE_FAILED")
-		log.WithFields(log.Fields{"tag": i.tag, "target": target, "err": err}).Debug("SNTP native udp resolve failed")
-		return
-	}
-	upstream, err := net.DialUDP("udp", nil, udpAddr)
+	upstream, err := dialUDPTarget(request.Host, request.Port, 10*time.Second)
 	if err != nil {
 		i.writeError(conn, "UDP_DIAL_FAILED")
 		log.WithFields(log.Fields{"tag": i.tag, "target": target, "err": err}).Debug("SNTP native udp dial failed")
@@ -361,7 +450,8 @@ func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request 
 		return
 	}
 	i.logAcceptedSession("udp", target, request, token)
-	i.pipeUDP(conn, reader, upstream)
+	stats := i.pipeUDP(conn, reader, upstream)
+	i.logFinishedSession("udp", target, request, token, stats)
 }
 
 func (i *Ingress) logAcceptedSession(network string, target string, request connectRequest, token *panel.TransportTokenVerifyResult) {
@@ -402,7 +492,7 @@ func (i *Ingress) logFinishedSession(network string, target string, request conn
 	log.WithFields(fields).Info("SNTP native session finished")
 }
 
-func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream *net.UDPConn) {
+func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream *net.UDPConn) pipeStats {
 	var writeMu sync.Mutex
 	var closeOnce sync.Once
 	closeBoth := func() {
@@ -413,16 +503,20 @@ func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream 
 	}
 
 	var wg sync.WaitGroup
+	var stats pipeStats
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		for {
 			payload, err := readFrame(clientReader)
 			if err != nil {
+				stats.clientToTargetErr = err
 				closeBoth()
 				return
 			}
+			stats.clientToTargetBytes += int64(len(payload))
 			if _, err := upstream.Write(payload); err != nil {
+				stats.clientToTargetErr = err
 				closeBoth()
 				return
 			}
@@ -434,19 +528,23 @@ func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream 
 		for {
 			n, err := upstream.Read(buf)
 			if err != nil {
+				stats.targetToClientErr = err
 				closeBoth()
 				return
 			}
+			stats.targetToClientBytes += int64(n)
 			writeMu.Lock()
 			err = writeFrame(client, buf[:n])
 			writeMu.Unlock()
 			if err != nil {
+				stats.targetToClientErr = err
 				closeBoth()
 				return
 			}
 		}
 	}()
 	wg.Wait()
+	return stats
 }
 
 func readFrame(reader *bufio.Reader) ([]byte, error) {
