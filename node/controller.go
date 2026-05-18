@@ -88,7 +88,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 		}
 	}
 	if c.isNativeNode() {
-		c.nativeIngress, err = native.Start(c.tag, node)
+		c.nativeIngress, err = native.Start(c.tag, node, c.apiClient)
 		if err != nil {
 			return fmt.Errorf("start sntp-native ingress error: %s", err)
 		}

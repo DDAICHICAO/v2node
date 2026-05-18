@@ -108,7 +108,7 @@ func generateSelfSslCertificate(domain, certPath, keyPath string) error {
 		return err
 	}
 	err = pem.Encode(f, &pem.Block{
-		Type:  "EC PRIVATE KEY",
+		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
 	if err != nil {
