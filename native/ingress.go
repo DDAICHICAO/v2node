@@ -274,7 +274,11 @@ func (i *Ingress) verifyToken(request connectRequest) error {
 		return fmt.Errorf("panel rejected token: %s", code)
 	}
 	if request.NodeID != "" && result.NodeID != "" && request.NodeID != result.NodeID {
-		return fmt.Errorf("node mismatch: request=%s verified=%s", request.NodeID, result.NodeID)
+		log.WithFields(log.Fields{
+			"tag":      i.tag,
+			"request":  request.NodeID,
+			"verified": result.NodeID,
+		}).Debug("SNTP native logical node differs from verified auth node")
 	}
 	if result.NodeID != "" && len(i.acceptedNodeIDs) > 0 {
 		if _, ok := i.acceptedNodeIDs[result.NodeID]; !ok {
