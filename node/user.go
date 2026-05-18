@@ -20,7 +20,12 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
-	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
+	var userTraffic []panel.UserTraffic
+	if c.isNativeNode() && c.nativeIngress != nil {
+		userTraffic = c.nativeIngress.GetUserTrafficSlice(reportmin)
+	} else {
+		userTraffic, _ = c.server.GetUserTrafficSlice(c.tag, reportmin)
+	}
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {

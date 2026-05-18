@@ -39,6 +39,8 @@ type Ingress struct {
 	done            chan struct{}
 	closeMu         sync.Once
 	wg              sync.WaitGroup
+	trafficMu       sync.Mutex
+	trafficByUID    map[int]*trafficStats
 }
 
 type connectRequest struct {
@@ -89,6 +91,7 @@ func Start(tag string, info *panel.NodeInfo, verifier TokenVerifier) (*Ingress, 
 		tcp:             tcp,
 		udp:             udp,
 		done:            make(chan struct{}),
+		trafficByUID:    make(map[int]*trafficStats),
 	}
 	ingress.wg.Add(2)
 	go ingress.acceptTCP()
@@ -168,7 +171,7 @@ func (i *Ingress) handleTCP(conn net.Conn) {
 		return
 	}
 	i.logAcceptedSession("tcp", target, upstream.RemoteAddr().String(), request, token)
-	stats := i.pipeTCP(conn, reader, upstream)
+	stats := i.pipeTCP(conn, reader, upstream, token)
 	i.logFinishedSession("tcp", target, request, token, stats)
 }
 
@@ -467,18 +470,23 @@ type pipeStats struct {
 	targetToClientErr   error
 }
 
-func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream net.Conn) pipeStats {
+type trafficStats struct {
+	upload   int64
+	download int64
+}
+
+func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream net.Conn, token *panel.TransportTokenVerifyResult) pipeStats {
 	var wg sync.WaitGroup
 	var stats pipeStats
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stats.clientToTargetBytes, stats.clientToTargetErr = io.Copy(upstream, clientReader)
+		stats.clientToTargetBytes, stats.clientToTargetErr = i.copyAndRecord(upstream, clientReader, token, true)
 		closeWrite(upstream)
 	}()
 	go func() {
 		defer wg.Done()
-		stats.targetToClientBytes, stats.targetToClientErr = io.Copy(client, upstream)
+		stats.targetToClientBytes, stats.targetToClientErr = i.copyAndRecord(client, upstream, token, false)
 		closeWrite(client)
 	}()
 	wg.Wait()
@@ -487,6 +495,80 @@ func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream 
 	stats.clientToTargetErr = cleanPipeError(stats.clientToTargetErr)
 	stats.targetToClientErr = cleanPipeError(stats.targetToClientErr)
 	return stats
+}
+
+func (i *Ingress) copyAndRecord(dst io.Writer, src io.Reader, token *panel.TransportTokenVerifyResult, upload bool) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+				if upload {
+					i.recordSessionBytes(token, int64(nw), 0)
+				} else {
+					i.recordSessionBytes(token, 0, int64(nw))
+				}
+			}
+			if ew != nil {
+				return written, ew
+			}
+			if nw != nr {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return written, nil
+			}
+			return written, er
+		}
+	}
+}
+
+func (i *Ingress) GetUserTrafficSlice(mintraffic int) []panel.UserTraffic {
+	i.trafficMu.Lock()
+	defer i.trafficMu.Unlock()
+
+	if len(i.trafficByUID) == 0 {
+		return nil
+	}
+
+	minBytes := int64(mintraffic * 1000)
+	trafficSlice := make([]panel.UserTraffic, 0, len(i.trafficByUID))
+	for uid, traffic := range i.trafficByUID {
+		total := traffic.upload + traffic.download
+		if total <= minBytes {
+			continue
+		}
+		trafficSlice = append(trafficSlice, panel.UserTraffic{
+			UID:      uid,
+			Upload:   traffic.upload,
+			Download: traffic.download,
+		})
+		delete(i.trafficByUID, uid)
+	}
+	if len(trafficSlice) == 0 {
+		return nil
+	}
+	return trafficSlice
+}
+
+func (i *Ingress) recordTraffic(uid int, upload int64, download int64) {
+	if uid <= 0 || upload+download <= 0 {
+		return
+	}
+	i.trafficMu.Lock()
+	defer i.trafficMu.Unlock()
+	traffic := i.trafficByUID[uid]
+	if traffic == nil {
+		traffic = &trafficStats{}
+		i.trafficByUID[uid] = traffic
+	}
+	traffic.upload += upload
+	traffic.download += download
 }
 
 func prepareTCPConn(conn net.Conn) {
@@ -534,7 +616,7 @@ func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request 
 		return
 	}
 	i.logAcceptedSession("udp", target, upstream.RemoteAddr().String(), request, token)
-	stats := i.pipeUDP(conn, reader, upstream)
+	stats := i.pipeUDP(conn, reader, upstream, token)
 	i.logFinishedSession("udp", target, request, token, stats)
 }
 
@@ -577,7 +659,14 @@ func (i *Ingress) logFinishedSession(network string, target string, request conn
 	log.WithFields(fields).Info("SNTP native session finished")
 }
 
-func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream *net.UDPConn) pipeStats {
+func (i *Ingress) recordSessionBytes(token *panel.TransportTokenVerifyResult, upload int64, download int64) {
+	if token == nil {
+		return
+	}
+	i.recordTraffic(token.UID, upload, download)
+}
+
+func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream *net.UDPConn, token *panel.TransportTokenVerifyResult) pipeStats {
 	var writeMu sync.Mutex
 	var closeOnce sync.Once
 	closeBoth := func() {
@@ -600,6 +689,7 @@ func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream 
 				return
 			}
 			stats.clientToTargetBytes += int64(len(payload))
+			i.recordSessionBytes(token, int64(len(payload)), 0)
 			if _, err := upstream.Write(payload); err != nil {
 				stats.clientToTargetErr = err
 				closeBoth()
@@ -618,6 +708,7 @@ func (i *Ingress) pipeUDP(client net.Conn, clientReader *bufio.Reader, upstream 
 				return
 			}
 			stats.targetToClientBytes += int64(n)
+			i.recordSessionBytes(token, 0, int64(n))
 			writeMu.Lock()
 			err = writeFrame(client, buf[:n])
 			writeMu.Unlock()
