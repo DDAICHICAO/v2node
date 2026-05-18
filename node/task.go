@@ -133,6 +133,14 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 	deleted, added, modified := compareUserList(c.userList, newU)
+	if c.isNativeNode() {
+		if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
+			c.limiter.UpdateUser(c.tag, added, deleted, modified)
+			c.userList = newU
+		}
+		log.WithField("tag", c.tag).Infof("%d native user deleted, %d native user added, %d native user modified", len(deleted), len(added), len(modified))
+		return nil
+	}
 	if len(deleted) > 0 {
 		// have deleted users
 		err = c.server.DelUsers(deleted, c.tag, c.info)

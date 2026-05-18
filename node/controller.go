@@ -12,6 +12,7 @@ import (
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
 	"github.com/wyx2685/v2node/limiter"
+	"github.com/wyx2685/v2node/native"
 )
 
 type Controller struct {
@@ -28,6 +29,7 @@ type Controller struct {
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
+	nativeIngress           *native.Ingress
 }
 
 // NewController return a Node controller with default parameters.
@@ -85,6 +87,16 @@ func (c *Controller) Start(x *core.V2Core) error {
 			return fmt.Errorf("request cert error: %s", err)
 		}
 	}
+	if c.isNativeNode() {
+		c.nativeIngress, err = native.Start(c.tag, node)
+		if err != nil {
+			return fmt.Errorf("start sntp-native ingress error: %s", err)
+		}
+		log.WithField("tag", c.tag).Infof("Loaded %d users for sntp-native ingress", len(c.userList))
+		c.info = node
+		c.startTasks(node)
+		return nil
+	}
 	// Add new tag
 	err = c.server.AddNode(c.tag, node)
 	if err != nil {
@@ -117,6 +129,10 @@ func (c *Controller) supportsDeviceLimitByUUID() bool {
 		c.info.Common.BaseConfig.DeviceLimitByUUID
 }
 
+func (c *Controller) isNativeNode() bool {
+	return c.info != nil && c.info.Type == "sntp-native"
+}
+
 func (c *Controller) supportsDeviceAliveReport() bool {
 	return c.info != nil &&
 		c.info.Common != nil &&
@@ -135,6 +151,9 @@ func (c *Controller) Close() error {
 	}
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
+	}
+	if c.nativeIngress != nil {
+		return c.nativeIngress.Close()
 	}
 	err := c.server.DelNode(c.tag)
 	if err != nil {
