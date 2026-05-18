@@ -209,6 +209,13 @@ func listenTCP(address string, info *panel.NodeInfo) (net.Listener, error) {
 
 func readConnectRequest(conn net.Conn) (connectRequest, *bufio.Reader, error) {
 	reader := bufio.NewReaderSize(conn, 64*1024)
+	first, err := reader.Peek(1)
+	if err != nil {
+		return connectRequest{}, reader, err
+	}
+	if len(first) != 1 || first[0] != 'S' {
+		return connectRequest{}, reader, errors.New("invalid protocol prefix")
+	}
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return connectRequest{}, reader, err
