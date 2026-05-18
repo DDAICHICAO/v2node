@@ -25,13 +25,14 @@ type TokenVerifier interface {
 }
 
 type Ingress struct {
-	tag      string
-	verifier TokenVerifier
-	tcp      net.Listener
-	udp      *net.UDPConn
-	done     chan struct{}
-	closeMu  sync.Once
-	wg       sync.WaitGroup
+	tag             string
+	verifier        TokenVerifier
+	acceptedNodeIDs map[string]struct{}
+	tcp             net.Listener
+	udp             *net.UDPConn
+	done            chan struct{}
+	closeMu         sync.Once
+	wg              sync.WaitGroup
 }
 
 type connectRequest struct {
@@ -76,11 +77,12 @@ func Start(tag string, info *panel.NodeInfo, verifier TokenVerifier) (*Ingress, 
 	}
 
 	ingress := &Ingress{
-		tag:      tag,
-		verifier: verifier,
-		tcp:      tcp,
-		udp:      udp,
-		done:     make(chan struct{}),
+		tag:             tag,
+		verifier:        verifier,
+		acceptedNodeIDs: acceptedNativeNodeIDs(info),
+		tcp:             tcp,
+		udp:             udp,
+		done:            make(chan struct{}),
 	}
 	ingress.wg.Add(2)
 	go ingress.acceptTCP()
@@ -274,7 +276,28 @@ func (i *Ingress) verifyToken(request connectRequest) error {
 	if request.NodeID != "" && result.NodeID != "" && request.NodeID != result.NodeID {
 		return fmt.Errorf("node mismatch: request=%s verified=%s", request.NodeID, result.NodeID)
 	}
+	if result.NodeID != "" && len(i.acceptedNodeIDs) > 0 {
+		if _, ok := i.acceptedNodeIDs[result.NodeID]; !ok {
+			return fmt.Errorf("node not accepted by this ingress: %s", result.NodeID)
+		}
+	}
 	return nil
+}
+
+func acceptedNativeNodeIDs(info *panel.NodeInfo) map[string]struct{} {
+	accepted := make(map[string]struct{})
+	if info != nil && info.Common != nil {
+		for _, id := range info.Common.NativeAcceptedNodeIDs {
+			id = strings.ToLower(strings.TrimSpace(id))
+			if id != "" {
+				accepted[id] = struct{}{}
+			}
+		}
+	}
+	if len(accepted) == 0 && info != nil && info.Id > 0 {
+		accepted[fmt.Sprintf("v2node-%d", info.Id)] = struct{}{}
+	}
+	return accepted
 }
 
 func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream net.Conn) {

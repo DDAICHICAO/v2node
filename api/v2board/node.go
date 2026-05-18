@@ -38,15 +38,16 @@ type CommonNode struct {
 	Routes     []Route     `json:"routes"`
 	BaseConfig *BaseConfig `json:"base_config"`
 	//vless vmess trojan
-	Tls                int         `json:"tls"`
-	TlsSettings        TlsSettings `json:"tls_settings"`
-	CertInfo           *CertInfo
-	Network            string          `json:"network"`
-	NetworkSettings    json.RawMessage `json:"network_settings"`
-	Encryption         string          `json:"encryption"`
-	EncryptionSettings EncSettings     `json:"encryption_settings"`
-	ServerName         string          `json:"server_name"`
-	Flow               string          `json:"flow"`
+	Tls                   int         `json:"tls"`
+	TlsSettings           TlsSettings `json:"tls_settings"`
+	CertInfo              *CertInfo
+	Network               string          `json:"network"`
+	NetworkSettings       json.RawMessage `json:"network_settings"`
+	Encryption            string          `json:"encryption"`
+	EncryptionSettings    EncSettings     `json:"encryption_settings"`
+	ServerName            string          `json:"server_name"`
+	Flow                  string          `json:"flow"`
+	NativeAcceptedNodeIDs []string        `json:"native_accepted_node_ids"`
 	//shadowsocks
 	Cipher    string `json:"cipher"`
 	ServerKey string `json:"server_key"`

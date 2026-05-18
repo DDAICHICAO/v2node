@@ -27,15 +27,16 @@ var deviceLimitCapabilities = []string{
 }
 
 type Client struct {
-	client           *resty.Client
-	APIHost          string
-	Token            string
-	NodeId           int
-	nodeEtag         string
-	userEtag         string
-	responseBodyHash string
-	UserList         *UserListBody
-	AliveMap         *AliveMap
+	client                  *resty.Client
+	APIHost                 string
+	Token                   string
+	AppTransportTokenSecret string
+	NodeId                  int
+	nodeEtag                string
+	userEtag                string
+	responseBodyHash        string
+	UserList                *UserListBody
+	AliveMap                *AliveMap
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
@@ -73,11 +74,12 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	queryParams["capabilities"] = strings.Join(deviceLimitCapabilities, ",")
 	client.SetQueryParams(queryParams)
 	return &Client{
-		client:   client,
-		Token:    c.Key,
-		APIHost:  c.APIHost,
-		NodeId:   c.NodeID,
-		UserList: &UserListBody{},
-		AliveMap: &AliveMap{},
+		client:                  client,
+		Token:                   c.Key,
+		AppTransportTokenSecret: c.AppTransportTokenSecret,
+		APIHost:                 c.APIHost,
+		NodeId:                  c.NodeID,
+		UserList:                &UserListBody{},
+		AliveMap:                &AliveMap{},
 	}, nil
 }
