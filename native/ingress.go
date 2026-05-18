@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -125,7 +126,8 @@ func (i *Ingress) acceptTCP() {
 
 func (i *Ingress) handleTCP(conn net.Conn) {
 	defer i.wg.Done()
-	defer conn.Close()
+	prepareTCPConn(conn)
+	defer gracefulClose(conn)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	request, reader, err := readConnectRequest(conn)
 	if err != nil {
@@ -152,14 +154,15 @@ func (i *Ingress) handleTCP(conn net.Conn) {
 		log.WithFields(log.Fields{"tag": i.tag, "target": target, "err": err}).Debug("SNTP native target dial failed")
 		return
 	}
-	defer upstream.Close()
+	prepareTCPConn(upstream)
+	defer gracefulClose(upstream)
 
 	_ = conn.SetReadDeadline(time.Time{})
 	_ = upstream.SetDeadline(time.Time{})
 	if _, err := conn.Write([]byte("SNTP_NATIVE_V1 OK\n")); err != nil {
 		return
 	}
-	i.logAcceptedSession("tcp", target, request, token)
+	i.logAcceptedSession("tcp", target, upstream.RemoteAddr().String(), request, token)
 	stats := i.pipeTCP(conn, reader, upstream)
 	i.logFinishedSession("tcp", target, request, token, stats)
 }
@@ -388,17 +391,23 @@ func dialUDPTarget(host string, port int, timeout time.Duration) (*net.UDPConn, 
 }
 
 func preferIPv4(addrs []net.IPAddr) []net.IPAddr {
-	ordered := make([]net.IPAddr, 0, len(addrs))
+	ipv4 := make([]net.IPAddr, 0, len(addrs))
+	ipv6 := make([]net.IPAddr, 0, len(addrs))
 	for _, addr := range addrs {
 		if addr.IP.To4() != nil {
-			ordered = append(ordered, addr)
+			ipv4 = append(ipv4, addr)
 		}
 	}
 	for _, addr := range addrs {
 		if addr.IP.To4() == nil {
-			ordered = append(ordered, addr)
+			ipv6 = append(ipv6, addr)
 		}
 	}
+	rand.Shuffle(len(ipv4), func(i, j int) { ipv4[i], ipv4[j] = ipv4[j], ipv4[i] })
+	rand.Shuffle(len(ipv6), func(i, j int) { ipv6[i], ipv6[j] = ipv6[j], ipv6[i] })
+	ordered := make([]net.IPAddr, 0, len(addrs))
+	ordered = append(ordered, ipv4...)
+	ordered = append(ordered, ipv6...)
 	return ordered
 }
 
@@ -424,11 +433,19 @@ func (i *Ingress) pipeTCP(client net.Conn, clientReader *bufio.Reader, upstream 
 		closeWrite(client)
 	}()
 	wg.Wait()
-	_ = client.Close()
-	_ = upstream.Close()
+	gracefulClose(client)
+	gracefulClose(upstream)
 	stats.clientToTargetErr = cleanPipeError(stats.clientToTargetErr)
 	stats.targetToClientErr = cleanPipeError(stats.targetToClientErr)
 	return stats
+}
+
+func prepareTCPConn(conn net.Conn) {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(30 * time.Second)
+	}
 }
 
 func closeWrite(conn net.Conn) {
@@ -436,6 +453,10 @@ func closeWrite(conn net.Conn) {
 		_ = tcp.CloseWrite()
 		return
 	}
+	_ = conn.Close()
+}
+
+func gracefulClose(conn net.Conn) {
 	_ = conn.Close()
 }
 
@@ -463,16 +484,17 @@ func (i *Ingress) handleUDPSession(conn net.Conn, reader *bufio.Reader, request 
 	if _, err := conn.Write([]byte("SNTP_NATIVE_V1 OK\n")); err != nil {
 		return
 	}
-	i.logAcceptedSession("udp", target, request, token)
+	i.logAcceptedSession("udp", target, upstream.RemoteAddr().String(), request, token)
 	stats := i.pipeUDP(conn, reader, upstream)
 	i.logFinishedSession("udp", target, request, token, stats)
 }
 
-func (i *Ingress) logAcceptedSession(network string, target string, request connectRequest, token *panel.TransportTokenVerifyResult) {
+func (i *Ingress) logAcceptedSession(network string, target string, upstream string, request connectRequest, token *panel.TransportTokenVerifyResult) {
 	fields := log.Fields{
 		"tag":          i.tag,
 		"network":      network,
 		"target":       target,
+		"upstream":     upstream,
 		"request_node": request.NodeID,
 	}
 	if token != nil {
