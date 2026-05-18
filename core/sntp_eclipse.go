@@ -201,11 +201,24 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	clientIP := remoteIP(conn.RemoteAddr())
 	hello, c2s, s2c, err := s.readClientHello(conn)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"tag":       s.tag,
+			"client_ip": clientIP,
+			"err":       err,
+		}).Warn("SNTP Eclipse handshake failed")
 		_ = conn.Close()
 		return
 	}
 	uid, ok := s.lookupUser(hello.UUID)
 	if !ok {
+		log.WithFields(log.Fields{
+			"tag":       s.tag,
+			"client_ip": clientIP,
+			"uuid":      maskSntpEclipseText(hello.UUID),
+			"target":    hello.targetAddress(),
+			"cmd":       hello.Command,
+		}).Warn("SNTP Eclipse user not found")
+		_ = s.writeServerReply(conn, s2c, false)
 		_ = conn.Close()
 		return
 	}
@@ -213,6 +226,14 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	var bucket interface{ Wait(int64) }
 	if l, err := limiter.GetLimiter(s.tag); err == nil {
 		if b, reject := l.CheckLimit(userTag, clientIP, true); reject {
+			log.WithFields(log.Fields{
+				"tag":       s.tag,
+				"client_ip": clientIP,
+				"uid":       uid,
+				"target":    hello.targetAddress(),
+				"cmd":       hello.Command,
+			}).Warn("SNTP Eclipse user rejected by limiter")
+			_ = s.writeServerReply(conn, s2c, false)
 			_ = conn.Close()
 			return
 		} else if b != nil {
@@ -220,6 +241,13 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		}
 	}
 	if err := s.writeServerReply(conn, s2c, true); err != nil {
+		log.WithFields(log.Fields{
+			"tag":       s.tag,
+			"client_ip": clientIP,
+			"uid":       uid,
+			"target":    hello.targetAddress(),
+			"err":       err,
+		}).Warn("SNTP Eclipse reply failed")
 		_ = conn.Close()
 		return
 	}
@@ -243,6 +271,13 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	case sntpEclipseCmdUDP:
 		session.serveUDP()
 	default:
+		log.WithFields(log.Fields{
+			"tag":       s.tag,
+			"client_ip": clientIP,
+			"uid":       uid,
+			"cmd":       hello.Command,
+			"target":    hello.targetAddress(),
+		}).Warn("SNTP Eclipse unsupported command")
 		_ = conn.Close()
 	}
 }
@@ -301,6 +336,13 @@ func (s *sntpEclipseSession) serveTCP() {
 	target := net.JoinHostPort(s.hello.Target, strconv.Itoa(int(s.hello.Port)))
 	upstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "tcp", target)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"tag":       s.tag,
+			"uid":       s.uid,
+			"target":    target,
+			"client_ip": s.clientIP,
+			"err":       err,
+		}).Warn("SNTP Eclipse upstream dial failed")
 		_ = s.conn.Close()
 		return
 	}
@@ -551,6 +593,20 @@ func decodeSntpEclipseHello(plain []byte) (sntpEclipseHello, error) {
 	port := binary.BigEndian.Uint16(p[offset : offset+2])
 	timestamp := int64(binary.BigEndian.Uint64(p[2:10]))
 	return sntpEclipseHello{Command: cmd, Timestamp: timestamp, UUID: uuid, Target: target, Port: port}, nil
+}
+
+func (h sntpEclipseHello) targetAddress() string {
+	if h.Target == "" || h.Port == 0 {
+		return ""
+	}
+	return net.JoinHostPort(h.Target, strconv.Itoa(int(h.Port)))
+}
+
+func maskSntpEclipseText(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:6] + "..." + value[len(value)-6:]
 }
 
 func decodeURLBase64(value string) ([]byte, error) {
