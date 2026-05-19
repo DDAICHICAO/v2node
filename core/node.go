@@ -11,7 +11,7 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 		if v.eclipse == nil {
 			v.eclipse = make(map[string]*SntpEclipseServer)
 		}
-		server, err := newSntpEclipseServer(tag, info)
+		server, err := newSntpEclipseServer(tag, info, v.dispatcher)
 		if err != nil {
 			return err
 		}

@@ -46,7 +46,19 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 	if server, ok := vc.eclipse[tag]; ok {
 		vc.users.mapLock.Lock()
 		for i := range users {
-			delete(vc.users.uidMap, format.UserTag(tag, users[i].Uuid))
+			user := format.UserTag(tag, users[i].Uuid)
+			delete(vc.users.uidMap, user)
+			if vc.dispatcher != nil {
+				if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+					tc := v.(*counter.TrafficCounter)
+					tc.Delete(user)
+				}
+				if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
+					lm := v.(*dispatcher.LinkManager)
+					lm.CloseAll()
+					vc.dispatcher.LinkManagers.Delete(user)
+				}
+			}
 		}
 		vc.users.mapLock.Unlock()
 		server.DelUsers(users)
@@ -108,6 +120,12 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 			countersByUID,
 			&uidOrder,
 		)
+		if vc.dispatcher != nil {
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				c := v.(*counter.TrafficCounter)
+				collectTrafficCounters(c, vc.users.uidMap, trafficByUID, countersByUID, &uidOrder)
+			}
+		}
 		return flushTrafficCounters(trafficByUID, countersByUID, uidOrder, mintraffic), nil
 	}
 	if v, ok := vc.dispatcher.Counter.Load(tag); ok {

@@ -24,6 +24,15 @@ import (
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
 	"github.com/wyx2685/v2node/limiter"
+	xbuf "github.com/xtls/xray-core/common/buf"
+	xlog "github.com/xtls/xray-core/common/log"
+	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/protocol"
+	udp_proto "github.com/xtls/xray-core/common/protocol/udp"
+	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/features/routing"
+	"github.com/xtls/xray-core/transport"
+	xudp "github.com/xtls/xray-core/transport/internet/udp"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 )
@@ -59,6 +68,7 @@ type SntpEclipseServer struct {
 	acceptProxyProtocol bool
 	privateKey          *ecdh.PrivateKey
 	listener            net.Listener
+	dispatcher          routing.Dispatcher
 	counter             *counter.TrafficCounter
 	replay              *sntpEclipseReplayCache
 
@@ -87,10 +97,18 @@ type sntpEclipseSession struct {
 	tag        string
 	userTag    string
 	uid        int
-	counter    *counter.TrafficCounter
-	limit      interface{ Wait(int64) }
+	dispatcher routing.Dispatcher
 	serverName string
 	v2         bool
+	writeMu    sync.Mutex
+}
+
+type sntpEclipseFrameReader struct {
+	session *sntpEclipseSession
+}
+
+type sntpEclipseFrameWriter struct {
+	session *sntpEclipseSession
 }
 
 type sntpEclipseCipher struct {
@@ -123,9 +141,12 @@ type cipherAEAD interface {
 	Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
 }
 
-func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo) (*SntpEclipseServer, error) {
+func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, dispatcher routing.Dispatcher) (*SntpEclipseServer, error) {
 	if nodeInfo == nil || nodeInfo.Common == nil {
 		return nil, errors.New("missing node info")
+	}
+	if dispatcher == nil {
+		return nil, errors.New("missing routing dispatcher")
 	}
 	privateKeyText := strings.TrimSpace(nodeInfo.Common.EncryptionSettings.PrivateKey)
 	if privateKeyText == "" {
@@ -159,6 +180,7 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo) (*SntpEclipseSer
 		listenAddr:          listenAddr,
 		acceptProxyProtocol: acceptProxyProtocol,
 		privateKey:          privateKey,
+		dispatcher:          dispatcher,
 		counter:             counter.NewTrafficCounter(),
 		replay:              newSntpEclipseReplayCache(sntpEclipseHandshakeTTL),
 		closed:              make(chan struct{}),
@@ -280,7 +302,6 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		return
 	}
 	userTag := format.UserTag(s.tag, hello.UUID)
-	var bucket interface{ Wait(int64) }
 	if l, err := limiter.GetLimiter(s.tag); err == nil {
 		if b, reject := l.CheckLimit(userTag, clientIP, true); reject {
 			log.WithFields(log.Fields{
@@ -294,7 +315,8 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 			_ = conn.Close()
 			return
 		} else if b != nil {
-			bucket = b.Get()
+			// Keep the early limiter check before sending an accepted reply.
+			// Traffic shaping and byte counters are applied by the Xray dispatcher.
 		}
 	}
 	if err := s.writeServerReply(conn, handshake, true); err != nil {
@@ -318,8 +340,7 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		tag:        s.tag,
 		userTag:    userTag,
 		uid:        uid,
-		counter:    s.counter,
-		limit:      bucket,
+		dispatcher: s.dispatcher,
 		serverName: s.tag,
 		v2:         handshake.v2,
 	}
@@ -493,91 +514,64 @@ func (s *SntpEclipseServer) writeServerReplyV2(conn net.Conn, state *sntpEclipse
 }
 
 func (s *sntpEclipseSession) serveTCP() {
-	target := net.JoinHostPort(s.hello.Target, strconv.Itoa(int(s.hello.Port)))
-	upstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "tcp", target)
+	defer s.conn.Close()
+	destination := s.dispatchDestination(xnet.Network_TCP, s.hello.Target, s.hello.Port)
+	ctx := s.dispatchContext(destination)
+	ctx = xlog.ContextWithAccessMessage(ctx, &xlog.AccessMessage{
+		From:   s.dispatchSource(xnet.Network_TCP),
+		To:     destination,
+		Status: xlog.AccessAccepted,
+		Email:  s.userTag,
+	})
+	log.WithFields(log.Fields{
+		"tag":       s.tag,
+		"uid":       s.uid,
+		"target":    destination.NetAddr(),
+		"client_ip": s.clientIP,
+	}).Info("SNTP Eclipse TCP session accepted")
+
+	err := s.dispatcher.DispatchLink(ctx, destination, &transport.Link{
+		Reader: &sntpEclipseFrameReader{session: s},
+		Writer: &sntpEclipseFrameWriter{session: s},
+	})
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag":       s.tag,
 			"uid":       s.uid,
-			"target":    target,
+			"target":    destination.NetAddr(),
 			"client_ip": s.clientIP,
 			"err":       err,
-		}).Warn("SNTP Eclipse upstream dial failed")
-		_ = s.conn.Close()
-		return
-	}
-	log.WithFields(log.Fields{
-		"tag":       s.tag,
-		"uid":       s.uid,
-		"target":    target,
-		"client_ip": s.clientIP,
-	}).Info("SNTP Eclipse TCP session accepted")
-	defer upstream.Close()
-	defer s.conn.Close()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		defer s.conn.Close()
-		s.copyClientToTarget(upstream)
-		if tcpConn, ok := upstream.(*net.TCPConn); ok {
-			_ = tcpConn.CloseWrite()
-		} else {
-			_ = upstream.Close()
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		defer s.conn.Close()
-		s.copyTargetToClient(upstream)
-	}()
-	wg.Wait()
-}
-
-func (s *sntpEclipseSession) copyClientToTarget(dst net.Conn) {
-	for {
-		frame, err := s.readFrame(s.c2s)
-		if err != nil {
-			return
-		}
-		if len(frame) == 0 {
-			continue
-		}
-		if s.limit != nil {
-			s.limit.Wait(int64(len(frame)))
-		}
-		n, err := dst.Write(frame)
-		if n > 0 {
-			s.counter.Tx(s.userTag, n)
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
-func (s *sntpEclipseSession) copyTargetToClient(src net.Conn) {
-	buf := make([]byte, s.maxFramePayload())
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			if s.limit != nil {
-				s.limit.Wait(int64(n))
-			}
-			if werr := s.writeFrame(s.s2c, buf[:n]); werr != nil {
-				return
-			}
-			s.counter.Rx(s.userTag, n)
-		}
-		if err != nil {
-			return
-		}
+		}).Warn("SNTP Eclipse TCP dispatch failed")
 	}
 }
 
 func (s *sntpEclipseSession) serveUDP() {
+	ctx, cancel := context.WithCancel(s.dispatchContext(s.dispatchDestination(xnet.Network_UDP, s.hello.Target, s.hello.Port)))
+	defer cancel()
 	defer s.conn.Close()
+	udpServer := xudp.NewDispatcher(s.dispatcher, func(ctx context.Context, packet *udp_proto.Packet) {
+		payload := packet.Payload
+		defer payload.Release()
+		source := packet.Source
+		if payload.UDP != nil {
+			source = *payload.UDP
+		}
+		if payload.IsEmpty() {
+			return
+		}
+		if err := s.writeFrame(s.s2c, encodeSntpEclipsePacket(source.NetAddr(), payload.Bytes())); err != nil {
+			log.WithFields(log.Fields{
+				"tag":       s.tag,
+				"uid":       s.uid,
+				"target":    source.NetAddr(),
+				"client_ip": s.clientIP,
+				"err":       err,
+			}).Warn("SNTP Eclipse UDP reply failed")
+			cancel()
+		}
+	})
+	defer udpServer.RemoveRay()
+
 	for {
 		frame, err := s.readFrame(s.c2s)
 		if err != nil {
@@ -587,38 +581,112 @@ func (s *sntpEclipseSession) serveUDP() {
 		if err != nil || len(payload) == 0 {
 			continue
 		}
-		if s.limit != nil {
-			s.limit.Wait(int64(len(payload)))
-		}
-		s.counter.Tx(s.userTag, len(payload))
-		response, err := exchangeUDP(target, payload)
-		if err != nil || len(response) == 0 {
+		destination, err := parseSntpEclipseDestination(xnet.Network_UDP, target)
+		if err != nil {
 			continue
 		}
-		if s.limit != nil {
-			s.limit.Wait(int64(len(response)))
-		}
-		s.counter.Rx(s.userTag, len(response))
-		_ = s.writeFrame(s.s2c, encodeSntpEclipsePacket(target, response))
+		currentCtx := xlog.ContextWithAccessMessage(ctx, &xlog.AccessMessage{
+			From:   s.dispatchSource(xnet.Network_UDP),
+			To:     destination,
+			Status: xlog.AccessAccepted,
+			Email:  s.userTag,
+		})
+		buf := xbuf.NewWithSize(int32(len(payload)))
+		copy(buf.Extend(int32(len(payload))), payload)
+		buf.UDP = &destination
+		udpServer.Dispatch(currentCtx, destination, buf)
 	}
 }
 
-func exchangeUDP(target string, payload []byte) ([]byte, error) {
-	conn, err := net.DialTimeout("udp", target, 5*time.Second)
-	if err != nil {
-		return nil, err
+func (s *sntpEclipseSession) dispatchContext(destination xnet.Destination) context.Context {
+	source := s.dispatchSource(destination.Network)
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{
+		Source: source,
+		Tag:    s.tag,
+		Name:   sntpEclipseProtocol,
+		User: &protocol.MemoryUser{
+			Level: 0,
+			Email: s.userTag,
+		},
+		CanSpliceCopy: 3,
+	})
+	return session.ContextWithContent(ctx, &session.Content{
+		SniffingRequest: session.SniffingRequest{
+			Enabled: true,
+			OverrideDestinationForProtocol: []string{
+				"http",
+				"tls",
+				"quic",
+			},
+		},
+	})
+}
+
+func (s *sntpEclipseSession) dispatchSource(network xnet.Network) xnet.Destination {
+	address := xnet.ParseAddress(strings.TrimSpace(s.clientIP))
+	if network == xnet.Network_UDP {
+		return xnet.UDPDestination(address, 0)
 	}
-	defer conn.Close()
-	if _, err := conn.Write(payload); err != nil {
-		return nil, err
+	return xnet.TCPDestination(address, 0)
+}
+
+func (s *sntpEclipseSession) dispatchDestination(network xnet.Network, host string, port uint16) xnet.Destination {
+	address := xnet.ParseAddress(host)
+	if network == xnet.Network_UDP {
+		return xnet.UDPDestination(address, xnet.Port(port))
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 64*1024)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
+	return xnet.TCPDestination(address, xnet.Port(port))
+}
+
+func parseSntpEclipseDestination(network xnet.Network, target string) (xnet.Destination, error) {
+	prefix := "tcp:"
+	if network == xnet.Network_UDP {
+		prefix = "udp:"
 	}
-	return append([]byte(nil), buf[:n]...), nil
+	return xnet.ParseDestination(prefix + target)
+}
+
+func (r *sntpEclipseFrameReader) ReadMultiBuffer() (xbuf.MultiBuffer, error) {
+	for {
+		frame, err := r.session.readFrame(r.session.c2s)
+		if err != nil {
+			return nil, err
+		}
+		if len(frame) == 0 {
+			continue
+		}
+		return xbuf.MergeBytes(nil, frame), nil
+	}
+}
+
+func (r *sntpEclipseFrameReader) Close() error {
+	return r.session.conn.Close()
+}
+
+func (r *sntpEclipseFrameReader) Interrupt() {
+	_ = r.session.conn.Close()
+}
+
+func (w *sntpEclipseFrameWriter) WriteMultiBuffer(mb xbuf.MultiBuffer) error {
+	defer xbuf.ReleaseMulti(mb)
+	for _, b := range mb {
+		data := b.Bytes()
+		for len(data) > 0 {
+			n := len(data)
+			if maxPayload := w.session.maxFramePayload(); n > maxPayload {
+				n = maxPayload
+			}
+			if err := w.session.writeFrame(w.session.s2c, data[:n]); err != nil {
+				return err
+			}
+			data = data[n:]
+		}
+	}
+	return nil
+}
+
+func (w *sntpEclipseFrameWriter) Close() error {
+	return w.session.conn.Close()
 }
 
 func (s *sntpEclipseSession) readFrame(c *sntpEclipseCipher) ([]byte, error) {
@@ -658,6 +726,8 @@ func (s *sntpEclipseSession) writeFrame(c *sntpEclipseCipher, plain []byte) erro
 	sealed := c.Seal(plain)
 	var lenBuf [2]byte
 	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(sealed)))
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if _, err := s.conn.Write(lenBuf[:]); err != nil {
 		return err
 	}
