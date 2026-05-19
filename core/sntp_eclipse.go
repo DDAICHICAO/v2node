@@ -1,12 +1,14 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,12 +43,13 @@ const (
 )
 
 type SntpEclipseServer struct {
-	tag        string
-	nodeID     int
-	listenAddr string
-	privateKey *ecdh.PrivateKey
-	listener   net.Listener
-	counter    *counter.TrafficCounter
+	tag                 string
+	nodeID              int
+	listenAddr          string
+	acceptProxyProtocol bool
+	privateKey          *ecdh.PrivateKey
+	listener            net.Listener
+	counter             *counter.TrafficCounter
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -110,14 +113,19 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo) (*SntpEclipseSer
 		listenIP = "0.0.0.0"
 	}
 	listenAddr := net.JoinHostPort(listenIP, strconv.Itoa(nodeInfo.Common.ServerPort))
+	acceptProxyProtocol, err := sntpEclipseAcceptProxyProtocol(nodeInfo)
+	if err != nil {
+		return nil, err
+	}
 	return &SntpEclipseServer{
-		tag:        tag,
-		nodeID:     nodeInfo.Id,
-		listenAddr: listenAddr,
-		privateKey: privateKey,
-		counter:    counter.NewTrafficCounter(),
-		closed:     make(chan struct{}),
-		users:      make(map[string]int),
+		tag:                 tag,
+		nodeID:              nodeInfo.Id,
+		listenAddr:          listenAddr,
+		acceptProxyProtocol: acceptProxyProtocol,
+		privateKey:          privateKey,
+		counter:             counter.NewTrafficCounter(),
+		closed:              make(chan struct{}),
+		users:               make(map[string]int),
 	}, nil
 }
 
@@ -129,8 +137,9 @@ func (s *SntpEclipseServer) Start() error {
 	s.listener = ln
 	go s.acceptLoop()
 	log.WithFields(log.Fields{
-		"tag":    s.tag,
-		"listen": s.listenAddr,
+		"tag":                   s.tag,
+		"listen":                s.listenAddr,
+		"accept_proxy_protocol": s.acceptProxyProtocol,
 	}).Info("SNTP Eclipse ingress started")
 	return nil
 }
@@ -198,7 +207,16 @@ func (s *SntpEclipseServer) acceptLoop() {
 
 func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	clientIP := remoteIP(conn.RemoteAddr())
+	conn, clientIP, err := s.prepareConn(conn)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"tag":       s.tag,
+			"client_ip": clientIP,
+			"err":       err,
+		}).Warn("SNTP Eclipse proxy protocol failed")
+		_ = conn.Close()
+		return
+	}
 	hello, c2s, s2c, err := s.readClientHello(conn)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -620,6 +638,136 @@ func decodeURLBase64(value string) ([]byte, error) {
 		value += strings.Repeat("=", 4-pad)
 	}
 	return base64.StdEncoding.DecodeString(value)
+}
+
+type sntpEclipseBufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *sntpEclipseBufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
+func sntpEclipseAcceptProxyProtocol(nodeInfo *panel.NodeInfo) (bool, error) {
+	if nodeInfo == nil || nodeInfo.Common == nil || len(nodeInfo.Common.NetworkSettings) == 0 {
+		return false, nil
+	}
+	settings := &NetworkSettingsProxyProtocol{}
+	if err := json.Unmarshal(nodeInfo.Common.NetworkSettings, settings); err != nil {
+		return false, fmt.Errorf("unmarshal network settings error: %w", err)
+	}
+	return settings.AcceptProxyProtocol, nil
+}
+
+func (s *SntpEclipseServer) prepareConn(conn net.Conn) (net.Conn, string, error) {
+	clientIP := remoteIP(conn.RemoteAddr())
+	if !s.acceptProxyProtocol {
+		return conn, clientIP, nil
+	}
+	reader := bufio.NewReader(conn)
+	proxyIP, err := readProxyProtocolClientIP(reader)
+	if err != nil {
+		return conn, clientIP, err
+	}
+	if proxyIP != "" {
+		clientIP = proxyIP
+	}
+	return &sntpEclipseBufferedConn{Conn: conn, reader: reader}, clientIP, nil
+}
+
+func readProxyProtocolClientIP(reader *bufio.Reader) (string, error) {
+	first, err := reader.Peek(1)
+	if err != nil {
+		return "", err
+	}
+	switch first[0] {
+	case 'P':
+		prefix, err := reader.Peek(6)
+		if err != nil {
+			return "", err
+		}
+		if string(prefix) != "PROXY " {
+			return "", nil
+		}
+		return readProxyProtocolV1ClientIP(reader)
+	case '\r':
+		header, err := reader.Peek(12)
+		if err != nil {
+			return "", err
+		}
+		if string(header) != "\r\n\r\n\x00\r\nQUIT\n" {
+			return "", nil
+		}
+		return readProxyProtocolV2ClientIP(reader)
+	default:
+		return "", nil
+	}
+}
+
+func readProxyProtocolV1ClientIP(reader *bufio.Reader) (string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	if len(line) > 108 {
+		return "", errors.New("proxy protocol v1 header too long")
+	}
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	fields := strings.Fields(line)
+	if len(fields) < 2 || fields[0] != "PROXY" {
+		return "", errors.New("invalid proxy protocol v1 header")
+	}
+	if fields[1] == "UNKNOWN" {
+		return "", nil
+	}
+	if len(fields) < 6 {
+		return "", errors.New("invalid proxy protocol v1 address fields")
+	}
+	sourceIP := net.ParseIP(fields[2])
+	if sourceIP == nil {
+		return "", errors.New("invalid proxy protocol v1 source ip")
+	}
+	return strings.TrimPrefix(sourceIP.String(), "::ffff:"), nil
+}
+
+func readProxyProtocolV2ClientIP(reader *bufio.Reader) (string, error) {
+	header := make([]byte, 16)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return "", err
+	}
+	if string(header[:12]) != "\r\n\r\n\x00\r\nQUIT\n" {
+		return "", errors.New("invalid proxy protocol v2 signature")
+	}
+	if header[12]>>4 != 2 {
+		return "", errors.New("invalid proxy protocol v2 version")
+	}
+	command := header[12] & 0x0f
+	if command == 0 {
+		return "", nil
+	}
+	if command != 1 {
+		return "", errors.New("invalid proxy protocol v2 command")
+	}
+	addressLen := int(binary.BigEndian.Uint16(header[14:16]))
+	body := make([]byte, addressLen)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return "", err
+	}
+	switch header[13] {
+	case 0x11: // TCP over IPv4.
+		if len(body) < 12 {
+			return "", errors.New("short proxy protocol v2 ipv4 address")
+		}
+		return net.IP(body[:4]).String(), nil
+	case 0x21: // TCP over IPv6.
+		if len(body) < 36 {
+			return "", errors.New("short proxy protocol v2 ipv6 address")
+		}
+		return strings.TrimPrefix(net.IP(body[:16]).String(), "::ffff:"), nil
+	default:
+		return "", nil
+	}
 }
 
 func remoteIP(addr net.Addr) string {
