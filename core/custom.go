@@ -2,7 +2,10 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -87,6 +90,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 			continue
 		}
 		for _, route := range info.Common.Routes {
+			domainMatch := normalizeRouteDomainMatches(route.Match)
 			switch route.Action {
 			case "dns":
 				if route.ActionValue == nil {
@@ -97,15 +101,19 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 						Address: xnet.ParseAddress(*route.ActionValue),
 					},
 				}
-				if len(route.Match) != 0 {
-					server.Domains = route.Match
+				if len(domainMatch) != 0 {
+					server.Domains = domainMatch
 					server.SkipFallback = true
 				}
 				coreDnsConfig.Servers = append(coreDnsConfig.Servers, server)
 			case "block":
+				if len(domainMatch) == 0 {
+					continue
+				}
 				rule := map[string]interface{}{
+					"ruleTag":     routeRuleTag(route),
 					"inboundTag":  routeInboundTags(info.Tag),
-					"domain":      route.Match,
+					"domain":      domainMatch,
 					"outboundTag": "block",
 				}
 				rawRule, err := json.Marshal(rule)
@@ -115,6 +123,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "block_ip":
 				rule := map[string]interface{}{
+					"ruleTag":     routeRuleTag(route),
 					"inboundTag":  routeInboundTags(info.Tag),
 					"ip":          route.Match,
 					"outboundTag": "block",
@@ -126,6 +135,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "block_port":
 				rule := map[string]interface{}{
+					"ruleTag":     routeRuleTag(route),
 					"inboundTag":  routeInboundTags(info.Tag),
 					"port":        strings.Join(route.Match, ","),
 					"outboundTag": "block",
@@ -137,6 +147,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "protocol":
 				rule := map[string]interface{}{
+					"ruleTag":     routeRuleTag(route),
 					"inboundTag":  routeInboundTags(info.Tag),
 					"protocol":    route.Match,
 					"outboundTag": "block",
@@ -150,14 +161,18 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				if route.ActionValue == nil {
 					continue
 				}
+				if len(domainMatch) == 0 {
+					continue
+				}
 				outbound := &coreConf.OutboundDetourConfig{}
 				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
 				if err != nil {
 					continue
 				}
 				rule := map[string]interface{}{
+					"ruleTag":     routeRuleTag(route),
 					"inboundTag":  routeInboundTags(info.Tag),
-					"domain":      route.Match,
+					"domain":      domainMatch,
 					"outboundTag": outbound.Tag,
 				}
 				rawRule, err := json.Marshal(rule)
@@ -183,6 +198,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 					continue
 				}
 				rule := map[string]interface{}{
+					"ruleTag":     routeRuleTag(route),
 					"inboundTag":  routeInboundTags(info.Tag),
 					"ip":          route.Match,
 					"outboundTag": outbound.Tag,
@@ -210,6 +226,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 					continue
 				}
 				rule := map[string]interface{}{
+					"ruleTag":     routeRuleTag(route),
 					"inboundTag":  routeInboundTags(info.Tag),
 					"network":     "tcp,udp",
 					"outboundTag": outbound.Tag,
@@ -241,4 +258,86 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		return nil, nil, nil, err
 	}
 	return DnsConfig, coreOutboundConfig, RouterConfig, nil
+}
+
+func routeRuleTag(route panel.Route) string {
+	if route.Id > 0 {
+		return fmt.Sprintf("%s:%d", route.Action, route.Id)
+	}
+	return route.Action
+}
+
+func normalizeRouteDomainMatches(matches []string) []string {
+	normalized := make([]string, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		item := normalizeRouteDomainMatch(match)
+		if item == "" {
+			continue
+		}
+		key := strings.ToLower(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, item)
+	}
+	return normalized
+}
+
+func normalizeRouteDomainMatch(value string) string {
+	item := strings.TrimSpace(value)
+	if item == "" {
+		return ""
+	}
+	lower := strings.ToLower(item)
+	for _, prefix := range []string{"geosite:", "regexp:", "domain:", "full:", "keyword:"} {
+		if strings.HasPrefix(lower, prefix) {
+			return item
+		}
+	}
+	if strings.HasPrefix(lower, "regex:") {
+		return "regexp:" + strings.TrimSpace(item[len("regex:"):])
+	}
+
+	if strings.HasPrefix(item, "//") {
+		if u, err := url.Parse("https:" + item); err == nil && u.Hostname() != "" {
+			item = u.Hostname()
+		}
+	} else if strings.Contains(item, "://") {
+		if u, err := url.Parse(item); err == nil && u.Hostname() != "" {
+			item = u.Hostname()
+		}
+	} else if cut := strings.IndexAny(item, "/?#"); cut >= 0 {
+		item = item[:cut]
+	}
+
+	item = stripRouteHostPort(item)
+	item = strings.TrimSuffix(strings.TrimSpace(item), ".")
+	if item == "" {
+		return ""
+	}
+	if strings.HasPrefix(item, "*.") {
+		item = "domain:" + strings.TrimPrefix(item, "*.")
+	} else if strings.HasPrefix(item, ".") {
+		item = "domain:" + strings.TrimPrefix(item, ".")
+	}
+	return strings.ToLower(item)
+}
+
+func stripRouteHostPort(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.Trim(h, "[]")
+	}
+	if strings.Count(host, ":") == 1 {
+		parts := strings.SplitN(host, ":", 2)
+		if _, err := strconv.Atoi(parts[1]); err == nil {
+			return parts[0]
+		}
+	}
+	return strings.Trim(host, "[]")
 }
