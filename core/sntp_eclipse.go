@@ -30,7 +30,10 @@ import (
 
 const (
 	sntpEclipseProtocol            = "sntp-eclipse"
-	sntpEclipseVersion        byte = 1
+	sntpEclipseModeV1              = "sntp-eclipse-v1"
+	sntpEclipseModeV2              = "sntp-eclipse-v2"
+	sntpEclipseVersionV1      byte = 1
+	sntpEclipseVersionV2      byte = 2
 	sntpEclipseCmdTCP         byte = 1
 	sntpEclipseCmdUDP         byte = 2
 	sntpEclipseHelloPlainSize      = 496
@@ -42,14 +45,22 @@ const (
 	sntpEclipseHandshakeTTL        = 10 * time.Minute
 )
 
+var (
+	sntpEclipseV2HelloPlainBuckets = []int{496, 752, 1008, 1264}
+	sntpEclipseV2ReplyPlainBuckets = []int{48, 112, 240, 496}
+	sntpEclipseV2FramePlainBuckets = []int{128, 512, 1024, 2048, 4096, 8192, 16384}
+)
+
 type SntpEclipseServer struct {
 	tag                 string
 	nodeID              int
+	mode                string
 	listenAddr          string
 	acceptProxyProtocol bool
 	privateKey          *ecdh.PrivateKey
 	listener            net.Listener
 	counter             *counter.TrafficCounter
+	replay              *sntpEclipseReplayCache
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -58,8 +69,10 @@ type SntpEclipseServer struct {
 }
 
 type sntpEclipseHello struct {
+	Version   byte
 	Command   byte
 	Timestamp int64
+	SessionID [16]byte
 	UUID      string
 	Target    string
 	Port      uint16
@@ -77,12 +90,30 @@ type sntpEclipseSession struct {
 	counter    *counter.TrafficCounter
 	limit      interface{ Wait(int64) }
 	serverName string
+	v2         bool
 }
 
 type sntpEclipseCipher struct {
 	aead    cipherAEAD
 	counter uint64
 	mu      sync.Mutex
+}
+
+type sntpEclipseHandshakeState struct {
+	hello          sntpEclipseHello
+	c2s            *sntpEclipseCipher
+	s2c            *sntpEclipseCipher
+	replyCipher    *sntpEclipseCipher
+	replyPublicKey []byte
+	v2             bool
+}
+
+type sntpEclipseReplayCache struct {
+	mu          sync.Mutex
+	ttl         time.Duration
+	seen        map[[32]byte]time.Time
+	insertCount int
+	lastCleanup time.Time
 }
 
 type cipherAEAD interface {
@@ -108,6 +139,10 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo) (*SntpEclipseSer
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
+	mode := normalizeSntpEclipseMode(nodeInfo.Common.EncryptionSettings.Mode)
+	if mode == "" {
+		return nil, fmt.Errorf("unsupported sntp-eclipse mode: %s", nodeInfo.Common.EncryptionSettings.Mode)
+	}
 	listenIP := strings.TrimSpace(nodeInfo.Common.ListenIP)
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
@@ -120,10 +155,12 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo) (*SntpEclipseSer
 	return &SntpEclipseServer{
 		tag:                 tag,
 		nodeID:              nodeInfo.Id,
+		mode:                mode,
 		listenAddr:          listenAddr,
 		acceptProxyProtocol: acceptProxyProtocol,
 		privateKey:          privateKey,
 		counter:             counter.NewTrafficCounter(),
+		replay:              newSntpEclipseReplayCache(sntpEclipseHandshakeTTL),
 		closed:              make(chan struct{}),
 		users:               make(map[string]int),
 	}, nil
@@ -139,6 +176,7 @@ func (s *SntpEclipseServer) Start() error {
 	log.WithFields(log.Fields{
 		"tag":                   s.tag,
 		"listen":                s.listenAddr,
+		"mode":                  s.mode,
 		"accept_proxy_protocol": s.acceptProxyProtocol,
 	}).Info("SNTP Eclipse ingress started")
 	return nil
@@ -217,7 +255,7 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	hello, c2s, s2c, err := s.readClientHello(conn)
+	handshake, err := s.readClientHello(conn)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag":       s.tag,
@@ -227,6 +265,7 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	hello := handshake.hello
 	uid, ok := s.lookupUser(hello.UUID)
 	if !ok {
 		log.WithFields(log.Fields{
@@ -236,7 +275,7 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 			"target":    hello.targetAddress(),
 			"cmd":       hello.Command,
 		}).Warn("SNTP Eclipse user not found")
-		_ = s.writeServerReply(conn, s2c, false)
+		_ = s.writeServerReply(conn, handshake, false)
 		_ = conn.Close()
 		return
 	}
@@ -251,14 +290,14 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 				"target":    hello.targetAddress(),
 				"cmd":       hello.Command,
 			}).Warn("SNTP Eclipse user rejected by limiter")
-			_ = s.writeServerReply(conn, s2c, false)
+			_ = s.writeServerReply(conn, handshake, false)
 			_ = conn.Close()
 			return
 		} else if b != nil {
 			bucket = b.Get()
 		}
 	}
-	if err := s.writeServerReply(conn, s2c, true); err != nil {
+	if err := s.writeServerReply(conn, handshake, true); err != nil {
 		log.WithFields(log.Fields{
 			"tag":       s.tag,
 			"client_ip": clientIP,
@@ -274,14 +313,15 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		conn:       conn,
 		clientIP:   clientIP,
 		hello:      hello,
-		c2s:        c2s,
-		s2c:        s2c,
+		c2s:        handshake.c2s,
+		s2c:        handshake.s2c,
 		tag:        s.tag,
 		userTag:    userTag,
 		uid:        uid,
 		counter:    s.counter,
 		limit:      bucket,
 		serverName: s.tag,
+		v2:         handshake.v2,
 	}
 	switch hello.Command {
 	case sntpEclipseCmdTCP:
@@ -300,43 +340,125 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *SntpEclipseServer) readClientHello(conn net.Conn) (sntpEclipseHello, *sntpEclipseCipher, *sntpEclipseCipher, error) {
+func (s *SntpEclipseServer) readClientHello(conn net.Conn) (*sntpEclipseHandshakeState, error) {
+	if s.mode == sntpEclipseModeV2 {
+		return s.readClientHelloV2(conn)
+	}
+	return s.readClientHelloV1(conn)
+}
+
+func (s *SntpEclipseServer) readClientHelloV1(conn net.Conn) (*sntpEclipseHandshakeState, error) {
 	var header [48]byte
 	if _, err := io.ReadFull(conn, header[:]); err != nil {
-		return sntpEclipseHello{}, nil, nil, err
+		return nil, err
 	}
 	clientPublic, err := ecdh.X25519().NewPublicKey(header[:32])
 	if err != nil {
-		return sntpEclipseHello{}, nil, nil, err
+		return nil, err
 	}
 	shared, err := s.privateKey.ECDH(clientPublic)
 	if err != nil {
-		return sntpEclipseHello{}, nil, nil, err
+		return nil, err
 	}
 	c2s, s2c, err := newSntpEclipseCiphers(shared, header[32:])
 	if err != nil {
-		return sntpEclipseHello{}, nil, nil, err
+		return nil, err
 	}
 	sealed := make([]byte, sntpEclipseHelloSealSize)
 	if _, err := io.ReadFull(conn, sealed); err != nil {
-		return sntpEclipseHello{}, nil, nil, err
+		return nil, err
 	}
 	plain, err := c2s.openWithNonce(sealed, 0)
 	if err != nil {
-		return sntpEclipseHello{}, nil, nil, err
+		return nil, err
 	}
-	hello, err := decodeSntpEclipseHello(plain)
+	hello, err := decodeSntpEclipseHello(plain, sntpEclipseVersionV1)
 	if err != nil {
-		return sntpEclipseHello{}, nil, nil, err
+		return nil, err
 	}
 	c2s.counter = 1
 	if math.Abs(time.Since(time.Unix(hello.Timestamp, 0)).Seconds()) > sntpEclipseHandshakeTTL.Seconds() {
-		return sntpEclipseHello{}, nil, nil, errors.New("expired hello")
+		return nil, errors.New("expired hello")
 	}
-	return hello, c2s, s2c, nil
+	return &sntpEclipseHandshakeState{hello: hello, c2s: c2s, s2c: s2c, replyCipher: s2c}, nil
 }
 
-func (s *SntpEclipseServer) writeServerReply(conn net.Conn, s2c *sntpEclipseCipher, ok bool) error {
+func (s *SntpEclipseServer) readClientHelloV2(conn net.Conn) (*sntpEclipseHandshakeState, error) {
+	var header [48]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil {
+		return nil, err
+	}
+	clientPublicBytes := append([]byte(nil), header[:32]...)
+	clientPublic, err := ecdh.X25519().NewPublicKey(clientPublicBytes)
+	if err != nil {
+		return nil, err
+	}
+	authSecret, err := s.privateKey.ECDH(clientPublic)
+	if err != nil {
+		return nil, err
+	}
+	handshakeC2S, handshakeS2C, err := newSntpEclipseCiphersWithInfo(authSecret, header[32:], []byte("sntp-eclipse-v2-handshake"))
+	if err != nil {
+		return nil, err
+	}
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	sealedLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+	if !isSntpEclipseSealBucket(sealedLen, sntpEclipseV2HelloPlainBuckets) {
+		return nil, errors.New("invalid v2 hello size")
+	}
+	sealed := make([]byte, sealedLen)
+	if _, err := io.ReadFull(conn, sealed); err != nil {
+		return nil, err
+	}
+	plain, err := handshakeC2S.openWithNonce(sealed, 0)
+	if err != nil {
+		return nil, err
+	}
+	hello, err := decodeSntpEclipseHello(plain, sntpEclipseVersionV2)
+	if err != nil {
+		return nil, err
+	}
+	if math.Abs(time.Since(time.Unix(hello.Timestamp, 0)).Seconds()) > sntpEclipseHandshakeTTL.Seconds() {
+		return nil, errors.New("expired hello")
+	}
+	if s.replay != nil && !s.replay.Mark(hello.SessionID, time.Now()) {
+		return nil, errors.New("replayed hello")
+	}
+	serverEphemeral, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	fsSecret, err := serverEphemeral.ECDH(clientPublic)
+	if err != nil {
+		return nil, err
+	}
+	serverPublicBytes := serverEphemeral.PublicKey().Bytes()
+	transcript := sntpEclipseV2Transcript(clientPublicBytes, header[32:], lenBuf[:], sealed, serverPublicBytes)
+	c2s, s2c, err := newSntpEclipseV2TrafficCiphers(authSecret, fsSecret, header[32:], transcript)
+	if err != nil {
+		return nil, err
+	}
+	return &sntpEclipseHandshakeState{
+		hello:          hello,
+		c2s:            c2s,
+		s2c:            s2c,
+		replyCipher:    handshakeS2C,
+		replyPublicKey: serverPublicBytes,
+		v2:             true,
+	}, nil
+}
+
+func (s *SntpEclipseServer) writeServerReply(conn net.Conn, state *sntpEclipseHandshakeState, ok bool) error {
+	if state != nil && state.v2 {
+		return s.writeServerReplyV2(conn, state, ok)
+	}
+	return s.writeServerReplyV1(conn, state.replyCipher, ok)
+}
+
+func (s *SntpEclipseServer) writeServerReplyV1(conn net.Conn, s2c *sntpEclipseCipher, ok bool) error {
 	plain := make([]byte, sntpEclipseReplyPlainSize)
 	if ok {
 		plain[0] = 1
@@ -347,6 +469,26 @@ func (s *SntpEclipseServer) writeServerReply(conn net.Conn, s2c *sntpEclipseCiph
 	sealed := s2c.sealWithNonce(plain, 0)
 	_, err := conn.Write(sealed)
 	s2c.counter = 1
+	return err
+}
+
+func (s *SntpEclipseServer) writeServerReplyV2(conn net.Conn, state *sntpEclipseHandshakeState, ok bool) error {
+	plainSize := chooseSntpEclipseBucket(1+32, sntpEclipseV2ReplyPlainBuckets)
+	plain := make([]byte, plainSize)
+	if ok {
+		plain[0] = 1
+	}
+	copy(plain[1:33], state.replyPublicKey)
+	if err := fillSntpEclipseRandom(plain[33:]); err != nil {
+		return err
+	}
+	sealed := state.replyCipher.sealWithNonce(plain, 0)
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(sealed)))
+	if _, err := conn.Write(lenBuf[:]); err != nil {
+		return err
+	}
+	_, err := conn.Write(sealed)
 	return err
 }
 
@@ -416,7 +558,7 @@ func (s *sntpEclipseSession) copyClientToTarget(dst net.Conn) {
 }
 
 func (s *sntpEclipseSession) copyTargetToClient(src net.Conn) {
-	buf := make([]byte, sntpEclipseMaxFramePlain)
+	buf := make([]byte, s.maxFramePayload())
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
@@ -492,10 +634,24 @@ func (s *sntpEclipseSession) readFrame(c *sntpEclipseCipher) ([]byte, error) {
 	if _, err := io.ReadFull(s.conn, sealed); err != nil {
 		return nil, err
 	}
-	return c.Open(sealed)
+	plain, err := c.Open(sealed)
+	if err != nil {
+		return nil, err
+	}
+	if s.v2 {
+		return decodeSntpEclipseV2Frame(plain)
+	}
+	return plain, nil
 }
 
 func (s *sntpEclipseSession) writeFrame(c *sntpEclipseCipher, plain []byte) error {
+	if s.v2 {
+		wrapped, err := encodeSntpEclipseV2Frame(plain)
+		if err != nil {
+			return err
+		}
+		plain = wrapped
+	}
 	if len(plain) > sntpEclipseMaxFramePlain {
 		return errors.New("frame too large")
 	}
@@ -509,8 +665,19 @@ func (s *sntpEclipseSession) writeFrame(c *sntpEclipseCipher, plain []byte) erro
 	return err
 }
 
+func (s *sntpEclipseSession) maxFramePayload() int {
+	if s.v2 {
+		return sntpEclipseMaxFramePlain - 2
+	}
+	return sntpEclipseMaxFramePlain
+}
+
 func newSntpEclipseCiphers(shared, salt []byte) (*sntpEclipseCipher, *sntpEclipseCipher, error) {
-	reader := hkdf.New(sha256.New, shared, salt, []byte("sntp-eclipse-v1"))
+	return newSntpEclipseCiphersWithInfo(shared, salt, []byte(sntpEclipseModeV1))
+}
+
+func newSntpEclipseCiphersWithInfo(shared, salt, info []byte) (*sntpEclipseCipher, *sntpEclipseCipher, error) {
+	reader := hkdf.New(sha256.New, shared, salt, info)
 	keys := make([]byte, chacha20poly1305.KeySize*2)
 	if _, err := io.ReadFull(reader, keys); err != nil {
 		return nil, nil, err
@@ -524,6 +691,14 @@ func newSntpEclipseCiphers(shared, salt []byte) (*sntpEclipseCipher, *sntpEclips
 		return nil, nil, err
 	}
 	return &sntpEclipseCipher{aead: c2sAEAD}, &sntpEclipseCipher{aead: s2cAEAD}, nil
+}
+
+func newSntpEclipseV2TrafficCiphers(authSecret, fsSecret, salt, transcript []byte) (*sntpEclipseCipher, *sntpEclipseCipher, error) {
+	keyMaterial := make([]byte, 0, len(authSecret)+len(fsSecret)+len(transcript))
+	keyMaterial = append(keyMaterial, authSecret...)
+	keyMaterial = append(keyMaterial, fsSecret...)
+	keyMaterial = append(keyMaterial, transcript...)
+	return newSntpEclipseCiphersWithInfo(keyMaterial, salt, []byte("sntp-eclipse-v2-traffic"))
 }
 
 func (c *sntpEclipseCipher) Seal(plain []byte) []byte {
@@ -577,8 +752,11 @@ func decodeSntpEclipsePacket(frame []byte) (string, []byte, error) {
 	return string(frame[2 : 2+targetLen]), frame[2+targetLen:], nil
 }
 
-func decodeSntpEclipseHello(plain []byte) (sntpEclipseHello, error) {
-	if len(plain) != sntpEclipseHelloPlainSize {
+func decodeSntpEclipseHello(plain []byte, wantVersion byte) (sntpEclipseHello, error) {
+	if wantVersion == sntpEclipseVersionV1 && len(plain) != sntpEclipseHelloPlainSize {
+		return sntpEclipseHello{}, errors.New("invalid hello size")
+	}
+	if len(plain) < sntpEclipseHelloPlainSize || len(plain) > sntpEclipseV2HelloPlainBuckets[len(sntpEclipseV2HelloPlainBuckets)-1] {
 		return sntpEclipseHello{}, errors.New("invalid hello size")
 	}
 	payloadLen := int(binary.BigEndian.Uint16(plain[:2]))
@@ -586,11 +764,23 @@ func decodeSntpEclipseHello(plain []byte) (sntpEclipseHello, error) {
 		return sntpEclipseHello{}, errors.New("invalid hello payload")
 	}
 	p := plain[2 : 2+payloadLen]
-	if len(p) < 13 || p[0] != sntpEclipseVersion {
+	if len(p) < 13 || p[0] != wantVersion {
 		return sntpEclipseHello{}, errors.New("invalid hello version")
 	}
+	version := p[0]
 	offset := 10
 	cmd := p[1]
+	var sessionID [16]byte
+	if version == sntpEclipseVersionV2 {
+		if len(p) < offset+16+3 {
+			return sntpEclipseHello{}, errors.New("invalid session id")
+		}
+		copy(sessionID[:], p[offset:offset+16])
+		if isZeroSntpEclipseSessionID(sessionID) {
+			return sntpEclipseHello{}, errors.New("empty session id")
+		}
+		offset += 16
+	}
 	uuidLen := int(p[offset])
 	offset++
 	if uuidLen <= 0 || offset+uuidLen > len(p) {
@@ -610,7 +800,7 @@ func decodeSntpEclipseHello(plain []byte) (sntpEclipseHello, error) {
 	offset += targetLen
 	port := binary.BigEndian.Uint16(p[offset : offset+2])
 	timestamp := int64(binary.BigEndian.Uint64(p[2:10]))
-	return sntpEclipseHello{Command: cmd, Timestamp: timestamp, UUID: uuid, Target: target, Port: port}, nil
+	return sntpEclipseHello{Version: version, Command: cmd, Timestamp: timestamp, SessionID: sessionID, UUID: uuid, Target: target, Port: port}, nil
 }
 
 func (h sntpEclipseHello) targetAddress() string {
@@ -620,11 +810,137 @@ func (h sntpEclipseHello) targetAddress() string {
 	return net.JoinHostPort(h.Target, strconv.Itoa(int(h.Port)))
 }
 
+func encodeSntpEclipseV2Frame(payload []byte) ([]byte, error) {
+	minSize := 2 + len(payload)
+	if minSize > sntpEclipseMaxFramePlain {
+		return nil, errors.New("frame too large")
+	}
+	plainSize := chooseSntpEclipseBucket(minSize, sntpEclipseV2FramePlainBuckets)
+	plain := make([]byte, plainSize)
+	binary.BigEndian.PutUint16(plain[:2], uint16(len(payload)))
+	copy(plain[2:], payload)
+	if err := fillSntpEclipseRandom(plain[2+len(payload):]); err != nil {
+		return nil, err
+	}
+	return plain, nil
+}
+
+func decodeSntpEclipseV2Frame(plain []byte) ([]byte, error) {
+	if len(plain) < 2 {
+		return nil, errors.New("short v2 frame")
+	}
+	payloadLen := int(binary.BigEndian.Uint16(plain[:2]))
+	if payloadLen > len(plain)-2 {
+		return nil, errors.New("invalid v2 frame payload")
+	}
+	return plain[2 : 2+payloadLen], nil
+}
+
 func maskSntpEclipseText(value string) string {
 	if len(value) <= 12 {
 		return value
 	}
 	return value[:6] + "..." + value[len(value)-6:]
+}
+
+func normalizeSntpEclipseMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "", sntpEclipseModeV1:
+		return sntpEclipseModeV1
+	case sntpEclipseModeV2:
+		return sntpEclipseModeV2
+	default:
+		return ""
+	}
+}
+
+func isSntpEclipseSealBucket(size int, plainBuckets []int) bool {
+	for _, bucket := range plainBuckets {
+		if size == bucket+chacha20poly1305.Overhead {
+			return true
+		}
+	}
+	return false
+}
+
+func chooseSntpEclipseBucket(minSize int, buckets []int) int {
+	candidates := make([]int, 0, 3)
+	for _, bucket := range buckets {
+		if bucket >= minSize {
+			candidates = append(candidates, bucket)
+			if len(candidates) >= 3 {
+				break
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return minSize
+	}
+	var b [1]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return candidates[0]
+	}
+	return candidates[int(b[0])%len(candidates)]
+}
+
+func fillSntpEclipseRandom(buf []byte) error {
+	if len(buf) == 0 {
+		return nil
+	}
+	_, err := rand.Read(buf)
+	return err
+}
+
+func isZeroSntpEclipseSessionID(sessionID [16]byte) bool {
+	for _, b := range sessionID {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func sntpEclipseV2Transcript(clientPublic, salt, lenBuf, sealedHello, serverPublic []byte) []byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte("sntp-eclipse-v2-transcript"))
+	_, _ = h.Write(clientPublic)
+	_, _ = h.Write(salt)
+	_, _ = h.Write(lenBuf)
+	_, _ = h.Write(sealedHello)
+	_, _ = h.Write(serverPublic)
+	return h.Sum(nil)
+}
+
+func newSntpEclipseReplayCache(ttl time.Duration) *sntpEclipseReplayCache {
+	return &sntpEclipseReplayCache{
+		ttl:         ttl,
+		seen:        make(map[[32]byte]time.Time),
+		lastCleanup: time.Now(),
+	}
+}
+
+func (c *sntpEclipseReplayCache) Mark(sessionID [16]byte, now time.Time) bool {
+	if c == nil {
+		return true
+	}
+	key := sha256.Sum256(sessionID[:])
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if expiresAt, ok := c.seen[key]; ok && now.Before(expiresAt) {
+		return false
+	}
+	c.seen[key] = now.Add(c.ttl)
+	c.insertCount++
+	if c.insertCount%256 == 0 || now.Sub(c.lastCleanup) > time.Minute {
+		for k, expiresAt := range c.seen {
+			if !now.Before(expiresAt) {
+				delete(c.seen, k)
+			}
+		}
+		c.lastCleanup = now
+	}
+	return true
 }
 
 func decodeURLBase64(value string) ([]byte, error) {
