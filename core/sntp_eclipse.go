@@ -30,6 +30,7 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	udp_proto "github.com/xtls/xray-core/common/protocol/udp"
 	"github.com/xtls/xray-core/common/session"
+	xcore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport"
 	xudp "github.com/xtls/xray-core/transport/internet/udp"
@@ -68,6 +69,7 @@ type SntpEclipseServer struct {
 	acceptProxyProtocol bool
 	privateKey          *ecdh.PrivateKey
 	listener            net.Listener
+	xray                *xcore.Instance
 	dispatcher          routing.Dispatcher
 	counter             *counter.TrafficCounter
 	replay              *sntpEclipseReplayCache
@@ -97,6 +99,7 @@ type sntpEclipseSession struct {
 	tag        string
 	userTag    string
 	uid        int
+	xray       *xcore.Instance
 	dispatcher routing.Dispatcher
 	serverName string
 	v2         bool
@@ -141,9 +144,12 @@ type cipherAEAD interface {
 	Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
 }
 
-func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, dispatcher routing.Dispatcher) (*SntpEclipseServer, error) {
+func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Instance, dispatcher routing.Dispatcher) (*SntpEclipseServer, error) {
 	if nodeInfo == nil || nodeInfo.Common == nil {
 		return nil, errors.New("missing node info")
+	}
+	if xray == nil {
+		return nil, errors.New("missing xray instance")
 	}
 	if dispatcher == nil {
 		return nil, errors.New("missing routing dispatcher")
@@ -180,6 +186,7 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, dispatcher routi
 		listenAddr:          listenAddr,
 		acceptProxyProtocol: acceptProxyProtocol,
 		privateKey:          privateKey,
+		xray:                xray,
 		dispatcher:          dispatcher,
 		counter:             counter.NewTrafficCounter(),
 		replay:              newSntpEclipseReplayCache(sntpEclipseHandshakeTTL),
@@ -340,6 +347,7 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		tag:        s.tag,
 		userTag:    userTag,
 		uid:        uid,
+		xray:       s.xray,
 		dispatcher: s.dispatcher,
 		serverName: s.tag,
 		v2:         handshake.v2,
@@ -600,7 +608,11 @@ func (s *sntpEclipseSession) serveUDP() {
 
 func (s *sntpEclipseSession) dispatchContext(destination xnet.Destination) context.Context {
 	source := s.dispatchSource(destination.Network)
-	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{
+	baseCtx := context.Background()
+	if s.xray != nil {
+		baseCtx = context.WithValue(baseCtx, xcore.XrayKey(1), s.xray)
+	}
+	ctx := session.ContextWithInbound(baseCtx, &session.Inbound{
 		Source: source,
 		Tag:    s.tag,
 		Name:   sntpEclipseProtocol,
@@ -610,6 +622,7 @@ func (s *sntpEclipseSession) dispatchContext(destination xnet.Destination) conte
 		},
 		CanSpliceCopy: 3,
 	})
+	ctx = session.ContextWithDispatcher(ctx, s.dispatcher)
 	return session.ContextWithContent(ctx, &session.Content{
 		SniffingRequest: session.SniffingRequest{
 			Enabled: true,
