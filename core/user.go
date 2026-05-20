@@ -106,38 +106,35 @@ func (vc *V2Core) CloseUserIP(tag string, uuid string, ip string) int {
 }
 
 func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
-	trafficSlice := make([]panel.UserTraffic, 0)
-	trafficByUID := make(map[int]*panel.UserTraffic)
-	countersByUID := make(map[int][]*counter.TrafficStorage)
-	uidOrder := make([]int, 0)
+	userTraffic, _, err := vc.GetUserTrafficReport(tag, mintraffic)
+	return userTraffic, err
+}
+
+func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.UserTraffic, []panel.UserDeviceTraffic, error) {
+	report := newTrafficCounterReport()
 	vc.users.mapLock.RLock()
 	defer vc.users.mapLock.RUnlock()
 	if server, ok := vc.eclipse[tag]; ok {
-		collectTrafficCounters(
-			server.counter,
-			vc.users.uidMap,
-			trafficByUID,
-			countersByUID,
-			&uidOrder,
-		)
+		collectTrafficCounters(server.counter, vc.users.uidMap, report)
 		if vc.dispatcher != nil {
 			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 				c := v.(*counter.TrafficCounter)
-				collectTrafficCounters(c, vc.users.uidMap, trafficByUID, countersByUID, &uidOrder)
+				collectTrafficCounters(c, vc.users.uidMap, report)
 			}
 		}
-		return flushTrafficCounters(trafficByUID, countersByUID, uidOrder, mintraffic), nil
+		userTraffic, deviceTraffic := flushTrafficCounters(report, mintraffic)
+		return userTraffic, deviceTraffic, nil
 	}
 	if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 		c := v.(*counter.TrafficCounter)
-		collectTrafficCounters(c, vc.users.uidMap, trafficByUID, countersByUID, &uidOrder)
-		trafficSlice = flushTrafficCounters(trafficByUID, countersByUID, uidOrder, mintraffic)
-		if len(trafficSlice) == 0 {
-			return nil, nil
+		collectTrafficCounters(c, vc.users.uidMap, report)
+		userTraffic, deviceTraffic := flushTrafficCounters(report, mintraffic)
+		if len(userTraffic) == 0 && len(deviceTraffic) == 0 {
+			return nil, nil, nil
 		}
-		return trafficSlice, nil
+		return userTraffic, deviceTraffic, nil
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
@@ -191,13 +188,25 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	return len(users), nil
 }
 
-func collectTrafficCounters(
-	c *counter.TrafficCounter,
-	uidMap map[string]int,
-	trafficByUID map[int]*panel.UserTraffic,
-	countersByUID map[int][]*counter.TrafficStorage,
-	uidOrder *[]int,
-) {
+type trafficCounterReport struct {
+	trafficByUID  map[int]*panel.UserTraffic
+	countersByUID map[int][]*counter.TrafficStorage
+	deviceByKey   map[string]*panel.UserDeviceTraffic
+	uidOrder      []int
+	deviceOrder   []string
+}
+
+func newTrafficCounterReport() *trafficCounterReport {
+	return &trafficCounterReport{
+		trafficByUID:  make(map[int]*panel.UserTraffic),
+		countersByUID: make(map[int][]*counter.TrafficStorage),
+		deviceByKey:   make(map[string]*panel.UserDeviceTraffic),
+		uidOrder:      make([]int, 0),
+		deviceOrder:   make([]string, 0),
+	}
+}
+
+func collectTrafficCounters(c *counter.TrafficCounter, uidMap map[string]int, report *trafficCounterReport) {
 	c.Counters.Range(func(key, value interface{}) bool {
 		email := key.(string)
 		traffic := value.(*counter.TrafficStorage)
@@ -209,43 +218,72 @@ func collectTrafficCounters(
 			return true
 		}
 		if up+down > 0 {
-			if existing, ok := trafficByUID[uid]; ok {
+			if existing, ok := report.trafficByUID[uid]; ok {
 				existing.Upload += up
 				existing.Download += down
 			} else {
-				trafficByUID[uid] = &panel.UserTraffic{
+				report.trafficByUID[uid] = &panel.UserTraffic{
 					UID:      uid,
 					Upload:   up,
 					Download: down,
 				}
-				*uidOrder = append(*uidOrder, uid)
+				report.uidOrder = append(report.uidOrder, uid)
 			}
-			countersByUID[uid] = append(countersByUID[uid], traffic)
+			uuid := extractUUIDFromUserTag(email)
+			if uuid != "" {
+				deviceKey := fmt.Sprintf("%d|%s", uid, uuid)
+				if existing, ok := report.deviceByKey[deviceKey]; ok {
+					existing.Upload += up
+					existing.Download += down
+				} else {
+					report.deviceByKey[deviceKey] = &panel.UserDeviceTraffic{
+						UID:      uid,
+						UUID:     uuid,
+						Upload:   up,
+						Download: down,
+					}
+					report.deviceOrder = append(report.deviceOrder, deviceKey)
+				}
+			}
+			report.countersByUID[uid] = append(report.countersByUID[uid], traffic)
 		}
 		return true
 	})
 }
 
-func flushTrafficCounters(
-	trafficByUID map[int]*panel.UserTraffic,
-	countersByUID map[int][]*counter.TrafficStorage,
-	uidOrder []int,
-	mintraffic int,
-) []panel.UserTraffic {
+func flushTrafficCounters(report *trafficCounterReport, mintraffic int) ([]panel.UserTraffic, []panel.UserDeviceTraffic) {
 	trafficSlice := make([]panel.UserTraffic, 0)
+	deviceTrafficSlice := make([]panel.UserDeviceTraffic, 0)
+	reportedUIDs := make(map[int]struct{})
 	minBytes := int64(mintraffic * 1000)
-	for _, uid := range uidOrder {
-		traffic := trafficByUID[uid]
+	for _, uid := range report.uidOrder {
+		traffic := report.trafficByUID[uid]
 		if traffic.Upload+traffic.Download <= minBytes {
 			continue
 		}
-		for _, storage := range countersByUID[uid] {
+		for _, storage := range report.countersByUID[uid] {
 			storage.UpCounter.Store(0)
 			storage.DownCounter.Store(0)
 		}
 		trafficSlice = append(trafficSlice, *traffic)
+		reportedUIDs[uid] = struct{}{}
 	}
-	return trafficSlice
+	for _, key := range report.deviceOrder {
+		traffic := report.deviceByKey[key]
+		if _, ok := reportedUIDs[traffic.UID]; !ok {
+			continue
+		}
+		deviceTrafficSlice = append(deviceTrafficSlice, *traffic)
+	}
+	return trafficSlice, deviceTrafficSlice
+}
+
+func extractUUIDFromUserTag(userTag string) string {
+	idx := strings.LastIndex(userTag, "|")
+	if idx < 0 || idx+1 >= len(userTag) {
+		return userTag
+	}
+	return userTag[idx+1:]
 }
 
 func buildVmessUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {

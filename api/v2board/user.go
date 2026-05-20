@@ -172,6 +172,19 @@ type UserTraffic struct {
 	Download int64
 }
 
+type UserDeviceTraffic struct {
+	UID      int
+	UUID     string
+	Upload   int64
+	Download int64
+}
+
+type DeviceTrafficReportItem struct {
+	UUID     string `json:"uuid"`
+	Upload   int64  `json:"u"`
+	Download int64  `json:"d"`
+}
+
 // ReportUserTraffic reports the user traffic
 func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
 	data := make(map[int][]int64, len(userTraffic))
@@ -184,6 +197,33 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 		}
 	}
 	const path = "/api/v1/server/UniProxy/push"
+	_, err := c.client.R().
+		SetContext(ctx).
+		SetBody(data).
+		ForceContentType("application/json").
+		Post(path)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) ReportUserDeviceTraffic(ctx context.Context, userDeviceTraffic []UserDeviceTraffic) error {
+	data := make(map[int][]DeviceTrafficReportItem, len(userDeviceTraffic))
+	for i := range userDeviceTraffic {
+		if userDeviceTraffic[i].UID <= 0 || userDeviceTraffic[i].UUID == "" {
+			continue
+		}
+		data[userDeviceTraffic[i].UID] = append(data[userDeviceTraffic[i].UID], DeviceTrafficReportItem{
+			UUID:     userDeviceTraffic[i].UUID,
+			Upload:   userDeviceTraffic[i].Upload,
+			Download: userDeviceTraffic[i].Download,
+		})
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	const path = "/api/v1/server/UniProxy/pushDevices"
 	_, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).

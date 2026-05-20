@@ -20,6 +20,7 @@ import (
 var deviceLimitCapabilities = []string{
 	"device_uuid_users",
 	"uid_traffic_aggregate",
+	"device_traffic_report",
 	"device_alive_report",
 	"device_limit_by_uuid",
 	"stream_unlock_test",

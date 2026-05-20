@@ -124,6 +124,13 @@ func (c *Controller) supportsDeviceAliveReport() bool {
 		c.info.Common.BaseConfig.DeviceAliveReport
 }
 
+func (c *Controller) supportsDeviceTrafficReport() bool {
+	return c.info != nil &&
+		c.info.Common != nil &&
+		c.info.Common.BaseConfig != nil &&
+		c.info.Common.BaseConfig.DeviceTrafficReport
+}
+
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
 	limiter.DeleteLimiter(c.tag)

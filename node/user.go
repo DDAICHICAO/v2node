@@ -21,7 +21,9 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
 	var userTraffic []panel.UserTraffic
-	userTraffic, _ = c.server.GetUserTrafficSlice(c.tag, reportmin)
+	var userDeviceTraffic []panel.UserDeviceTraffic
+	userTraffic, userDeviceTraffic, _ = c.server.GetUserTrafficReport(c.tag, reportmin)
+	trafficReported := len(userTraffic) == 0
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {
@@ -33,8 +35,23 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				return err
 			}
 		} else {
+			trafficReported = true
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 			//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
+		}
+	}
+	if trafficReported && c.supportsDeviceTrafficReport() && len(userDeviceTraffic) > 0 {
+		err = c.apiClient.ReportUserDeviceTraffic(ctx, userDeviceTraffic)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Info("Report user device traffic failed")
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+		} else {
+			log.WithField("tag", c.tag).Infof("Report %d devices traffic", len(userDeviceTraffic))
 		}
 	}
 
