@@ -146,7 +146,10 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 				l.SpeedLimiter.Store(format.UserTag(tag, modified[i].Uuid), d)
 			}
 		} else {
-			l.SpeedLimiter.Delete(format.UserTag(tag, modified[i].Uuid))
+			if v, ok := l.SpeedLimiter.Load(format.UserTag(tag, modified[i].Uuid)); ok {
+				v.(*rate.DynamicBucket).Disable()
+				l.SpeedLimiter.Delete(format.UserTag(tag, modified[i].Uuid))
+			}
 		}
 	}
 	for i := range added {
@@ -307,6 +310,10 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 			return d, false, LimitRejectInfo{}
 		}
 	} else {
+		if v, ok := l.SpeedLimiter.Load(taguuid); ok {
+			v.(*rate.DynamicBucket).Disable()
+			l.SpeedLimiter.Delete(taguuid)
+		}
 		return nil, false, LimitRejectInfo{}
 	}
 }

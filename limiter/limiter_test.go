@@ -115,3 +115,42 @@ func TestCheckLimitRejectsUUIDDeviceLimitWhenPendingExceedsLimit(t *testing.T) {
 		t.Fatalf("unexpected reject info: %+v", info)
 	}
 }
+
+func TestUpdateUserDisablesExistingBucketWhenSpeedLimitRemoved(t *testing.T) {
+	const tag = "speed-limit-removed"
+	const uuid = "limited-user"
+	taguuid := format.UserTag(tag, uuid)
+	l := newTestLimiter(tag, []panel.UserInfo{{
+		Id:         11,
+		Uuid:       uuid,
+		SpeedLimit: 10,
+	}}, nil, nil, false)
+
+	bucket, reject, info := l.CheckLimit(taguuid, "192.0.2.40", true)
+	if reject {
+		t.Fatalf("expected limited user to pass, got reject info: %+v", info)
+	}
+	if bucket == nil || bucket.Get() == nil {
+		t.Fatal("expected speed limiter bucket")
+	}
+
+	l.UpdateUser(tag, nil, nil, []panel.UserInfo{{
+		Id:   11,
+		Uuid: uuid,
+	}})
+
+	if bucket.Get() != nil {
+		t.Fatal("expected existing bucket to be disabled after speed limit removal")
+	}
+	if _, ok := l.SpeedLimiter.Load(taguuid); ok {
+		t.Fatal("expected speed limiter map entry to be removed")
+	}
+
+	nextBucket, reject, info := l.CheckLimit(taguuid, "192.0.2.40", true)
+	if reject {
+		t.Fatalf("expected unlimited user to pass, got reject info: %+v", info)
+	}
+	if nextBucket != nil {
+		t.Fatal("expected no speed limiter for new connections after speed limit removal")
+	}
+}

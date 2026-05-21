@@ -19,19 +19,28 @@ type DynamicBucket struct {
 }
 
 func NewDynamicBucket(rate int64) *DynamicBucket {
-	b := ratelimit.NewBucketWithQuantum(time.Second, rate, rate)
 	d := &DynamicBucket{}
-	d.v.Store(b)
+	d.Update(rate)
 	return d
 }
 
 func (d *DynamicBucket) Get() *ratelimit.Bucket {
-	return d.v.Load().(*ratelimit.Bucket)
+	bucket, _ := d.v.Load().(*ratelimit.Bucket)
+	return bucket
 }
 
 func (d *DynamicBucket) Update(rate int64) {
+	if rate <= 0 {
+		d.Disable()
+		return
+	}
 	newB := ratelimit.NewBucketWithQuantum(time.Second, rate, rate)
 	d.v.Store(newB)
+}
+
+func (d *DynamicBucket) Disable() {
+	var disabled *ratelimit.Bucket
+	d.v.Store(disabled)
 }
 
 func NewRateLimitWriter(writer buf.Writer, limiter *DynamicBucket) buf.Writer {
