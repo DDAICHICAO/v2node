@@ -303,6 +303,7 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 			"uuid":      maskSntpEclipseText(hello.UUID),
 			"target":    hello.targetAddress(),
 			"cmd":       hello.Command,
+			"reason":    limiter.LimitRejectReasonUserNotFound.String(),
 		}).Warn("SNTP Eclipse user not found")
 		_ = s.writeServerReply(conn, handshake, false)
 		_ = conn.Close()
@@ -310,13 +311,19 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	}
 	userTag := format.UserTag(s.tag, hello.UUID)
 	if l, err := limiter.GetLimiter(s.tag); err == nil {
-		if b, reject := l.CheckLimit(userTag, clientIP, true); reject {
+		if b, reject, rejectInfo := l.CheckLimit(userTag, clientIP, true); reject {
 			log.WithFields(log.Fields{
-				"tag":       s.tag,
-				"client_ip": clientIP,
-				"uid":       uid,
-				"target":    hello.targetAddress(),
-				"cmd":       hello.Command,
+				"tag":                  s.tag,
+				"client_ip":            clientIP,
+				"uid":                  uid,
+				"uuid":                 maskSntpEclipseText(hello.UUID),
+				"target":               hello.targetAddress(),
+				"cmd":                  hello.Command,
+				"reason":               rejectInfo.Reason.String(),
+				"device_limit":         rejectInfo.DeviceLimit,
+				"alive_count":          rejectInfo.AliveCount,
+				"pending_device_count": rejectInfo.PendingDeviceCount,
+				"device_limit_by_uuid": rejectInfo.UseDeviceLimitByUUID,
 			}).Warn("SNTP Eclipse user rejected by limiter")
 			_ = s.writeServerReply(conn, handshake, false)
 			_ = conn.Close()

@@ -42,6 +42,32 @@ type UserLimitInfo struct {
 	BlockedIPs        map[string]struct{}
 }
 
+type LimitRejectReason string
+
+const (
+	LimitRejectReasonNone                LimitRejectReason = ""
+	LimitRejectReasonUserNotFound        LimitRejectReason = "user_not_found"
+	LimitRejectReasonBlockedIP           LimitRejectReason = "blocked_ip"
+	LimitRejectReasonDeviceLimitExceeded LimitRejectReason = "device_limit_exceeded"
+)
+
+type LimitRejectInfo struct {
+	Reason               LimitRejectReason
+	UID                  int
+	IP                   string
+	DeviceLimit          int
+	AliveCount           int
+	PendingDeviceCount   int
+	UseDeviceLimitByUUID bool
+}
+
+func (r LimitRejectReason) String() string {
+	if r == LimitRejectReasonNone {
+		return "none"
+	}
+	return string(r)
+}
+
 func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList map[int]int, deviceAliveList map[int]int, useDeviceLimitByUUID bool) *Limiter {
 	l := &Limiter{
 		Nodetype:             nodetype,
@@ -150,7 +176,7 @@ func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire ti
 	return nil
 }
 
-func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (DynamicBucket *rate.DynamicBucket, Reject bool) {
+func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (DynamicBucket *rate.DynamicBucket, Reject bool, RejectInfo LimitRejectInfo) {
 	// check if ipv4 mapped ipv6
 	ip = normalizeIP(ip)
 
@@ -164,7 +190,13 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
 		if _, blocked := u.BlockedIPs[ip]; blocked {
-			return nil, true
+			return nil, true, LimitRejectInfo{
+				Reason:               LimitRejectReasonBlockedIP,
+				UID:                  uid,
+				IP:                   ip,
+				DeviceLimit:          deviceLimit,
+				UseDeviceLimitByUUID: l.UseDeviceLimitByUUID,
+			}
 		}
 		if u.ExpireTime < time.Now().Unix() && u.ExpireTime != 0 {
 			if u.SpeedLimit != 0 {
@@ -178,7 +210,11 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 			userLimit = determineSpeedLimit(u.SpeedLimit, u.DynamicSpeedLimit)
 		}
 	} else {
-		return nil, true
+		return nil, true, LimitRejectInfo{
+			Reason:               LimitRejectReasonUserNotFound,
+			IP:                   ip,
+			UseDeviceLimitByUUID: l.UseDeviceLimitByUUID,
+		}
 	}
 	if noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic" {
 		// Store online user for device limit
@@ -195,9 +231,18 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 					l.OldUserOnlineDevice.Delete(taguuid)
 				}
 			} else if deviceLimit > 0 {
-				if deviceLimit < aliveCount+l.countPendingDeviceUuids(uid) {
+				pendingDeviceCount := l.countPendingDeviceUuids(uid)
+				if deviceLimit < aliveCount+pendingDeviceCount {
 					l.UserOnlineIP.Delete(taguuid)
-					return nil, true
+					return nil, true, LimitRejectInfo{
+						Reason:               LimitRejectReasonDeviceLimitExceeded,
+						UID:                  uid,
+						IP:                   ip,
+						DeviceLimit:          deviceLimit,
+						AliveCount:           aliveCount,
+						PendingDeviceCount:   pendingDeviceCount,
+						UseDeviceLimitByUUID: l.UseDeviceLimitByUUID,
+					}
 				}
 			}
 		} else {
@@ -213,7 +258,14 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 					} else if deviceLimit > 0 {
 						if deviceLimit <= aliveCount {
 							oldipMap.Delete(ip)
-							return nil, true
+							return nil, true, LimitRejectInfo{
+								Reason:               LimitRejectReasonDeviceLimitExceeded,
+								UID:                  uid,
+								IP:                   ip,
+								DeviceLimit:          deviceLimit,
+								AliveCount:           aliveCount,
+								UseDeviceLimitByUUID: l.UseDeviceLimitByUUID,
+							}
 						}
 					}
 				}
@@ -225,7 +277,14 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 				if deviceLimit > 0 {
 					if deviceLimit <= aliveCount {
 						l.UserOnlineIP.Delete(taguuid)
-						return nil, true
+						return nil, true, LimitRejectInfo{
+							Reason:               LimitRejectReasonDeviceLimitExceeded,
+							UID:                  uid,
+							IP:                   ip,
+							DeviceLimit:          deviceLimit,
+							AliveCount:           aliveCount,
+							UseDeviceLimitByUUID: l.UseDeviceLimitByUUID,
+						}
 					}
 				}
 			}
@@ -235,14 +294,14 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	limit := int64(determineSpeedLimit(nodeLimit, userLimit)) * 1000000 / 8 // If you need the Speed limit
 	if limit > 0 {
 		if v, ok := l.SpeedLimiter.Load(taguuid); ok {
-			return v.(*rate.DynamicBucket), false
+			return v.(*rate.DynamicBucket), false, LimitRejectInfo{}
 		} else {
 			d := rate.NewDynamicBucket(limit)
 			l.SpeedLimiter.Store(taguuid, d)
-			return d, false
+			return d, false, LimitRejectInfo{}
 		}
 	} else {
-		return nil, false
+		return nil, false, LimitRejectInfo{}
 	}
 }
 

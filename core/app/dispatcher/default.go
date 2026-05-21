@@ -4,6 +4,7 @@ package dispatcher
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -145,6 +146,19 @@ func (*DefaultDispatcher) Type() interface{} {
 	return routing.DispatcherType()
 }
 
+func formatLimitRejectMessage(userEmail string, sourceIP string, info limiter.LimitRejectInfo) string {
+	return fmt.Sprintf("SNTP user rejected by limiter: user=%s source_ip=%s reason=%s uid=%d device_limit=%d alive_count=%d pending_device_count=%d device_limit_by_uuid=%t",
+		userEmail,
+		sourceIP,
+		info.Reason,
+		info.UID,
+		info.DeviceLimit,
+		info.AliveCount,
+		info.PendingDeviceCount,
+		info.UseDeviceLimitByUUID,
+	)
+}
+
 // Start implements common.Runnable.
 func (*DefaultDispatcher) Start() error {
 	return nil
@@ -188,16 +202,17 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		}
 		// Speed Limit and Device Limit
 		sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
-		w, reject := limit.CheckLimit(user.Email,
+		w, reject, rejectInfo := limit.CheckLimit(user.Email,
 			sourceIP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
-			errors.LogInfo(ctx, "Limited ", user.Email, " by conn or ip")
+			rejectMessage := formatLimitRejectMessage(user.Email, sourceIP, rejectInfo)
+			errors.LogWarning(ctx, rejectMessage)
 			common.Close(outboundLink.Writer)
 			common.Close(inboundLink.Writer)
 			common.Interrupt(outboundLink.Reader)
 			common.Interrupt(inboundLink.Reader)
-			return nil, nil, nil, errors.New("Limited ", user.Email, " by conn or ip")
+			return nil, nil, nil, errors.New(rejectMessage)
 		}
 		var lm *LinkManager
 		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
@@ -374,14 +389,15 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		}
 		// Speed Limit and Device Limit
 		sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
-		w, reject := limit.CheckLimit(user.Email,
+		w, reject, rejectInfo := limit.CheckLimit(user.Email,
 			sourceIP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
-			errors.LogInfo(ctx, "Limited ", user.Email, " by conn or ip")
+			rejectMessage := formatLimitRejectMessage(user.Email, sourceIP, rejectInfo)
+			errors.LogWarning(ctx, rejectMessage)
 			common.Close(outbound.Writer)
 			common.Interrupt(outbound.Reader)
-			return errors.New("Limited ", user.Email, " by conn or ip")
+			return errors.New(rejectMessage)
 		}
 		var lm *LinkManager
 		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
