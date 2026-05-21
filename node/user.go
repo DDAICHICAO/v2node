@@ -103,6 +103,12 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				if online.UUID == "" {
 					continue
 				}
+				log.WithFields(log.Fields{
+					"tag":  c.tag,
+					"uid":  online.UID,
+					"uuid": online.UUID,
+					"ip":   online.IP,
+				}).Info("SNTP online device heartbeat")
 				deviceData[online.UID] = append(deviceData[online.UID], panel.OnlineDeviceReportItem{
 					UUID: online.UUID,
 					IP:   online.IP,
