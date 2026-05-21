@@ -313,17 +313,19 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	if l, err := limiter.GetLimiter(s.tag); err == nil {
 		if b, reject, rejectInfo := l.CheckLimit(userTag, clientIP, true); reject {
 			log.WithFields(log.Fields{
-				"tag":                  s.tag,
-				"client_ip":            clientIP,
-				"uid":                  uid,
-				"uuid":                 maskSntpEclipseText(hello.UUID),
-				"target":               hello.targetAddress(),
-				"cmd":                  hello.Command,
-				"reason":               rejectInfo.Reason.String(),
-				"device_limit":         rejectInfo.DeviceLimit,
-				"alive_count":          rejectInfo.AliveCount,
-				"pending_device_count": rejectInfo.PendingDeviceCount,
-				"device_limit_by_uuid": rejectInfo.UseDeviceLimitByUUID,
+				"tag":                    s.tag,
+				"client_ip":              clientIP,
+				"uid":                    uid,
+				"uuid":                   maskSntpEclipseText(hello.UUID),
+				"target":                 hello.targetAddress(),
+				"cmd":                    hello.Command,
+				"reason":                 rejectInfo.Reason.String(),
+				"device_limit":           rejectInfo.DeviceLimit,
+				"alive_count":            rejectInfo.AliveCount,
+				"pending_device_count":   rejectInfo.PendingDeviceCount,
+				"cached_device_overlap":  rejectInfo.CachedDeviceOverlap,
+				"effective_device_count": rejectInfo.EffectiveDeviceCount,
+				"device_limit_by_uuid":   rejectInfo.UseDeviceLimitByUUID,
 			}).Warn("SNTP Eclipse user rejected by limiter")
 			_ = s.writeServerReply(conn, handshake, false)
 			_ = conn.Close()

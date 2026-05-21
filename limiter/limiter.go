@@ -58,6 +58,8 @@ type LimitRejectInfo struct {
 	DeviceLimit          int
 	AliveCount           int
 	PendingDeviceCount   int
+	CachedDeviceOverlap  int
+	EffectiveDeviceCount int
 	UseDeviceLimitByUUID bool
 }
 
@@ -232,7 +234,9 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 				}
 			} else if deviceLimit > 0 {
 				pendingDeviceCount := l.countPendingDeviceUuids(uid)
-				if deviceLimit < aliveCount+pendingDeviceCount {
+				cachedDeviceOverlap := minInt(aliveCount, pendingDeviceCount)
+				effectiveDeviceCount := aliveCount + pendingDeviceCount - cachedDeviceOverlap
+				if deviceLimit < effectiveDeviceCount {
 					l.UserOnlineIP.Delete(taguuid)
 					return nil, true, LimitRejectInfo{
 						Reason:               LimitRejectReasonDeviceLimitExceeded,
@@ -241,6 +245,8 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 						DeviceLimit:          deviceLimit,
 						AliveCount:           aliveCount,
 						PendingDeviceCount:   pendingDeviceCount,
+						CachedDeviceOverlap:  cachedDeviceOverlap,
+						EffectiveDeviceCount: effectiveDeviceCount,
 						UseDeviceLimitByUUID: l.UseDeviceLimitByUUID,
 					}
 				}
@@ -363,6 +369,13 @@ func makeBlockedIPSet(ips []string) map[string]struct{} {
 
 func normalizeIP(ip string) string {
 	return strings.TrimSpace(strings.TrimPrefix(ip, "::ffff:"))
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func extractUUIDFromTagUUID(taguuid string) string {

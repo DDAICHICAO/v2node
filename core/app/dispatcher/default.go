@@ -147,7 +147,7 @@ func (*DefaultDispatcher) Type() interface{} {
 }
 
 func formatLimitRejectMessage(userEmail string, sourceIP string, info limiter.LimitRejectInfo) string {
-	return fmt.Sprintf("SNTP user rejected by limiter: user=%s source_ip=%s reason=%s uid=%d device_limit=%d alive_count=%d pending_device_count=%d device_limit_by_uuid=%t",
+	return fmt.Sprintf("SNTP user rejected by limiter: user=%s source_ip=%s reason=%s uid=%d device_limit=%d alive_count=%d pending_device_count=%d cached_device_overlap=%d effective_device_count=%d device_limit_by_uuid=%t",
 		userEmail,
 		sourceIP,
 		info.Reason,
@@ -155,6 +155,8 @@ func formatLimitRejectMessage(userEmail string, sourceIP string, info limiter.Li
 		info.DeviceLimit,
 		info.AliveCount,
 		info.PendingDeviceCount,
+		info.CachedDeviceOverlap,
+		info.EffectiveDeviceCount,
 		info.UseDeviceLimitByUUID,
 	)
 }

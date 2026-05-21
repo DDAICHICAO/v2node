@@ -70,7 +70,7 @@ func TestCheckLimitRejectsDeviceLimit(t *testing.T) {
 	}
 }
 
-func TestCheckLimitRejectsDeviceLimitByUUID(t *testing.T) {
+func TestCheckLimitAllowsUUIDDeviceOverlapFromBackendCache(t *testing.T) {
 	const tag = "device-limit-by-uuid"
 	const uuid = "limited-device"
 	l := newTestLimiter(tag, []panel.UserInfo{{
@@ -80,13 +80,38 @@ func TestCheckLimitRejectsDeviceLimitByUUID(t *testing.T) {
 	}}, nil, map[int]int{9: 1}, true)
 
 	_, reject, info := l.CheckLimit(format.UserTag(tag, uuid), "192.0.2.30", true)
+	if reject {
+		t.Fatalf("expected backend cache overlap to be allowed, got reject info: %+v", info)
+	}
+}
+
+func TestCheckLimitRejectsUUIDDeviceLimitWhenPendingExceedsLimit(t *testing.T) {
+	const tag = "uuid-pending-limit"
+	l := newTestLimiter(tag, []panel.UserInfo{
+		{
+			Id:          9,
+			Uuid:        "device-a",
+			DeviceLimit: 1,
+		},
+		{
+			Id:          9,
+			Uuid:        "device-b",
+			DeviceLimit: 1,
+		},
+	}, nil, map[int]int{9: 1}, true)
+
+	if _, reject, info := l.CheckLimit(format.UserTag(tag, "device-a"), "192.0.2.31", true); reject {
+		t.Fatalf("expected first pending uuid to be treated as cache overlap, got reject info: %+v", info)
+	}
+
+	_, reject, info := l.CheckLimit(format.UserTag(tag, "device-b"), "192.0.2.32", true)
 	if !reject {
-		t.Fatal("expected uuid device limit to be rejected")
+		t.Fatal("expected second pending uuid to be rejected")
 	}
 	if info.Reason != LimitRejectReasonDeviceLimitExceeded {
 		t.Fatalf("expected reason %q, got %q", LimitRejectReasonDeviceLimitExceeded, info.Reason)
 	}
-	if info.DeviceLimit != 1 || info.AliveCount != 1 || info.PendingDeviceCount != 1 || !info.UseDeviceLimitByUUID {
+	if info.DeviceLimit != 1 || info.AliveCount != 1 || info.PendingDeviceCount != 2 || info.CachedDeviceOverlap != 1 || info.EffectiveDeviceCount != 2 || !info.UseDeviceLimitByUUID {
 		t.Fatalf("unexpected reject info: %+v", info)
 	}
 }
