@@ -138,6 +138,24 @@ journalctl -u v2node.service -f -n 300 --no-pager \
 SNTP online device heartbeat ip=222.128.15.208 tag=... uid=145817 uuid=2386a7273a3ce22fa775118ce048de58
 ```
 
+新版本也会在用户访问时输出 `SNTP user access` 日志，可以直接按 UID 或设备 UUID 实时查看访问目标：
+
+```bash
+# 按后台用户 ID 实时看访问目标
+journalctl -u v2node.service -f -n 500 --no-pager \
+  | grep --line-buffered -F "SNTP user access uid=145817"
+
+# 按设备 UUID 实时看访问目标
+journalctl -u v2node.service -f -n 500 --no-pager \
+  | grep --line-buffered -F "uuid=2386a7273a3ce22fa775118ce048de58"
+```
+
+访问日志示例：
+
+```text
+SNTP user access uid=145817 uuid=2386a7273a3ce22fa775118ce048de58 source_ip=222.128.15.208 target=example.com:443 inbound_tag=... outbound_tag=...
+```
+
 ```bash
 NODE_UUID="设备UUID或旧用户UUID"
 journalctl -u v2node.service --since "2 hours ago" --no-pager | grep -F "$NODE_UUID"

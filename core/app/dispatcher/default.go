@@ -161,6 +161,40 @@ func formatLimitRejectMessage(userEmail string, sourceIP string, info limiter.Li
 	)
 }
 
+func logSntpUserAccess(ctx context.Context, destination net.Destination, outboundTag string) {
+	sessionInbound := session.InboundFromContext(ctx)
+	if sessionInbound == nil || sessionInbound.User == nil || sessionInbound.User.Email == "" {
+		return
+	}
+	userEmail := sessionInbound.User.Email
+	uuid := extractUUIDFromUserEmail(userEmail)
+	uid := 0
+	if limit, err := limiter.GetLimiter(sessionInbound.Tag); err == nil {
+		if v, ok := limit.UserLimitInfo.Load(userEmail); ok {
+			if info, ok := v.(*limiter.UserLimitInfo); ok {
+				uid = info.UID
+			}
+		}
+	}
+	sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
+	errors.LogInfo(ctx, fmt.Sprintf("SNTP user access uid=%d uuid=%s source_ip=%s target=%s inbound_tag=%s outbound_tag=%s",
+		uid,
+		uuid,
+		sourceIP,
+		destination.NetAddr(),
+		sessionInbound.Tag,
+		outboundTag,
+	))
+}
+
+func extractUUIDFromUserEmail(userEmail string) string {
+	idx := strings.LastIndex(userEmail, "|")
+	if idx < 0 || idx+1 >= len(userEmail) {
+		return userEmail
+	}
+	return userEmail[idx+1:]
+}
+
 // Start implements common.Runnable.
 func (*DefaultDispatcher) Start() error {
 	return nil
@@ -588,6 +622,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	ob.Tag = handler.Tag()
+	logSntpUserAccess(ctx, destination, handler.Tag())
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
 			if inTag == "" {
