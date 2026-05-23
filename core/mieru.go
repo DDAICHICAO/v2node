@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,11 +46,12 @@ const (
 )
 
 type MieruServer struct {
-	tag        string
-	nodeID     int
-	listenIP   string
-	serverPort int
-	transports []string
+	tag                 string
+	nodeID              int
+	listenIP            string
+	serverPort          int
+	transports          []string
+	acceptProxyProtocol bool
 
 	xray       *xcore.Instance
 	dispatcher routing.Dispatcher
@@ -67,12 +70,14 @@ type mieruUser struct {
 }
 
 type mieruNetworkSettings struct {
-	Transport  string   `json:"transport"`
-	Transports []string `json:"transports"`
+	Transport           string   `json:"transport"`
+	Transports          []string `json:"transports"`
+	AcceptProxyProtocol bool     `json:"acceptProxyProtocol"`
 }
 
 type mieruListenerFactory struct {
-	listenIP string
+	listenIP            string
+	acceptProxyProtocol bool
 }
 
 type mieruSession struct {
@@ -100,20 +105,25 @@ func newMieruServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Instance, 
 	if err != nil {
 		return nil, err
 	}
+	acceptProxyProtocol, err := mieruAcceptProxyProtocol(nodeInfo)
+	if err != nil {
+		return nil, err
+	}
 	listenIP := strings.TrimSpace(nodeInfo.Common.ListenIP)
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
 	}
 	return &MieruServer{
-		tag:        tag,
-		nodeID:     nodeInfo.Id,
-		listenIP:   listenIP,
-		serverPort: nodeInfo.Common.ServerPort,
-		transports: transports,
-		xray:       xray,
-		dispatcher: dispatcher,
-		counter:    counter.NewTrafficCounter(),
-		users:      make(map[string]mieruUser),
+		tag:                 tag,
+		nodeID:              nodeInfo.Id,
+		listenIP:            listenIP,
+		serverPort:          nodeInfo.Common.ServerPort,
+		transports:          transports,
+		acceptProxyProtocol: acceptProxyProtocol,
+		xray:                xray,
+		dispatcher:          dispatcher,
+		counter:             counter.NewTrafficCounter(),
+		users:               make(map[string]mieruUser),
 	}, nil
 }
 
@@ -208,9 +218,10 @@ func (s *MieruServer) startLocked() error {
 	s.running = true
 	go s.acceptLoop(server)
 	log.WithFields(log.Fields{
-		"tag":        s.tag,
-		"listen":     net.JoinHostPort(s.listenIP, strconv.Itoa(s.serverPort)),
-		"transports": strings.Join(s.transports, ","),
+		"tag":                   s.tag,
+		"listen":                net.JoinHostPort(s.listenIP, strconv.Itoa(s.serverPort)),
+		"transports":            strings.Join(s.transports, ","),
+		"accept_proxy_protocol": s.acceptProxyProtocol,
 	}).Info("Mieru ingress started")
 	return nil
 }
@@ -258,7 +269,10 @@ func (s *MieruServer) newAPIServerLocked() (mieruserver.Server, error) {
 	}
 
 	server := mieruserver.NewServer()
-	listenerFactory := mieruListenerFactory{listenIP: s.listenIP}
+	listenerFactory := mieruListenerFactory{
+		listenIP:            s.listenIP,
+		acceptProxyProtocol: s.acceptProxyProtocol,
+	}
 	config := &mieruserver.ServerConfig{
 		Config: &mierupb.ServerConfig{
 			PortBindings: portBindings,
@@ -523,12 +537,20 @@ func (s *mieruSession) dispatchSource(network xnet.Network) xnet.Destination {
 
 func (f mieruListenerFactory) Listen(ctx context.Context, network, address string) (net.Listener, error) {
 	var listenConfig net.ListenConfig
-	return listenConfig.Listen(ctx, network, f.bindAddress(address))
+	listener, err := listenConfig.Listen(ctx, network, f.bindAddress(address))
+	if err != nil || !f.acceptProxyProtocol {
+		return listener, err
+	}
+	return &mieruProxyProtocolListener{Listener: listener}, nil
 }
 
 func (f mieruListenerFactory) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
 	var listenConfig net.ListenConfig
-	return listenConfig.ListenPacket(ctx, network, f.bindAddress(address))
+	packetConn, err := listenConfig.ListenPacket(ctx, network, f.bindAddress(address))
+	if err != nil || !f.acceptProxyProtocol {
+		return packetConn, err
+	}
+	return &mieruProxyProtocolPacketConn{PacketConn: packetConn}, nil
 }
 
 func (f mieruListenerFactory) bindAddress(address string) string {
@@ -541,6 +563,191 @@ func (f mieruListenerFactory) bindAddress(address string) string {
 		return address
 	}
 	return net.JoinHostPort(listenIP, port)
+}
+
+type mieruProxyProtocolListener struct {
+	net.Listener
+}
+
+func (l *mieruProxyProtocolListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		wrapped, err := prepareMieruProxyProtocolConn(conn)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"remote": conn.RemoteAddr().String(),
+				"err":    err,
+			}).Warn("Mieru proxy protocol failed")
+			_ = conn.Close()
+			continue
+		}
+		return wrapped, nil
+	}
+}
+
+type mieruProxyProtocolConn struct {
+	net.Conn
+	reader     *bufio.Reader
+	remoteAddr net.Addr
+}
+
+func (c *mieruProxyProtocolConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
+func (c *mieruProxyProtocolConn) RemoteAddr() net.Addr {
+	if c.remoteAddr != nil {
+		return c.remoteAddr
+	}
+	return c.Conn.RemoteAddr()
+}
+
+type mieruProxyProtocolAddr struct {
+	network string
+	address string
+}
+
+func (a mieruProxyProtocolAddr) Network() string {
+	return a.network
+}
+
+func (a mieruProxyProtocolAddr) String() string {
+	return a.address
+}
+
+type mieruProxyProtocolPacketConn struct {
+	net.PacketConn
+}
+
+func (c *mieruProxyProtocolPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, addr, err := c.PacketConn.ReadFrom(p)
+	if err != nil {
+		return n, addr, err
+	}
+	clientAddr, offset, ok, err := parseMieruProxyProtocolDatagram(p[:n], addr)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !ok {
+		return n, addr, nil
+	}
+	payloadLen := n - offset
+	copy(p, p[offset:n])
+	return payloadLen, clientAddr, nil
+}
+
+func (c *mieruProxyProtocolPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if relay, ok := addr.(interface{ proxyProtocolRelayAddr() net.Addr }); ok {
+		addr = relay.proxyProtocolRelayAddr()
+	}
+	return c.PacketConn.WriteTo(p, addr)
+}
+
+type mieruProxyProtocolPacketAddr struct {
+	source net.Addr
+	relay  net.Addr
+}
+
+func (a mieruProxyProtocolPacketAddr) Network() string {
+	if a.source == nil {
+		return ""
+	}
+	return a.source.Network()
+}
+
+func (a mieruProxyProtocolPacketAddr) String() string {
+	if a.source == nil {
+		return ""
+	}
+	return a.source.String()
+}
+
+func (a mieruProxyProtocolPacketAddr) proxyProtocolRelayAddr() net.Addr {
+	return a.relay
+}
+
+func prepareMieruProxyProtocolConn(conn net.Conn) (net.Conn, error) {
+	reader := bufio.NewReader(conn)
+	proxyIP, err := readProxyProtocolClientIP(reader)
+	if err != nil {
+		return nil, err
+	}
+	return &mieruProxyProtocolConn{
+		Conn:       conn,
+		reader:     reader,
+		remoteAddr: mieruProxyProtocolRemoteAddr(conn.RemoteAddr(), proxyIP),
+	}, nil
+}
+
+func mieruProxyProtocolRemoteAddr(original net.Addr, proxyIP string) net.Addr {
+	proxyIP = strings.TrimSpace(proxyIP)
+	if proxyIP == "" {
+		return original
+	}
+	network := "tcp"
+	if original != nil && original.Network() != "" {
+		network = original.Network()
+	}
+	if original != nil {
+		if _, port, err := net.SplitHostPort(original.String()); err == nil && port != "" {
+			return mieruProxyProtocolAddr{
+				network: network,
+				address: net.JoinHostPort(proxyIP, port),
+			}
+		}
+	}
+	return mieruProxyProtocolAddr{
+		network: network,
+		address: proxyIP,
+	}
+}
+
+func parseMieruProxyProtocolDatagram(packet []byte, relay net.Addr) (net.Addr, int, bool, error) {
+	if len(packet) < 16 || string(packet[:12]) != "\r\n\r\n\x00\r\nQUIT\n" {
+		return nil, 0, false, nil
+	}
+	if packet[12]>>4 != 2 {
+		return nil, 0, true, errors.New("invalid proxy protocol v2 version")
+	}
+	command := packet[12] & 0x0f
+	addressLen := int(binary.BigEndian.Uint16(packet[14:16]))
+	offset := 16 + addressLen
+	if len(packet) < offset {
+		return nil, 0, true, errors.New("short proxy protocol v2 datagram")
+	}
+	if command == 0 {
+		return relay, offset, true, nil
+	}
+	if command != 1 {
+		return nil, 0, true, errors.New("invalid proxy protocol v2 command")
+	}
+
+	body := packet[16:offset]
+	var source net.Addr
+	switch packet[13] {
+	case 0x12: // UDP over IPv4.
+		if len(body) < 12 {
+			return nil, 0, true, errors.New("short proxy protocol v2 udp ipv4 address")
+		}
+		source = &net.UDPAddr{
+			IP:   net.IP(body[:4]),
+			Port: int(binary.BigEndian.Uint16(body[8:10])),
+		}
+	case 0x22: // UDP over IPv6.
+		if len(body) < 36 {
+			return nil, 0, true, errors.New("short proxy protocol v2 udp ipv6 address")
+		}
+		source = &net.UDPAddr{
+			IP:   net.IP(body[:16]),
+			Port: int(binary.BigEndian.Uint16(body[32:34])),
+		}
+	default:
+		return relay, offset, true, nil
+	}
+	return mieruProxyProtocolPacketAddr{source: source, relay: relay}, offset, true, nil
 }
 
 func writeMieruSocksResponse(conn net.Conn, reply byte) error {
@@ -652,6 +859,17 @@ func mieruTransports(nodeInfo *panel.NodeInfo) ([]string, error) {
 		transports = append(transports, mieruTransportTCP, mieruTransportUDP)
 	}
 	return transports, nil
+}
+
+func mieruAcceptProxyProtocol(nodeInfo *panel.NodeInfo) (bool, error) {
+	if nodeInfo == nil || nodeInfo.Common == nil || len(nodeInfo.Common.NetworkSettings) == 0 {
+		return false, nil
+	}
+	settings := &mieruNetworkSettings{}
+	if err := json.Unmarshal(nodeInfo.Common.NetworkSettings, settings); err != nil {
+		return false, fmt.Errorf("unmarshal mieru network settings error: %w", err)
+	}
+	return settings.AcceptProxyProtocol, nil
 }
 
 func appendMieruTransport(transports []string, value string) []string {
