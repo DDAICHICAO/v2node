@@ -106,108 +106,9 @@ before_show_menu() {
     show_menu
 }
 
-normalize_v2node_log_config() {
-    local config_file="/etc/v2node/config.json"
-    local tmp_file
-
-    [[ -f "$config_file" ]] || return 0
-    tmp_file=$(mktemp /tmp/v2node-config.XXXXXX) || return 1
-
-    if awk '
-        function indent_of(line) {
-            match(line, /^[ \t]*/)
-            return substr(line, RSTART, RLENGTH)
-        }
-        function brace_delta(line,    i, c, delta, in_string, escaped) {
-            for (i = 1; i <= length(line); i++) {
-                c = substr(line, i, 1)
-                if (escaped) {
-                    escaped = 0
-                    continue
-                }
-                if (c == "\\") {
-                    escaped = 1
-                    continue
-                }
-                if (c == "\"") {
-                    in_string = !in_string
-                    continue
-                }
-                if (in_string) {
-                    continue
-                }
-                if (c == "{") {
-                    delta++
-                } else if (c == "}") {
-                    delta--
-                }
-            }
-            return delta
-        }
-        function print_normalized_log(    i) {
-            print log_indent "    \"Level\": \"warning\","
-            print log_indent "    \"Output\": \"\","
-            if (extra_count > 0) {
-                print log_indent "    \"Access\": \"none\","
-                for (i = 1; i <= extra_count; i++) {
-                    print extra_lines[i]
-                }
-            } else {
-                print log_indent "    \"Access\": \"none\""
-            }
-        }
-        BEGIN {
-            in_log = 0
-            replaced = 0
-            depth = 0
-        }
-        !in_log && depth == 1 && $0 ~ /^[ \t]*"Log"[ \t]*:/ {
-            print
-            log_indent = indent_of($0)
-            log_depth = depth + brace_delta($0)
-            extra_count = 0
-            replaced = 1
-            in_log = 1
-            next
-        }
-        in_log {
-            next_depth = log_depth + brace_delta($0)
-            if (next_depth <= 1) {
-                print_normalized_log()
-                print
-                in_log = 0
-                depth = next_depth
-                next
-            }
-            if ($0 !~ /^[ \t]*"(Level|Output|Access)"[ \t]*:/) {
-                extra_lines[++extra_count] = $0
-            }
-            log_depth = next_depth
-            next
-        }
-        {
-            print
-            depth += brace_delta($0)
-        }
-        END {
-            if (in_log) {
-                exit 2
-            }
-        }
-    ' "$config_file" > "$tmp_file"; then
-        mv "$tmp_file" "$config_file"
-        echo -e "${green}Reset /etc/v2node/config.json Log to warning / Access none${plain}"
-    else
-        rm -f "$tmp_file"
-        echo -e "${yellow}Failed to reset /etc/v2node/config.json Log automatically, please check it manually${plain}"
-        return 1
-    fi
-}
-
 install() {
     bash <(curl -Ls https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/install.sh)
     if [[ $? == 0 ]]; then
-        normalize_v2node_log_config || true
         if [[ $# == 0 ]]; then
             start
         else
@@ -224,10 +125,7 @@ update() {
     fi
     bash <(curl -Ls https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/install.sh) $version
     if [[ $? == 0 ]]; then
-        if normalize_v2node_log_config; then
-            restart 0
-        fi
-        echo -e "${green}更新完成，已重置日志配置，请使用 v2node log 查看运行日志${plain}"
+        echo -e "${green}更新完成，已自动重启 v2node，请使用 v2node log 查看运行日志${plain}"
         exit
     fi
 

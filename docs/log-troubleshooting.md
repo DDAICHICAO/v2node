@@ -6,7 +6,7 @@
 
 ## 默认日志策略
 
-安装脚本、`v2node update`、面板推送更新，以及新版本启动时发现二进制文件比配置文件更新，都会把 `/etc/v2node/config.json` 根对象下 `Log` 段里的 `Level`、`Output`、`Access` 重置为安静配置，避免旧配置把日志级别留在 `info/debug`。只会改这三个日志字段，会保留 `SNTPAccess` 等其它 `Log` 字段，也不会改 `Nodes` 里的面板地址、节点 ID、API Key、超时和其它节点对接信息：
+新装生成配置时，`/etc/v2node/config.json` 的 `Log` 段默认使用安静配置：
 
 ```json
 {
@@ -39,7 +39,7 @@
 }
 ```
 
-注意：更新只会按默认值重置 `Level`、`Output`、`Access` 这三个字段。手动写的 `SNTPAccess: false` 会保留；如果要恢复访问审计，需要手动改回 `SNTPAccess: true` 或删除该字段使用默认值。
+注意：更新不会自动重写已有 `/etc/v2node/config.json`。如果线上机器已经手动改过日志字段，需要按上面的示例手动改回默认值。
 
 `Access` 的取值建议：
 
@@ -123,7 +123,7 @@ journalctl -u v2node.service -f -n 0 --no-pager \
 ```bash
 journalctl -u v2node.service -f -n 0 --no-pager \
   | grep --line-buffered -F "SNTP user access" \
-  | grep --line-buffered -F "source_ip=113.113.x.x"
+  | grep --line-buffered -F "source_ip=222.128.x.x"
 ```
 
 按访问目标看实时访问：
@@ -137,7 +137,7 @@ journalctl -u v2node.service -f -n 0 --no-pager \
 访问日志示例：
 
 ```text
-SNTP user access uid=145817 uuid=2386a7273a3ce22fa775118ce048de58 source_ip=113.113.x.x target=example.com:443 inbound_tag=[https://panel.example.com]-shadowsocks:514 outbound_tag=5555
+SNTP user access uid=145817 uuid=2386a7273a3ce22fa775118ce048de58 source_ip=222.128.x.x target=example.com:443 inbound_tag=[https://panel.example.com]-shadowsocks:514 outbound_tag=5555
 ```
 
 字段含义：
@@ -185,7 +185,7 @@ email: [https://panel.example.com]-shadowsocks:514|2386a7273a3ce22fa775118ce048d
 systemctl restart v2node
 ```
 
-排查结束后改回默认 `warning / Access none`，或者等下次更新脚本自动重置。
+排查结束后手动改回默认 `warning / Access none`。
 
 ## 实时看在线设备心跳
 
@@ -210,7 +210,7 @@ journalctl -u v2node.service -f -n 0 --no-pager \
 心跳日志示例：
 
 ```text
-SNTP online device heartbeat ip=113.113.x.x tag=[https://panel.example.com]-shadowsocks:514 uid=145817 uuid=2386a7273a3ce22fa775118ce048de58
+SNTP online device heartbeat ip=222.128.x.x tag=[https://panel.example.com]-shadowsocks:514 uid=145817 uuid=2386a7273a3ce22fa775118ce048de58
 ```
 
 ## 查连接拒绝
@@ -235,7 +235,7 @@ journalctl -u v2node.service -f -n 0 --no-pager \
 按客户端 IP 看拒绝：
 
 ```bash
-CLIENT_IP="113.113.x.x"
+CLIENT_IP="222.128.x.x"
 journalctl -u v2node.service --since "2 hours ago" --no-pager \
   | grep -E "user_not_found|blocked_ip|device_limit_exceeded|rejected by limiter|SNTP Eclipse user not found|SNTP Eclipse user rejected by limiter" \
   | grep -E "source_ip=${CLIENT_IP}|client_ip=${CLIENT_IP}|${CLIENT_IP}"
@@ -274,7 +274,7 @@ journalctl -u v2node.service -f -n 0 --no-pager \
 按 IP 查是否被 blocked：
 
 ```bash
-CLIENT_IP="113.113.x.x"
+CLIENT_IP="222.128.x.x"
 journalctl -u v2node.service --since "2 hours ago" --no-pager \
   | grep -F "reason=blocked_ip" \
   | grep -E "source_ip=${CLIENT_IP}|client_ip=${CLIENT_IP}|${CLIENT_IP}"
@@ -342,7 +342,7 @@ SNTP Eclipse 为避免日志暴露完整 UUID，部分日志会输出脱敏 UUID
 
 ```bash
 UID="145817"
-CLIENT_IP="113.113.x.x"
+CLIENT_IP="222.128.x.x"
 journalctl -u v2node.service --since "2 hours ago" --no-pager \
   | grep -E "SNTP Eclipse|rejected by limiter|user not found" \
   | grep -E "uid=${UID}|client_ip=${CLIENT_IP}|${CLIENT_IP}"
@@ -403,7 +403,7 @@ journalctl -u v2node.service --since "2 hours ago" --no-pager \
 保存某个客户端 IP 的日志：
 
 ```bash
-CLIENT_IP="113.113.x.x"
+CLIENT_IP="222.128.x.x"
 journalctl -u v2node.service --since "2 hours ago" --no-pager \
   | grep -E "source_ip=${CLIENT_IP}|client_ip=${CLIENT_IP}|${CLIENT_IP}" \
   > /tmp/v2node-client-ip.log
