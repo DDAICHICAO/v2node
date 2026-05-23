@@ -64,6 +64,26 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		server.DelUsers(users)
 		return nil
 	}
+	if server, ok := vc.mieru[tag]; ok {
+		vc.users.mapLock.Lock()
+		for i := range users {
+			user := format.UserTag(tag, users[i].Uuid)
+			delete(vc.users.uidMap, user)
+			if vc.dispatcher != nil {
+				if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+					tc := v.(*counter.TrafficCounter)
+					tc.Delete(user)
+				}
+				if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
+					lm := v.(*dispatcher.LinkManager)
+					lm.CloseAll()
+					vc.dispatcher.LinkManagers.Delete(user)
+				}
+			}
+		}
+		vc.users.mapLock.Unlock()
+		return server.DelUsers(users)
+	}
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
@@ -125,6 +145,17 @@ func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.User
 		userTraffic, deviceTraffic := flushTrafficCounters(report, mintraffic)
 		return userTraffic, deviceTraffic, nil
 	}
+	if server, ok := vc.mieru[tag]; ok {
+		collectTrafficCounters(server.counter, vc.users.uidMap, report)
+		if vc.dispatcher != nil {
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				c := v.(*counter.TrafficCounter)
+				collectTrafficCounters(c, vc.users.uidMap, report)
+			}
+		}
+		userTraffic, deviceTraffic := flushTrafficCounters(report, mintraffic)
+		return userTraffic, deviceTraffic, nil
+	}
 	if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 		c := v.(*counter.TrafficCounter)
 		collectTrafficCounters(c, vc.users.uidMap, report)
@@ -139,14 +170,22 @@ func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.User
 
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	v.users.mapLock.Lock()
-	defer v.users.mapLock.Unlock()
 	for i := range p.Users {
 		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
 	}
 	if server, ok := v.eclipse[p.Tag]; ok {
 		server.AddUsers(p.Users)
+		v.users.mapLock.Unlock()
 		return len(p.Users), nil
 	}
+	if server, ok := v.mieru[p.Tag]; ok {
+		v.users.mapLock.Unlock()
+		if err := server.AddUsers(p.Users); err != nil {
+			return 0, err
+		}
+		return len(p.Users), nil
+	}
+	defer v.users.mapLock.Unlock()
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
 	case "vmess":

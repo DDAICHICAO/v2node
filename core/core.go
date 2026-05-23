@@ -35,6 +35,7 @@ type V2Core struct {
 	ohm        outbound.Manager
 	dispatcher *dispatcher.DefaultDispatcher
 	eclipse    map[string]*SntpEclipseServer
+	mieru      map[string]*MieruServer
 }
 
 type UserMap struct {
@@ -49,6 +50,7 @@ func New(config *conf.Conf) *V2Core {
 			uidMap: make(map[string]int),
 		},
 		eclipse: make(map[string]*SntpEclipseServer),
+		mieru:   make(map[string]*MieruServer),
 	}
 	return core
 }
@@ -58,6 +60,9 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	defer v.access.Unlock()
 	if v.eclipse == nil {
 		v.eclipse = make(map[string]*SntpEclipseServer)
+	}
+	if v.mieru == nil {
+		v.mieru = make(map[string]*MieruServer)
 	}
 	v.Server = getCore(v.Config, infos)
 	if err := v.Server.Start(); err != nil {
@@ -80,6 +85,10 @@ func (v *V2Core) Close() error {
 		_ = server.Close()
 	}
 	v.eclipse = nil
+	for _, server := range v.mieru {
+		_ = server.Close()
+	}
+	v.mieru = nil
 	if v.Server != nil {
 		err := v.Server.Close()
 		if err != nil {
