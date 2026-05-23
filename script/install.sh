@@ -78,40 +78,77 @@ normalize_v2node_log_config() {
             match(line, /^[ \t]*/)
             return substr(line, RSTART, RLENGTH)
         }
+        function brace_delta(line,    i, c, delta, in_string, escaped) {
+            for (i = 1; i <= length(line); i++) {
+                c = substr(line, i, 1)
+                if (escaped) {
+                    escaped = 0
+                    continue
+                }
+                if (c == "\\") {
+                    escaped = 1
+                    continue
+                }
+                if (c == "\"") {
+                    in_string = !in_string
+                    continue
+                }
+                if (in_string) {
+                    continue
+                }
+                if (c == "{") {
+                    delta++
+                } else if (c == "}") {
+                    delta--
+                }
+            }
+            return delta
+        }
+        function print_normalized_log(    i) {
+            print log_indent "    \"Level\": \"warning\","
+            print log_indent "    \"Output\": \"\","
+            if (extra_count > 0) {
+                print log_indent "    \"Access\": \"none\","
+                for (i = 1; i <= extra_count; i++) {
+                    print extra_lines[i]
+                }
+            } else {
+                print log_indent "    \"Access\": \"none\""
+            }
+        }
         BEGIN {
             in_log = 0
             replaced = 0
-            inserted = 0
+            depth = 0
         }
-        !in_log && $0 ~ /^[ \t]*"Log"[ \t]*:/ {
-            indent = indent_of($0)
-            print indent "\"Log\": {"
-            print indent "    \"Level\": \"warning\","
-            print indent "    \"Output\": \"\","
-            print indent "    \"Access\": \"none\""
-            in_log = 1
+        !in_log && depth == 1 && $0 ~ /^[ \t]*"Log"[ \t]*:/ {
+            print
+            log_indent = indent_of($0)
+            log_depth = depth + brace_delta($0)
+            extra_count = 0
             replaced = 1
+            in_log = 1
             next
         }
         in_log {
-            if ($0 ~ /^[ \t]*}[ \t]*,?[ \t]*$/) {
-                comma = ($0 ~ /,/) ? "," : ""
-                print indent "}" comma
+            next_depth = log_depth + brace_delta($0)
+            if (next_depth <= 1) {
+                print_normalized_log()
+                print
                 in_log = 0
+                depth = next_depth
+                next
             }
+            if ($0 !~ /^[ \t]*"(Level|Output|Access)"[ \t]*:/) {
+                extra_lines[++extra_count] = $0
+            }
+            log_depth = next_depth
             next
         }
-        !replaced && !inserted && $0 ~ /^[ \t]*{[ \t]*$/ {
+        {
             print
-            print "    \"Log\": {"
-            print "        \"Level\": \"warning\","
-            print "        \"Output\": \"\","
-            print "        \"Access\": \"none\""
-            print "    },"
-            inserted = 1
-            next
+            depth += brace_delta($0)
         }
-        { print }
         END {
             if (in_log) {
                 exit 2
