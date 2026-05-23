@@ -52,23 +52,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.WithField("err", err).Error("Load config file failed")
 		return
 	}
-	switch c.LogConfig.Level {
-	case "debug":
-		log.SetLevel(log.DebugLevel)
-	case "info":
-		log.SetLevel(log.InfoLevel)
-	case "warn", "warning":
-		log.SetLevel(log.WarnLevel)
-	case "error":
-		log.SetLevel(log.ErrorLevel)
-	}
-	if c.LogConfig.Output != "" {
-		f, err := os.OpenFile(c.LogConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			log.WithField("err", err).Error("Open log file failed, using stdout instead")
-		}
-		log.SetOutput(f)
-	}
+	applyLogConfig(c.LogConfig)
 	// Enable pprof if configured
 	if c.PprofPort != 0 {
 		go func() {
@@ -158,29 +142,7 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 		return err
 	}
 
-	switch newConf.LogConfig.Level {
-	case "debug":
-		log.SetLevel(log.DebugLevel)
-	case "info":
-		log.SetLevel(log.InfoLevel)
-	case "warn", "warning":
-		log.SetLevel(log.WarnLevel)
-	case "error":
-		log.SetLevel(log.ErrorLevel)
-	}
-	if newConf.LogConfig.Output != "" {
-		f, err := os.OpenFile(newConf.LogConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			log.WithField("err", err).Error("Open log file failed, using stdout instead")
-		} else {
-			// 关闭旧的日志文件（如果是文件）
-			if oldWriter, ok := log.StandardLogger().Out.(*os.File); ok && oldWriter != os.Stdout && oldWriter != os.Stderr {
-				oldWriter.Close()
-			}
-			log.SetOutput(f)
-		}
-	}
-
+	applyLogConfig(newConf.LogConfig)
 	newNodes, err := node.New(newConf.NodeConfigs)
 	if err != nil {
 		return err
@@ -202,4 +164,37 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 
 	runtime.GC()
 	return nil
+}
+
+func applyLogConfig(logConfig conf.LogConfig) {
+	switch logConfig.Level {
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "warn", "warning":
+		log.SetLevel(log.WarnLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	default:
+		log.SetLevel(log.WarnLevel)
+	}
+
+	nextOutput := log.StandardLogger().Out
+	if logConfig.Output == "" {
+		nextOutput = os.Stdout
+	} else {
+		f, err := os.OpenFile(logConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.WithField("err", err).Error("Open log file failed, using stdout instead")
+			nextOutput = os.Stdout
+		} else {
+			nextOutput = f
+		}
+	}
+
+	if oldWriter, ok := log.StandardLogger().Out.(*os.File); ok && oldWriter != os.Stdout && oldWriter != os.Stderr && oldWriter != nextOutput {
+		_ = oldWriter.Close()
+	}
+	log.SetOutput(nextOutput)
 }

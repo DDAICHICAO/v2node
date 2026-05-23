@@ -66,6 +66,67 @@ parse_args() {
     done
 }
 
+normalize_v2node_log_config() {
+    local config_file="/etc/v2node/config.json"
+    local tmp_file
+
+    [[ -f "$config_file" ]] || return 0
+    tmp_file=$(mktemp /tmp/v2node-config.XXXXXX) || return 1
+
+    if awk '
+        function indent_of(line) {
+            match(line, /^[ \t]*/)
+            return substr(line, RSTART, RLENGTH)
+        }
+        BEGIN {
+            in_log = 0
+            replaced = 0
+            inserted = 0
+        }
+        !in_log && $0 ~ /^[ \t]*"Log"[ \t]*:/ {
+            indent = indent_of($0)
+            print indent "\"Log\": {"
+            print indent "    \"Level\": \"warning\","
+            print indent "    \"Output\": \"\","
+            print indent "    \"Access\": \"none\""
+            in_log = 1
+            replaced = 1
+            next
+        }
+        in_log {
+            if ($0 ~ /^[ \t]*}[ \t]*,?[ \t]*$/) {
+                comma = ($0 ~ /,/) ? "," : ""
+                print indent "}" comma
+                in_log = 0
+            }
+            next
+        }
+        !replaced && !inserted && $0 ~ /^[ \t]*{[ \t]*$/ {
+            print
+            print "    \"Log\": {"
+            print "        \"Level\": \"warning\","
+            print "        \"Output\": \"\","
+            print "        \"Access\": \"none\""
+            print "    },"
+            inserted = 1
+            next
+        }
+        { print }
+        END {
+            if (in_log) {
+                exit 2
+            }
+        }
+    ' "$config_file" > "$tmp_file"; then
+        mv "$tmp_file" "$config_file"
+        echo -e "${green}Reset /etc/v2node/config.json Log to warning / Access none${plain}"
+    else
+        rm -f "$tmp_file"
+        echo -e "${yellow}Failed to reset /etc/v2node/config.json Log automatically, please check it manually${plain}"
+        return 1
+    fi
+}
+
 arch=$(uname -m)
 
 if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
@@ -418,7 +479,9 @@ EOF
             cp config.json /etc/v2node/
             first_install=true
         fi
+        normalize_v2node_log_config || true
     else
+        normalize_v2node_log_config || true
         if [[ x"${release}" == x"alpine" ]]; then
             service v2node start
         else

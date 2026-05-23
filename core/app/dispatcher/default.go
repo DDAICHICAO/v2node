@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	logrus "github.com/sirupsen/logrus"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/rate"
 	"github.com/wyx2685/v2node/limiter"
@@ -33,6 +35,19 @@ import (
 )
 
 var errSniffingTimeout = errors.New("timeout on sniffing")
+
+var (
+	sntpAccessLogEnabled atomic.Bool
+	sntpAccessLogMu      sync.Mutex
+)
+
+func init() {
+	sntpAccessLogEnabled.Store(true)
+}
+
+func SetSntpAccessLogEnabled(enabled bool) {
+	sntpAccessLogEnabled.Store(enabled)
+}
 
 type cachedReader struct {
 	sync.Mutex
@@ -162,6 +177,9 @@ func formatLimitRejectMessage(userEmail string, sourceIP string, info limiter.Li
 }
 
 func logSntpUserAccess(ctx context.Context, destination net.Destination, outboundTag string) {
+	if !sntpAccessLogEnabled.Load() {
+		return
+	}
 	sessionInbound := session.InboundFromContext(ctx)
 	if sessionInbound == nil || sessionInbound.User == nil || sessionInbound.User.Email == "" {
 		return
@@ -177,7 +195,7 @@ func logSntpUserAccess(ctx context.Context, destination net.Destination, outboun
 		}
 	}
 	sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
-	errors.LogInfo(ctx, fmt.Sprintf("SNTP user access uid=%d uuid=%s source_ip=%s target=%s inbound_tag=%s outbound_tag=%s",
+	writeSntpAccessLog(fmt.Sprintf("SNTP user access uid=%d uuid=%s source_ip=%s target=%s inbound_tag=%s outbound_tag=%s",
 		uid,
 		uuid,
 		sourceIP,
@@ -185,6 +203,12 @@ func logSntpUserAccess(ctx context.Context, destination net.Destination, outboun
 		sessionInbound.Tag,
 		outboundTag,
 	))
+}
+
+func writeSntpAccessLog(message string) {
+	sntpAccessLogMu.Lock()
+	defer sntpAccessLogMu.Unlock()
+	_, _ = fmt.Fprintln(logrus.StandardLogger().Out, message)
 }
 
 func extractUUIDFromUserEmail(userEmail string) string {

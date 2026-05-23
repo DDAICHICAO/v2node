@@ -3,6 +3,7 @@ package conf
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -17,9 +18,10 @@ type Conf struct {
 }
 
 type LogConfig struct {
-	Level  string `mapstructure:"Level"`
-	Output string `mapstructure:"Output"`
-	Access string `mapstructure:"Access"`
+	Level      string `mapstructure:"Level"`
+	Output     string `mapstructure:"Output"`
+	Access     string `mapstructure:"Access"`
+	SNTPAccess bool   `mapstructure:"SNTPAccess"`
 }
 
 type NodeConfig struct {
@@ -34,9 +36,10 @@ type NodeConfig struct {
 func New() *Conf {
 	return &Conf{
 		LogConfig: LogConfig{
-			Level:  "info",
-			Output: "",
-			Access: "none",
+			Level:      "warning",
+			Output:     "",
+			Access:     "none",
+			SNTPAccess: true,
 		},
 	}
 }
@@ -55,12 +58,36 @@ func (p *Conf) LoadFromPath(filePath string) error {
 	if err := v.Unmarshal(p); err != nil {
 		return fmt.Errorf("unmarshal config error: %s", err)
 	}
+	p.LogConfig.Normalize()
 	for i := range p.NodeConfigs {
 		if p.NodeConfigs[i].RetryCount == nil {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)
 		}
 	}
 	return nil
+}
+
+func (p *LogConfig) Normalize() {
+	p.Level = strings.ToLower(strings.TrimSpace(p.Level))
+	if p.Level == "" {
+		p.Level = "warning"
+	}
+	p.Output = strings.TrimSpace(p.Output)
+	p.Access = strings.TrimSpace(p.Access)
+	if p.Access == "" {
+		p.Access = "none"
+	}
+}
+
+func (p LogConfig) CoreAccessLog() string {
+	switch strings.ToLower(strings.TrimSpace(p.Access)) {
+	case "", "none":
+		return "none"
+	case "console":
+		return ""
+	default:
+		return p.Access
+	}
 }
 
 func intPtr(v int) *int {

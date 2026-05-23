@@ -90,10 +90,12 @@ func (v *V2Core) Close() error {
 }
 
 func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
+	dispatcher.SetSntpAccessLogEnabled(c.LogConfig.SNTPAccess)
+
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  c.LogConfig.Level,
-		AccessLog: c.LogConfig.Access,
+		AccessLog: c.LogConfig.CoreAccessLog(),
 		ErrorLog:  c.LogConfig.Output,
 	}
 	// Custom config
