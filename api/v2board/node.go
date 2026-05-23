@@ -99,6 +99,21 @@ type TlsSettings struct {
 	RejectUnknownSni string   `json:"reject_unknown_sni"`
 }
 
+func (t *TlsSettings) UnmarshalJSON(data []byte) error {
+	text := strings.TrimSpace(string(data))
+	if text == "" || text == "null" || text == "[]" {
+		*t = TlsSettings{}
+		return nil
+	}
+	type alias TlsSettings
+	var value alias
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*t = TlsSettings(value)
+	return nil
+}
+
 type CertInfo struct {
 	CertMode         string
 	CertFile         string
@@ -116,6 +131,21 @@ type EncSettings struct {
 	ServerPadding string `json:"server_padding"`
 	PrivateKey    string `json:"private_key"`
 	PublicKey     string `json:"public_key"`
+}
+
+func (e *EncSettings) UnmarshalJSON(data []byte) error {
+	text := strings.TrimSpace(string(data))
+	if text == "" || text == "null" || text == "[]" {
+		*e = EncSettings{}
+		return nil
+	}
+	type alias EncSettings
+	var value alias
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*e = EncSettings(value)
+	return nil
 }
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
