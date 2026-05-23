@@ -114,11 +114,6 @@ func (c *Controller) runUpdateTask(task panel.UpdateTask) {
 		log.Info("Normalized log config after update")
 	}
 
-	if err := scheduleServiceRestart(); err != nil {
-		c.reportUpdateStatus(task, updateStatusFailed, "installed but restart failed: "+err.Error())
-		return
-	}
-
 	state := updateState{
 		TaskID:    task.TaskID,
 		Version:   task.Version,
@@ -128,6 +123,17 @@ func (c *Controller) runUpdateTask(task panel.UpdateTask) {
 	}
 	if err := writeUpdateState(state); err != nil {
 		log.WithField("err", err).Error("Write update state failed")
+	}
+
+	if err := scheduleServiceRestart(); err != nil {
+		state.Status = updateStatusFailed
+		state.Message = "installed but restart failed: " + err.Error()
+		state.UpdatedAt = time.Now().Unix()
+		if writeErr := writeUpdateState(state); writeErr != nil {
+			log.WithField("err", writeErr).Error("Write update state failed")
+		}
+		c.reportUpdateStatus(task, updateStatusFailed, state.Message)
+		return
 	}
 
 	c.reportUpdateStatus(task, updateStatusSuccess, "installed, restarting service")
@@ -150,6 +156,22 @@ func NormalizeLogConfigAfterRecentUpdate(configPath string) (bool, error) {
 		return false, nil
 	}
 	if time.Since(time.Unix(state.UpdatedAt, 0)) > 30*time.Minute {
+		return false, nil
+	}
+	return appconf.NormalizeLogConfigFile(updateConfigPath)
+}
+
+func NormalizeLogConfigAfterBinaryUpdate(configPath string) (bool, error) {
+	SetUpdateConfigPath(configPath)
+	configInfo, err := os.Stat(updateConfigPath)
+	if err != nil {
+		return false, err
+	}
+	binaryInfo, err := os.Stat(installedBinaryPath())
+	if err != nil {
+		return false, err
+	}
+	if !binaryInfo.ModTime().After(configInfo.ModTime()) {
 		return false, nil
 	}
 	return appconf.NormalizeLogConfigFile(updateConfigPath)

@@ -6,7 +6,7 @@
 
 ## 默认日志策略
 
-安装脚本、`v2node update` 和面板推送更新都会把 `/etc/v2node/config.json` 根对象下 `Log` 段里的 `Level`、`Output`、`Access` 重置为安静配置，避免旧配置把日志级别留在 `info/debug`。只会改这三个日志字段，会保留 `SNTPAccess` 等其它 `Log` 字段，也不会改 `Nodes` 里的面板地址、节点 ID、API Key、超时和其它节点对接信息：
+安装脚本、`v2node update`、面板推送更新，以及新版本启动时发现二进制文件比配置文件更新，都会把 `/etc/v2node/config.json` 根对象下 `Log` 段里的 `Level`、`Output`、`Access` 重置为安静配置，避免旧配置把日志级别留在 `info/debug`。只会改这三个日志字段，会保留 `SNTPAccess` 等其它 `Log` 字段，也不会改 `Nodes` 里的面板地址、节点 ID、API Key、超时和其它节点对接信息：
 
 ```json
 {
@@ -39,7 +39,7 @@
 }
 ```
 
-注意：更新脚本会按默认三字段重置 `Log` 段，手动写的 `SNTPAccess: false` 更新后会恢复为默认开启。
+注意：更新只会按默认值重置 `Level`、`Output`、`Access` 这三个字段。手动写的 `SNTPAccess: false` 会保留；如果要恢复访问审计，需要手动改回 `SNTPAccess: true` 或删除该字段使用默认值。
 
 `Access` 的取值建议：
 

@@ -51,6 +51,10 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.WithField("err", err).Warn("Normalize log config after recent update failed")
 	} else if changed {
 		log.Info("Normalized log config after recent update")
+	} else if changed, err := node.NormalizeLogConfigAfterBinaryUpdate(config); err != nil {
+		log.WithField("err", err).Warn("Normalize log config after binary update failed")
+	} else if changed {
+		log.Info("Normalized log config after binary update")
 	}
 
 	c := conf.New()
