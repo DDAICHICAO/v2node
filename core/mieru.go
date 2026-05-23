@@ -139,7 +139,7 @@ func (s *MieruServer) Close() error {
 func (s *MieruServer) SetUsers(users []panel.UserInfo) error {
 	next := make(map[string]mieruUser, len(users))
 	for _, user := range users {
-		next[mieruUsername(user)] = mieruUser{UID: user.Id, UUID: user.Uuid}
+		addMieruUser(next, user)
 	}
 
 	s.mu.Lock()
@@ -155,7 +155,7 @@ func (s *MieruServer) AddUsers(users []panel.UserInfo) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, user := range users {
-		s.users[mieruUsername(user)] = mieruUser{UID: user.Id, UUID: user.Uuid}
+		addMieruUser(s.users, user)
 	}
 	if !s.running {
 		return s.startLocked()
@@ -171,6 +171,10 @@ func (s *MieruServer) DelUsers(users []panel.UserInfo) error {
 	defer s.mu.Unlock()
 	for _, user := range users {
 		delete(s.users, mieruUsername(user))
+		legacyUsername := mieruLegacyUsername(user)
+		if existing, ok := s.users[legacyUsername]; ok && existing.UUID == user.Uuid {
+			delete(s.users, legacyUsername)
+		}
 		s.counter.Delete(format.UserTag(s.tag, user.Uuid))
 	}
 	return s.restartLocked()
@@ -665,11 +669,30 @@ func appendMieruTransport(transports []string, value string) []string {
 	}
 }
 
-func mieruUsername(user panel.UserInfo) string {
-	if user.Id > 0 {
-		return strconv.Itoa(user.Id)
+func addMieruUser(users map[string]mieruUser, user panel.UserInfo) {
+	value := mieruUser{UID: user.Id, UUID: user.Uuid}
+	if username := mieruUsername(user); username != "" {
+		users[username] = value
 	}
-	return strings.TrimSpace(user.Uuid)
+	if legacyUsername := mieruLegacyUsername(user); legacyUsername != "" {
+		if _, ok := users[legacyUsername]; !ok {
+			users[legacyUsername] = value
+		}
+	}
+}
+
+func mieruUsername(user panel.UserInfo) string {
+	if uuid := strings.TrimSpace(user.Uuid); uuid != "" {
+		return uuid
+	}
+	return mieruLegacyUsername(user)
+}
+
+func mieruLegacyUsername(user panel.UserInfo) string {
+	if user.Id <= 0 {
+		return ""
+	}
+	return strconv.Itoa(user.Id)
 }
 
 func reqCommand(req *mierumodel.Request) byte {
