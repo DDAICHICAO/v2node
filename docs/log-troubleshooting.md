@@ -6,7 +6,7 @@
 
 ## 默认日志策略
 
-安装或更新脚本会把 `/etc/v2node/config.json` 根对象下 `Log` 段里的 `Level`、`Output`、`Access` 重置为安静配置。`v2node update` 会在更新完成后再次重置并重启服务，避免旧脚本或旧配置把日志级别留在 `info/debug`。脚本只改这三个日志字段，会保留 `SNTPAccess` 等其它 `Log` 字段，也不会改 `Nodes` 里的面板地址、节点 ID、API Key、超时和其它节点对接信息：
+安装脚本、`v2node update` 和面板推送更新都会把 `/etc/v2node/config.json` 根对象下 `Log` 段里的 `Level`、`Output`、`Access` 重置为安静配置，避免旧配置把日志级别留在 `info/debug`。只会改这三个日志字段，会保留 `SNTPAccess` 等其它 `Log` 字段，也不会改 `Nodes` 里的面板地址、节点 ID、API Key、超时和其它节点对接信息：
 
 ```json
 {

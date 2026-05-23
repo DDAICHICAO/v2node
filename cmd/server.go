@@ -41,13 +41,20 @@ func init() {
 
 func serverHandle(_ *cobra.Command, _ []string) {
 	showVersion()
-	c := conf.New()
-	err := c.LoadFromPath(config)
 	log.SetFormatter(&log.TextFormatter{
 		DisableTimestamp: true,
 		DisableQuote:     true,
 		PadLevelText:     false,
 	})
+	node.SetUpdateConfigPath(config)
+	if changed, err := node.NormalizeLogConfigAfterRecentUpdate(config); err != nil {
+		log.WithField("err", err).Warn("Normalize log config after recent update failed")
+	} else if changed {
+		log.Info("Normalized log config after recent update")
+	}
+
+	c := conf.New()
+	err := c.LoadFromPath(config)
 	if err != nil {
 		log.WithField("err", err).Error("Load config file failed")
 		return

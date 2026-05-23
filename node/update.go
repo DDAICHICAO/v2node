@@ -21,6 +21,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 	selfversion "github.com/wyx2685/v2node/common/version"
+	appconf "github.com/wyx2685/v2node/conf"
 )
 
 const (
@@ -32,6 +33,8 @@ const (
 )
 
 var updateRunMu sync.Mutex
+
+var updateConfigPath = "/etc/v2node/config.json"
 
 type updateState struct {
 	TaskID    string `json:"task_id"`
@@ -105,6 +108,12 @@ func (c *Controller) runUpdateTask(task panel.UpdateTask) {
 		return
 	}
 
+	if changed, err := appconf.NormalizeLogConfigFile(updateConfigPath); err != nil {
+		log.WithField("err", err).Warn("Normalize log config after update failed")
+	} else if changed {
+		log.Info("Normalized log config after update")
+	}
+
 	if err := scheduleServiceRestart(); err != nil {
 		c.reportUpdateStatus(task, updateStatusFailed, "installed but restart failed: "+err.Error())
 		return
@@ -122,6 +131,28 @@ func (c *Controller) runUpdateTask(task panel.UpdateTask) {
 	}
 
 	c.reportUpdateStatus(task, updateStatusSuccess, "installed, restarting service")
+}
+
+func SetUpdateConfigPath(path string) {
+	path = strings.TrimSpace(path)
+	if path != "" {
+		updateConfigPath = path
+	}
+}
+
+func NormalizeLogConfigAfterRecentUpdate(configPath string) (bool, error) {
+	SetUpdateConfigPath(configPath)
+	state, err := readUpdateState()
+	if err != nil {
+		return false, nil
+	}
+	if state.Status != updateStatusSuccess || state.UpdatedAt <= 0 {
+		return false, nil
+	}
+	if time.Since(time.Unix(state.UpdatedAt, 0)) > 30*time.Minute {
+		return false, nil
+	}
+	return appconf.NormalizeLogConfigFile(updateConfigPath)
 }
 
 func (c *Controller) reportUpdateStatus(task panel.UpdateTask, status string, message string) {
