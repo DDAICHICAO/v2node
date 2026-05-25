@@ -85,6 +85,30 @@ func TestRemoveExpiredUsers(t *testing.T) {
 	assertUserListEqual(t, got, want)
 }
 
+func TestUpdateTaskIsDowngrade(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+		target  string
+		want    bool
+	}{
+		{name: "target older", current: "v5.0.0.24", target: "v5.0.0.23", want: true},
+		{name: "target same", current: "v5.0.0.24", target: "v5.0.0.24", want: false},
+		{name: "target newer", current: "v5.0.0.23", target: "v5.0.0.24", want: false},
+		{name: "command output current", current: "v2node v5.0.0.24 (SNTP)", target: "v5.0.0.23", want: true},
+		{name: "non numeric current", current: "dev-build", target: "v5.0.0.23", want: false},
+		{name: "non numeric target", current: "v5.0.0.24", target: "dev-build", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := updateTaskIsDowngrade(tc.current, tc.target); got != tc.want {
+				t.Fatalf("updateTaskIsDowngrade(%q, %q)=%v, want %v", tc.current, tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
 func assertUserListEqual(t *testing.T, got, want []panel.UserInfo) {
 	t.Helper()
 	if len(got) != len(want) {

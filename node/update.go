@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,10 @@ func (c *Controller) checkUpdateTask(ctx context.Context) {
 		return
 	}
 	if updateTaskApplied(task.TaskID) {
+		return
+	}
+	if currentVersion := localVersion(); updateTaskIsDowngrade(currentVersion, task.Version) {
+		c.reportUpdateStatus(*task, updateStatusSkipped, "target version is older than current version "+currentVersion)
 		return
 	}
 
@@ -419,6 +424,73 @@ func localVersion() string {
 func updateTaskApplied(taskID string) bool {
 	state, err := readUpdateState()
 	return err == nil && state.TaskID == taskID && state.Status == updateStatusSuccess
+}
+
+func updateTaskIsDowngrade(currentVersion string, targetVersion string) bool {
+	current, ok := comparableUpdateVersion(currentVersion)
+	if !ok {
+		return false
+	}
+	target, ok := comparableUpdateVersion(targetVersion)
+	if !ok {
+		return false
+	}
+
+	maxLen := len(current)
+	if len(target) > maxLen {
+		maxLen = len(target)
+	}
+	for i := 0; i < maxLen; i++ {
+		currentPart := 0
+		if i < len(current) {
+			currentPart = current[i]
+		}
+		targetPart := 0
+		if i < len(target) {
+			targetPart = target[i]
+		}
+		if targetPart < currentPart {
+			return true
+		}
+		if targetPart > currentPart {
+			return false
+		}
+	}
+	return false
+}
+
+func comparableUpdateVersion(version string) ([]int, bool) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return nil, false
+	}
+	fields := strings.Fields(version)
+	if len(fields) >= 2 && strings.EqualFold(fields[0], "v2node") {
+		version = strings.TrimSpace(fields[1])
+	}
+	version = strings.TrimLeft(version, "vV")
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 || len(parts) > 4 {
+		return nil, false
+	}
+
+	numbers := make([]int, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			return nil, false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return nil, false
+			}
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, false
+		}
+		numbers = append(numbers, value)
+	}
+	return numbers, true
 }
 
 func updateStatePath() string {
