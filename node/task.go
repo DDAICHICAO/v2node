@@ -78,6 +78,44 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	c.checkUpdateTask(ctx)
 	c.checkStreamUnlockTask(ctx)
 
+	return c.syncUserState(ctx)
+}
+
+func (c *Controller) syncUserState(ctx context.Context) error {
+	delta, err := c.apiClient.GetUserDelta(ctx)
+	if err == nil && delta != nil && !delta.FullRequired {
+		c.apiClient.SetUserSyncSeq(delta.LatestSeq)
+		if err := c.refreshAliveState(ctx); err != nil {
+			return err
+		}
+		if len(delta.Events) == 0 {
+			log.WithField("tag", c.tag).Debug("User delta no change")
+			return c.pruneExpiredUsers(time.Now().Unix())
+		}
+		newU, changed := applyUserDeltaEvents(c.userList, delta.Events)
+		if !changed {
+			log.WithField("tag", c.tag).Debug("User delta no applicable change")
+			return c.pruneExpiredUsers(time.Now().Unix())
+		}
+		if err := c.applyUserList(newU); err != nil {
+			return err
+		}
+		return c.pruneExpiredUsers(time.Now().Unix())
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if !errors.Is(err, panel.ErrUserDeltaUnsupported) {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Warn("Get user delta failed, fallback to full user list")
+		}
+	} else if delta != nil && delta.FullRequired {
+		log.WithField("tag", c.tag).Info("User delta requires full user list")
+	}
+
 	// get user info
 	newU, err := c.apiClient.GetUserList(ctx)
 	if err != nil {
@@ -90,7 +128,23 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}).Error("Get user list failed")
 		return nil
 	}
-	// get user alive
+
+	if err := c.refreshAliveState(ctx); err != nil {
+		return err
+	}
+
+	// node no changed, check users
+	if len(newU) == 0 {
+		log.WithField("tag", c.tag).Debug("User list no change")
+		return c.pruneExpiredUsers(time.Now().Unix())
+	}
+	if err := c.applyUserList(newU); err != nil {
+		return err
+	}
+	return c.pruneExpiredUsers(time.Now().Unix())
+}
+
+func (c *Controller) refreshAliveState(ctx context.Context) error {
 	newA, err := c.apiClient.GetUserAlive(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -127,15 +181,14 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	} else {
 		c.limiter.UseDeviceLimitByUUID = false
 	}
-	// node no changed, check users
-	if len(newU) == 0 {
-		log.WithField("tag", c.tag).Debug("User list no change")
-		return nil
-	}
+	return nil
+}
+
+func (c *Controller) applyUserList(newU []panel.UserInfo) error {
 	deleted, added, modified := compareUserList(c.userList, newU)
 	if len(deleted) > 0 {
 		// have deleted users
-		err = c.server.DelUsers(deleted, c.tag, c.info)
+		err := c.server.DelUsers(deleted, c.tag, c.info)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -146,7 +199,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	}
 	if len(added) > 0 {
 		// have added users
-		_, err = c.server.AddUsers(&vCore.AddUsersParams{
+		_, err := c.server.AddUsers(&vCore.AddUsersParams{
 			Tag:      c.tag,
 			NodeInfo: c.info,
 			Users:    added,
@@ -169,4 +222,13 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	c.userList = newU
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
+}
+
+func (c *Controller) pruneExpiredUsers(nowUnix int64) error {
+	newU, changed := removeExpiredUsers(c.userList, nowUnix)
+	if !changed {
+		return nil
+	}
+	log.WithField("tag", c.tag).Info("Prune expired users from local user list")
+	return c.applyUserList(newU)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"encoding/json/jsontext"
@@ -33,11 +34,37 @@ type UserInfo struct {
 	Uuid        string   `json:"uuid" msgpack:"uuid"`
 	SpeedLimit  int      `json:"speed_limit" msgpack:"speed_limit"`
 	DeviceLimit int      `json:"device_limit" msgpack:"device_limit"`
+	ExpiredAt   int64    `json:"expired_at" msgpack:"expired_at"`
 	BlockedIPs  []string `json:"blocked_ips" msgpack:"blocked_ips"`
 }
 
 type UserListBody struct {
 	Users []UserInfo `json:"users" msgpack:"users"`
+}
+
+const (
+	UserDeltaActionUpsert = "user_upsert"
+	UserDeltaActionDelete = "user_delete"
+)
+
+var ErrUserDeltaUnsupported = errors.New("user delta endpoint unsupported")
+
+type UserDeltaResponse struct {
+	Data UserDeltaData `json:"data"`
+}
+
+type UserDeltaData struct {
+	FullRequired bool             `json:"full_required"`
+	LatestSeq    int64            `json:"latest_seq"`
+	Events       []UserDeltaEvent `json:"events"`
+}
+
+type UserDeltaEvent struct {
+	Seq       int64      `json:"seq"`
+	Action    string     `json:"action"`
+	UserID    int        `json:"user_id"`
+	Users     []UserInfo `json:"users"`
+	CreatedAt int64      `json:"created_at"`
 }
 
 type AliveMap struct {
@@ -66,6 +93,7 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	defer r.RawResponse.Body.Close()
 
 	if r.StatusCode() == 304 {
+		c.updateUserSyncSeqFromHeader(r.Header().Get("X-User-Sync-Seq"))
 		return nil, nil
 	}
 	userlist := &UserListBody{}
@@ -105,7 +133,57 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		}
 	}
 	c.userEtag = r.Header().Get("ETag")
+	c.updateUserSyncSeqFromHeader(r.Header().Get("X-User-Sync-Seq"))
 	return userlist.Users, nil
+}
+
+func (c *Client) GetUserDelta(ctx context.Context) (*UserDeltaData, error) {
+	const path = "/api/v2/server/user-delta"
+	r, err := c.client.R().
+		SetContext(ctx).
+		SetQueryParam("since_seq", strconv.FormatInt(c.userSyncSeq, 10)).
+		ForceContentType("application/json").
+		Get(path)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("received nil user delta response")
+	}
+	if r.StatusCode() == 404 || r.StatusCode() == 405 {
+		return nil, ErrUserDeltaUnsupported
+	}
+	if r.StatusCode() >= 400 {
+		return nil, fmt.Errorf("get user delta http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
+	}
+
+	var response UserDeltaResponse
+	if err := json.Unmarshal(r.Body(), &response); err != nil {
+		return nil, fmt.Errorf("decode user delta error: %w; body=%s", err, bodySnippet(r.Body()))
+	}
+	return &response.Data, nil
+}
+
+func (c *Client) SetUserSyncSeq(seq int64) {
+	if seq >= 0 {
+		c.userSyncSeq = seq
+	}
+}
+
+func (c *Client) UserSyncSeq() int64 {
+	return c.userSyncSeq
+}
+
+func (c *Client) updateUserSyncSeqFromHeader(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	seq, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || seq < 0 {
+		return
+	}
+	c.userSyncSeq = seq
 }
 
 // GetUserAlive will fetch the alive_ip count for users

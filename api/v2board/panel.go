@@ -24,6 +24,7 @@ var deviceLimitCapabilities = []string{
 	"device_alive_report",
 	"device_limit_by_uuid",
 	"stream_unlock_test",
+	"user_delta_sync",
 }
 
 type Client struct {
@@ -34,6 +35,7 @@ type Client struct {
 	NodeId                  int
 	nodeEtag                string
 	userEtag                string
+	userSyncSeq             int64
 	responseBodyHash        string
 	UserList                *UserListBody
 	AliveMap                *AliveMap
