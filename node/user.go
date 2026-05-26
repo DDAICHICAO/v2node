@@ -55,6 +55,17 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		}
 	}
 
+	activeOnlineUIDs := make([]int, 0, len(userTraffic))
+	for _, traffic := range userTraffic {
+		total := traffic.Upload + traffic.Download
+		if total >= int64(devicemin*1000) {
+			activeOnlineUIDs = append(activeOnlineUIDs, traffic.UID)
+		}
+	}
+	if len(activeOnlineUIDs) > 0 {
+		c.limiter.RefreshOnlineUIDsFromLastSnapshot(activeOnlineUIDs)
+	}
+
 	if onlineDevice, onlineDeviceDetails, err := c.limiter.GetOnlineDeviceState(); err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,

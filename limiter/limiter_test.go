@@ -123,6 +123,46 @@ func TestMarkOnlineRefreshesStateAfterSnapshot(t *testing.T) {
 	}
 }
 
+func TestRefreshOnlineUIDsFromLastSnapshotKeepsLongLivedTrafficOnline(t *testing.T) {
+	const tag = "long-lived-anytls"
+	const uuid = "device-a"
+	taguuid := format.UserTag(tag, uuid)
+	l := newTestLimiter(tag, []panel.UserInfo{{
+		Id:   12,
+		Uuid: uuid,
+	}}, nil, nil, true)
+
+	_, reject, info := l.CheckLimit(taguuid, "192.0.2.80", true)
+	if reject {
+		t.Fatalf("expected first long-lived connection to be accepted, got reject info: %+v", info)
+	}
+	onlineUsers, onlineDevices, err := l.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatalf("expected first online snapshot: %v", err)
+	}
+	if len(*onlineUsers) != 1 || len(*onlineDevices) != 1 {
+		t.Fatalf("expected first snapshot to include one user/device, got users=%d devices=%d", len(*onlineUsers), len(*onlineDevices))
+	}
+
+	refreshed := l.RefreshOnlineUIDsFromLastSnapshot([]int{12})
+	if refreshed != 1 {
+		t.Fatalf("expected one refreshed long-lived device, got %d", refreshed)
+	}
+	onlineUsers, onlineDevices, err = l.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatalf("expected refreshed online snapshot: %v", err)
+	}
+	if len(*onlineUsers) != 1 || len(*onlineDevices) != 1 {
+		t.Fatalf("expected traffic refresh to keep one user/device online, got users=%d devices=%d", len(*onlineUsers), len(*onlineDevices))
+	}
+	if (*onlineUsers)[0].UID != 12 || (*onlineUsers)[0].IP != "192.0.2.80" {
+		t.Fatalf("unexpected refreshed online user: %+v", (*onlineUsers)[0])
+	}
+	if (*onlineDevices)[0].UUID != uuid {
+		t.Fatalf("expected device uuid %q, got %+v", uuid, (*onlineDevices)[0])
+	}
+}
+
 func TestCheckLimitRejectsUUIDDeviceLimitWhenPendingExceedsLimit(t *testing.T) {
 	const tag = "uuid-pending-limit"
 	l := newTestLimiter(tag, []panel.UserInfo{

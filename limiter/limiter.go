@@ -19,18 +19,19 @@ func Init() {
 }
 
 type Limiter struct {
-	Nodetype             string         // Node type, e.g. "v2ray", "trojan", "shadowsocks"
-	SpeedLimit           int            // Node speed limit in Mbps
-	UserOnlineIP         *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
-	OldUserOnline        *sync.Map      // Key: Ip, value: Uid
-	OldUserOnlineDevice  *sync.Map      // Key: TagUUID, value: Uid
-	UUIDtoUID            map[string]int // Key: UUID, value: Uid
-	stateMu              sync.RWMutex
-	UserLimitInfo        *sync.Map   // Key: TagUUID value: UserLimitInfo
-	SpeedLimiter         *sync.Map   // key: TagUUID, value: *DynamicBucket
-	AliveList            map[int]int // Key: Uid, value: alive_ip
-	DeviceAliveList      map[int]int // Key: Uid, value: alive device UUID count
-	UseDeviceLimitByUUID bool
+	Nodetype               string         // Node type, e.g. "v2ray", "trojan", "shadowsocks"
+	SpeedLimit             int            // Node speed limit in Mbps
+	UserOnlineIP           *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
+	OldUserOnline          *sync.Map      // Key: Ip, value: Uid
+	OldUserOnlineDevice    *sync.Map      // Key: TagUUID, value: Uid
+	OldUserOnlineDeviceIPs *sync.Map      // Key: TagUUID, value: []Ip from last reported snapshot
+	UUIDtoUID              map[string]int // Key: UUID, value: Uid
+	stateMu                sync.RWMutex
+	UserLimitInfo          *sync.Map   // Key: TagUUID value: UserLimitInfo
+	SpeedLimiter           *sync.Map   // key: TagUUID, value: *DynamicBucket
+	AliveList              map[int]int // Key: Uid, value: alive_ip
+	DeviceAliveList        map[int]int // Key: Uid, value: alive device UUID count
+	UseDeviceLimitByUUID   bool
 }
 
 type UserLimitInfo struct {
@@ -73,15 +74,16 @@ func (r LimitRejectReason) String() string {
 
 func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList map[int]int, deviceAliveList map[int]int, useDeviceLimitByUUID bool) *Limiter {
 	l := &Limiter{
-		Nodetype:             nodetype,
-		UserOnlineIP:         new(sync.Map),
-		UserLimitInfo:        new(sync.Map),
-		SpeedLimiter:         new(sync.Map),
-		AliveList:            cloneIntMap(aliveList),
-		DeviceAliveList:      cloneIntMap(deviceAliveList),
-		UseDeviceLimitByUUID: useDeviceLimitByUUID,
-		OldUserOnline:        new(sync.Map),
-		OldUserOnlineDevice:  new(sync.Map),
+		Nodetype:               nodetype,
+		UserOnlineIP:           new(sync.Map),
+		UserLimitInfo:          new(sync.Map),
+		SpeedLimiter:           new(sync.Map),
+		AliveList:              cloneIntMap(aliveList),
+		DeviceAliveList:        cloneIntMap(deviceAliveList),
+		UseDeviceLimitByUUID:   useDeviceLimitByUUID,
+		OldUserOnline:          new(sync.Map),
+		OldUserOnlineDevice:    new(sync.Map),
+		OldUserOnlineDeviceIPs: new(sync.Map),
 	}
 	uuidmap := make(map[string]int)
 	for i := range users {
@@ -125,6 +127,8 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 	for i := range deleted {
 		l.UserLimitInfo.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.UserOnlineIP.Delete(format.UserTag(tag, deleted[i].Uuid))
+		l.OldUserOnlineDevice.Delete(format.UserTag(tag, deleted[i].Uuid))
+		l.OldUserOnlineDeviceIPs.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.SpeedLimiter.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.stateMu.Lock()
 		delete(l.UUIDtoUID, deleted[i].Uuid)
@@ -361,34 +365,109 @@ func (l *Limiter) MarkOnline(taguuid string, ip string) bool {
 	return true
 }
 
+func (l *Limiter) RefreshOnlineUIDsFromLastSnapshot(uids []int) int {
+	if len(uids) == 0 {
+		return 0
+	}
+
+	uidSet := make(map[int]struct{}, len(uids))
+	for _, uid := range uids {
+		if uid > 0 {
+			uidSet[uid] = struct{}{}
+		}
+	}
+	if len(uidSet) == 0 {
+		return 0
+	}
+
+	refreshed := 0
+	l.OldUserOnlineDeviceIPs.Range(func(key, value interface{}) bool {
+		taguuid, ok := key.(string)
+		if !ok || taguuid == "" {
+			return true
+		}
+		oldUID, ok := l.OldUserOnlineDevice.Load(taguuid)
+		if !ok {
+			return true
+		}
+		uid, ok := oldUID.(int)
+		if !ok {
+			return true
+		}
+		if _, active := uidSet[uid]; !active {
+			return true
+		}
+
+		ips, ok := value.([]string)
+		if !ok || len(ips) == 0 {
+			return true
+		}
+		newipMap := new(sync.Map)
+		hasIP := false
+		for _, ip := range ips {
+			ip = normalizeIP(ip)
+			if ip == "" || l.isIPBlocked(taguuid, ip) {
+				continue
+			}
+			newipMap.Store(ip, uid)
+			hasIP = true
+		}
+		if !hasIP {
+			return true
+		}
+
+		if existing, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
+			if existingMap, ok := existing.(*sync.Map); ok {
+				newipMap.Range(func(ip, uid interface{}) bool {
+					existingMap.Store(ip, uid)
+					return true
+				})
+			}
+		}
+		refreshed++
+		return true
+	})
+
+	return refreshed
+}
+
 func (l *Limiter) GetOnlineDeviceState() (*[]panel.OnlineUser, *[]panel.OnlineDevice, error) {
 	var onlineUser []panel.OnlineUser
 	var onlineDevice []panel.OnlineDevice
-	l.OldUserOnline = new(sync.Map)
-	l.OldUserOnlineDevice = new(sync.Map)
+	oldUserOnline := new(sync.Map)
+	oldUserOnlineDevice := new(sync.Map)
+	oldUserOnlineDeviceIPs := new(sync.Map)
 	l.UserOnlineIP.Range(func(key, value interface{}) bool {
 		taguuid := key.(string)
 		ipMap := value.(*sync.Map)
 		deviceUUID := extractUUIDFromTagUUID(taguuid)
 		deviceSeen := false
+		deviceIPs := make([]string, 0)
 		ipMap.Range(func(key, value interface{}) bool {
 			uid := value.(int)
 			ip := normalizeIP(key.(string))
 			if l.isIPBlocked(taguuid, ip) {
 				return true
 			}
-			l.OldUserOnline.Store(ip, uid)
+			oldUserOnline.Store(ip, uid)
+			deviceIPs = append(deviceIPs, ip)
 			if !deviceSeen {
-				l.OldUserOnlineDevice.Store(taguuid, uid)
+				oldUserOnlineDevice.Store(taguuid, uid)
 				deviceSeen = true
 			}
 			onlineUser = append(onlineUser, panel.OnlineUser{UID: uid, IP: ip})
 			onlineDevice = append(onlineDevice, panel.OnlineDevice{UID: uid, UUID: deviceUUID, IP: ip})
 			return true
 		})
+		if len(deviceIPs) > 0 {
+			oldUserOnlineDeviceIPs.Store(taguuid, deviceIPs)
+		}
 		l.UserOnlineIP.Delete(taguuid) // Reset online device
 		return true
 	})
+	l.OldUserOnline = oldUserOnline
+	l.OldUserOnlineDevice = oldUserOnlineDevice
+	l.OldUserOnlineDeviceIPs = oldUserOnlineDeviceIPs
 
 	return &onlineUser, &onlineDevice, nil
 }
