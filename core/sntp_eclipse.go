@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -53,6 +54,7 @@ const (
 	sntpEclipseMaxFramePlain       = 16 * 1024
 	sntpEclipseMaxFrameSeal        = sntpEclipseMaxFramePlain + chacha20poly1305.Overhead
 	sntpEclipseHandshakeTTL        = 10 * time.Minute
+	sntpEclipseOnlineRefresh       = 5 * time.Second
 )
 
 var (
@@ -104,6 +106,7 @@ type sntpEclipseSession struct {
 	serverName string
 	v2         bool
 	writeMu    sync.Mutex
+	onlineMark atomic.Int64
 }
 
 type sntpEclipseFrameReader struct {
@@ -728,13 +731,25 @@ func (s *sntpEclipseSession) readFrame(c *sntpEclipseCipher) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if l, err := limiter.GetLimiter(s.tag); err == nil {
-		l.MarkOnline(s.userTag, s.clientIP)
-	}
+	s.markOnline()
 	if s.v2 {
 		return decodeSntpEclipseV2Frame(plain)
 	}
 	return plain, nil
+}
+
+func (s *sntpEclipseSession) markOnline() {
+	now := time.Now().UnixNano()
+	last := s.onlineMark.Load()
+	if last > 0 && time.Duration(now-last) < sntpEclipseOnlineRefresh {
+		return
+	}
+	if !s.onlineMark.CompareAndSwap(last, now) {
+		return
+	}
+	if l, err := limiter.GetLimiter(s.tag); err == nil {
+		l.MarkOnline(s.userTag, s.clientIP)
+	}
 }
 
 func (s *sntpEclipseSession) writeFrame(c *sntpEclipseCipher, plain []byte) error {
