@@ -52,6 +52,38 @@
 
 日常排查优先看 `SNTP user access ...`，不要优先开 Xray 原生 access log。
 
+## 远端 ClickHouse 访问审计
+
+默认只写本机 journal 或 `Log.Output` 文件，不会把访问明细发到远端。需要把 `SNTP user access ...` 同步写入独立日志库时，可以在 `/etc/v2node/config.json` 顶层增加 `AccessAudit`：
+
+```json
+{
+  "AccessAudit": {
+    "Enabled": true,
+    "Endpoint": "https://logs.sntp.uk/api/v1/access-events",
+    "Token": "替换为 ingest-api 的 INGEST_TOKEN",
+    "BatchSize": 1000,
+    "MaxQueueSize": 10000,
+    "FlushInterval": "1s",
+    "Timeout": "5s"
+  }
+}
+```
+
+字段含义：
+
+| 配置 | 含义 |
+| --- | --- |
+| `Enabled` | 是否开启远端访问审计上报，默认关闭 |
+| `Endpoint` | ingest-api HTTPS 接收地址 |
+| `Token` | HMAC-SHA256 签名密钥，必须与 ingest-api 的 `INGEST_TOKEN` 一致 |
+| `BatchSize` | 单批最多上报条数 |
+| `MaxQueueSize` | 本地内存队列上限；队列满时丢弃新日志，不阻塞用户连接 |
+| `FlushInterval` | 定时刷新间隔 |
+| `Timeout` | 单次 HTTP 上报超时时间 |
+
+远端上报是异步队列：日志服务不可用时会输出 `SNTP access audit report failed` 警告，但不会阻塞代理连接。`SNTPAccess: false` 只关闭本地 `SNTP user access ...` 输出；如果 `AccessAudit.Enabled` 仍为 `true`，远端审计会继续上报。
+
 ## 日志在哪里
 
 安装脚本部署的 systemd 服务可以直接用管理脚本：

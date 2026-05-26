@@ -5,12 +5,14 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	logrus "github.com/sirupsen/logrus"
+	"github.com/wyx2685/v2node/common/accessaudit"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/rate"
 	"github.com/wyx2685/v2node/limiter"
@@ -177,9 +179,6 @@ func formatLimitRejectMessage(userEmail string, sourceIP string, info limiter.Li
 }
 
 func logSntpUserAccess(ctx context.Context, destination net.Destination, outboundTag string) {
-	if !sntpAccessLogEnabled.Load() {
-		return
-	}
 	sessionInbound := session.InboundFromContext(ctx)
 	if sessionInbound == nil || sessionInbound.User == nil || sessionInbound.User.Email == "" {
 		return
@@ -195,14 +194,33 @@ func logSntpUserAccess(ctx context.Context, destination net.Destination, outboun
 		}
 	}
 	sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
-	writeSntpAccessLog(fmt.Sprintf("SNTP user access uid=%d uuid=%s source_ip=%s target=%s inbound_tag=%s outbound_tag=%s",
-		uid,
-		uuid,
-		sourceIP,
-		destination.NetAddr(),
-		sessionInbound.Tag,
-		outboundTag,
-	))
+	if sntpAccessLogEnabled.Load() {
+		writeSntpAccessLog(fmt.Sprintf("SNTP user access uid=%d uuid=%s source_ip=%s target=%s inbound_tag=%s outbound_tag=%s",
+			uid,
+			uuid,
+			sourceIP,
+			destination.NetAddr(),
+			sessionInbound.Tag,
+			outboundTag,
+		))
+	}
+	nodeID := extractNodeIDFromInboundTag(sessionInbound.Tag)
+	network := accessAuditNetwork(destination)
+	if uid > 0 && nodeID > 0 && network != "" && uuid != "" && sourceIP != "" {
+		accessaudit.Enqueue(accessaudit.Event{
+			EventTime:   time.Now(),
+			NodeID:      nodeID,
+			NodeTag:     sessionInbound.Tag,
+			UID:         uint64(uid),
+			UUID:        uuid,
+			SourceIP:    sourceIP,
+			TargetHost:  destination.Address.String(),
+			TargetPort:  uint16(destination.Port),
+			Network:     network,
+			InboundTag:  sessionInbound.Tag,
+			OutboundTag: outboundTag,
+		})
+	}
 }
 
 func writeSntpAccessLog(message string) {
@@ -217,6 +235,29 @@ func extractUUIDFromUserEmail(userEmail string) string {
 		return userEmail
 	}
 	return userEmail[idx+1:]
+}
+
+func extractNodeIDFromInboundTag(tag string) uint32 {
+	idx := strings.LastIndex(tag, ":")
+	if idx < 0 || idx+1 >= len(tag) {
+		return 0
+	}
+	nodeID, err := strconv.ParseUint(tag[idx+1:], 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(nodeID)
+}
+
+func accessAuditNetwork(destination net.Destination) string {
+	switch destination.Network {
+	case net.Network_TCP:
+		return "tcp"
+	case net.Network_UDP:
+		return "udp"
+	default:
+		return ""
+	}
 }
 
 // Start implements common.Runnable.

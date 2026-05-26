@@ -231,6 +231,15 @@ generate_v2node_config() {
         "Output": "",
         "Access": "none"
     },
+    "AccessAudit": {
+        "Enabled": false,
+        "Endpoint": "",
+        "Token": "",
+        "BatchSize": 1000,
+        "MaxQueueSize": 10000,
+        "FlushInterval": "1s",
+        "Timeout": "5s"
+    },
     "Nodes": [
         {
             "ApiHost": "${api_host}",

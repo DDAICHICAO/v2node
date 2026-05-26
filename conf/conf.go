@@ -12,9 +12,10 @@ const DefaultNodeRetryCount = 1
 const DefaultNodeTimeout = 15
 
 type Conf struct {
-	LogConfig   LogConfig    `mapstructure:"Log"`
-	NodeConfigs []NodeConfig `mapstructure:"Nodes"`
-	PprofPort   int          `mapstructure:"PprofPort"`
+	LogConfig         LogConfig         `mapstructure:"Log"`
+	AccessAuditConfig AccessAuditConfig `mapstructure:"AccessAudit"`
+	NodeConfigs       []NodeConfig      `mapstructure:"Nodes"`
+	PprofPort         int               `mapstructure:"PprofPort"`
 }
 
 type LogConfig struct {
@@ -41,6 +42,12 @@ func New() *Conf {
 			Access:     "none",
 			SNTPAccess: true,
 		},
+		AccessAuditConfig: AccessAuditConfig{
+			BatchSize:     DefaultAccessAuditBatchSize,
+			MaxQueueSize:  DefaultAccessAuditMaxQueueSize,
+			FlushInterval: DefaultAccessAuditFlushInterval,
+			Timeout:       DefaultAccessAuditTimeout,
+		},
 	}
 }
 
@@ -59,6 +66,9 @@ func (p *Conf) LoadFromPath(filePath string) error {
 		return fmt.Errorf("unmarshal config error: %s", err)
 	}
 	p.LogConfig.Normalize()
+	if err := p.AccessAuditConfig.Normalize(); err != nil {
+		return err
+	}
 	for i := range p.NodeConfigs {
 		if p.NodeConfigs[i].RetryCount == nil {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)

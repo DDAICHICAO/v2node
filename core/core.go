@@ -5,6 +5,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/accessaudit"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
@@ -68,6 +69,15 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	if err := v.Server.Start(); err != nil {
 		return err
 	}
+	auditConfig, err := v.Config.AccessAuditConfig.RuntimeConfig()
+	if err != nil {
+		_ = v.Server.Close()
+		return err
+	}
+	if err := accessaudit.Configure(auditConfig); err != nil {
+		_ = v.Server.Close()
+		return err
+	}
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
@@ -89,6 +99,7 @@ func (v *V2Core) Close() error {
 		_ = server.Close()
 	}
 	v.mieru = nil
+	accessaudit.Shutdown()
 	if v.Server != nil {
 		err := v.Server.Close()
 		if err != nil {
