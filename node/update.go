@@ -57,10 +57,17 @@ func (c *Controller) checkUpdateTask(ctx context.Context) {
 		}).Error("Get update task failed")
 		return
 	}
-	if task == nil || !task.Enabled || task.TaskID == "" || task.Version == "" {
+	if task == nil || !task.Enabled || task.TaskID == "" {
 		return
 	}
 	if updateTaskApplied(task.TaskID) {
+		return
+	}
+	if updateTaskIsAccessAuditConfig(*task) {
+		go c.runAccessAuditConfigTask(*task)
+		return
+	}
+	if task.Version == "" {
 		return
 	}
 	if currentVersion := localVersion(); updateTaskIsDowngrade(currentVersion, task.Version) {

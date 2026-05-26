@@ -8,11 +8,24 @@ import (
 )
 
 type UpdateTask struct {
-	Enabled     bool   `json:"enabled"`
-	TaskID      string `json:"task_id"`
-	Version     string `json:"version"`
-	DownloadURL string `json:"download_url"`
-	SHA256      string `json:"sha256"`
+	Enabled     bool             `json:"enabled"`
+	TaskID      string           `json:"task_id"`
+	Type        string           `json:"type"`
+	Version     string           `json:"version"`
+	DownloadURL string           `json:"download_url"`
+	SHA256      string           `json:"sha256"`
+	AccessAudit *AccessAuditTask `json:"access_audit,omitempty"`
+}
+
+type AccessAuditTask struct {
+	Enabled       bool   `json:"enabled"`
+	Endpoint      string `json:"endpoint"`
+	Token         string `json:"token"`
+	BatchSize     int    `json:"batch_size"`
+	MaxQueueSize  int    `json:"max_queue_size"`
+	FlushInterval string `json:"flush_interval"`
+	Timeout       string `json:"timeout"`
+	SNTPAccess    *bool  `json:"sntp_access,omitempty"`
 }
 
 type UpdateReport struct {
