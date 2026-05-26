@@ -60,7 +60,8 @@ func (c *Controller) checkUpdateTask(ctx context.Context) {
 	if task == nil || !task.Enabled || task.TaskID == "" {
 		return
 	}
-	if updateTaskApplied(task.TaskID) {
+	if state, applied := appliedUpdateTaskState(task.TaskID); applied {
+		c.reportAppliedUpdateStatus(*task, state)
 		return
 	}
 	if updateTaskIsAccessAuditConfig(*task) {
@@ -96,7 +97,8 @@ func (c *Controller) runUpdateTask(task panel.UpdateTask) {
 	}
 	defer releaseLock()
 
-	if updateTaskApplied(task.TaskID) {
+	if state, applied := appliedUpdateTaskState(task.TaskID); applied {
+		c.reportAppliedUpdateStatus(task, state)
 		return
 	}
 
@@ -154,6 +156,18 @@ func (c *Controller) reportUpdateStatus(task panel.UpdateTask, status string, me
 			"err":    err,
 		}).Error("Report update status failed")
 	}
+}
+
+func (c *Controller) reportAppliedUpdateStatus(task panel.UpdateTask, state updateState) {
+	status := strings.TrimSpace(state.Status)
+	if !updateTaskStatusIsApplied(status) {
+		return
+	}
+	message := strings.TrimSpace(state.Message)
+	if message == "" {
+		message = "task already applied"
+	}
+	c.reportUpdateStatus(task, status, message)
 }
 
 func (c *Controller) markUpdateTaskSkipped(task panel.UpdateTask, message string) {
@@ -443,8 +457,13 @@ func localVersion() string {
 }
 
 func updateTaskApplied(taskID string) bool {
+	_, applied := appliedUpdateTaskState(taskID)
+	return applied
+}
+
+func appliedUpdateTaskState(taskID string) (updateState, bool) {
 	state, err := readUpdateState()
-	return err == nil && state.TaskID == taskID && updateTaskStatusIsApplied(state.Status)
+	return state, err == nil && state.TaskID == taskID && updateTaskStatusIsApplied(state.Status)
 }
 
 func updateTaskStatusIsApplied(status string) bool {
