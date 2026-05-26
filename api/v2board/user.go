@@ -56,6 +56,7 @@ type UserDeltaResponse struct {
 type UserDeltaData struct {
 	FullRequired bool             `json:"full_required"`
 	LatestSeq    int64            `json:"latest_seq"`
+	ServerTime   int64            `json:"server_time"`
 	Events       []UserDeltaEvent `json:"events"`
 }
 

@@ -12,11 +12,12 @@ func applyUserDeltaEvents(oldUsers []panel.UserInfo, events []panel.UserDeltaEve
 	}
 
 	usersByUUID := make(map[string]panel.UserInfo, len(oldUsers))
+	uuidsByUserID := make(map[int]map[string]struct{}, len(oldUsers))
 	for _, user := range oldUsers {
 		if user.Uuid == "" {
 			continue
 		}
-		usersByUUID[user.Uuid] = user
+		addUserToIndex(usersByUUID, uuidsByUserID, user)
 	}
 
 	changed := false
@@ -29,18 +30,18 @@ func applyUserDeltaEvents(oldUsers []panel.UserInfo, events []panel.UserDeltaEve
 		switch event.Action {
 		case panel.UserDeltaActionUpsert:
 			if userID > 0 {
-				deleteUserID(usersByUUID, userID)
+				deleteUserID(usersByUUID, uuidsByUserID, userID)
 			}
 			for _, user := range event.Users {
 				if user.Uuid == "" {
 					continue
 				}
-				usersByUUID[user.Uuid] = user
+				addUserToIndex(usersByUUID, uuidsByUserID, user)
 			}
 			changed = true
 		case panel.UserDeltaActionDelete:
 			if userID > 0 {
-				deleteUserID(usersByUUID, userID)
+				deleteUserID(usersByUUID, uuidsByUserID, userID)
 				changed = true
 				continue
 			}
@@ -48,8 +49,9 @@ func applyUserDeltaEvents(oldUsers []panel.UserInfo, events []panel.UserDeltaEve
 				if user.Uuid == "" {
 					continue
 				}
-				delete(usersByUUID, user.Uuid)
-				changed = true
+				if deleteUserUUID(usersByUUID, uuidsByUserID, user.Uuid) {
+					changed = true
+				}
 			}
 		}
 	}
@@ -71,12 +73,62 @@ func applyUserDeltaEvents(oldUsers []panel.UserInfo, events []panel.UserDeltaEve
 	return next, true
 }
 
-func deleteUserID(usersByUUID map[string]panel.UserInfo, userID int) {
-	for uuid, user := range usersByUUID {
-		if user.Id == userID {
-			delete(usersByUUID, uuid)
+func addUserToIndex(usersByUUID map[string]panel.UserInfo, uuidsByUserID map[int]map[string]struct{}, user panel.UserInfo) {
+	if user.Uuid == "" {
+		return
+	}
+	if oldUser, ok := usersByUUID[user.Uuid]; ok && oldUser.Id > 0 && oldUser.Id != user.Id {
+		if oldUUIDs := uuidsByUserID[oldUser.Id]; oldUUIDs != nil {
+			delete(oldUUIDs, user.Uuid)
+			if len(oldUUIDs) == 0 {
+				delete(uuidsByUserID, oldUser.Id)
+			}
 		}
 	}
+
+	usersByUUID[user.Uuid] = user
+	if user.Id <= 0 {
+		return
+	}
+	if uuidsByUserID[user.Id] == nil {
+		uuidsByUserID[user.Id] = make(map[string]struct{})
+	}
+	uuidsByUserID[user.Id][user.Uuid] = struct{}{}
+}
+
+func deleteUserID(usersByUUID map[string]panel.UserInfo, uuidsByUserID map[int]map[string]struct{}, userID int) {
+	if userID <= 0 {
+		return
+	}
+	uuids := uuidsByUserID[userID]
+	for uuid := range uuids {
+		delete(usersByUUID, uuid)
+	}
+	delete(uuidsByUserID, userID)
+}
+
+func deleteUserUUID(usersByUUID map[string]panel.UserInfo, uuidsByUserID map[int]map[string]struct{}, uuid string) bool {
+	user, ok := usersByUUID[uuid]
+	if !ok {
+		return false
+	}
+	delete(usersByUUID, uuid)
+	if user.Id > 0 {
+		if uuids := uuidsByUserID[user.Id]; uuids != nil {
+			delete(uuids, uuid)
+			if len(uuids) == 0 {
+				delete(uuidsByUserID, user.Id)
+			}
+		}
+	}
+	return true
+}
+
+func userDeltaPruneTime(delta *panel.UserDeltaData) (int64, bool) {
+	if delta == nil || delta.ServerTime <= 0 {
+		return 0, false
+	}
+	return delta.ServerTime, true
 }
 
 func removeExpiredUsers(users []panel.UserInfo, nowUnix int64) ([]panel.UserInfo, bool) {

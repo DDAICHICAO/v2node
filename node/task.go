@@ -84,23 +84,41 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 func (c *Controller) syncUserState(ctx context.Context) error {
 	delta, err := c.apiClient.GetUserDelta(ctx)
 	if err == nil && delta != nil && !delta.FullRequired {
-		c.apiClient.SetUserSyncSeq(delta.LatestSeq)
 		if err := c.refreshAliveState(ctx); err != nil {
 			return err
 		}
+		pruneUnix, canPrune := userDeltaPruneTime(delta)
 		if len(delta.Events) == 0 {
 			log.WithField("tag", c.tag).Debug("User delta no change")
-			return c.pruneExpiredUsers(time.Now().Unix())
+			if canPrune {
+				if err := c.pruneExpiredUsers(pruneUnix); err != nil {
+					return err
+				}
+			}
+			c.apiClient.SetUserSyncSeq(delta.LatestSeq)
+			return nil
 		}
 		newU, changed := applyUserDeltaEvents(c.userList, delta.Events)
 		if !changed {
 			log.WithField("tag", c.tag).Debug("User delta no applicable change")
-			return c.pruneExpiredUsers(time.Now().Unix())
+			if canPrune {
+				if err := c.pruneExpiredUsers(pruneUnix); err != nil {
+					return err
+				}
+			}
+			c.apiClient.SetUserSyncSeq(delta.LatestSeq)
+			return nil
 		}
 		if err := c.applyUserList(newU); err != nil {
 			return err
 		}
-		return c.pruneExpiredUsers(time.Now().Unix())
+		if canPrune {
+			if err := c.pruneExpiredUsers(pruneUnix); err != nil {
+				return err
+			}
+		}
+		c.apiClient.SetUserSyncSeq(delta.LatestSeq)
+		return nil
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -136,12 +154,15 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 	// node no changed, check users
 	if len(newU) == 0 {
 		log.WithField("tag", c.tag).Debug("User list no change")
-		return c.pruneExpiredUsers(time.Now().Unix())
+		return nil
 	}
 	if err := c.applyUserList(newU); err != nil {
 		return err
 	}
-	return c.pruneExpiredUsers(time.Now().Unix())
+	if pruneUnix, canPrune := userDeltaPruneTime(delta); canPrune {
+		return c.pruneExpiredUsers(pruneUnix)
+	}
+	return nil
 }
 
 func (c *Controller) refreshAliveState(ctx context.Context) error {

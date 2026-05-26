@@ -85,6 +85,23 @@ func TestRemoveExpiredUsers(t *testing.T) {
 	assertUserListEqual(t, got, want)
 }
 
+func TestUserDeltaPruneTimeRequiresPanelServerTime(t *testing.T) {
+	if _, ok := userDeltaPruneTime(nil); ok {
+		t.Fatal("expected nil delta to skip local prune")
+	}
+	if _, ok := userDeltaPruneTime(&panel.UserDeltaData{}); ok {
+		t.Fatal("expected delta without panel server time to skip local prune")
+	}
+
+	got, ok := userDeltaPruneTime(&panel.UserDeltaData{ServerTime: 123})
+	if !ok {
+		t.Fatal("expected panel server time to enable prune")
+	}
+	if got != 123 {
+		t.Fatalf("got prune time %d, want 123", got)
+	}
+}
+
 func TestUpdateTaskIsDowngrade(t *testing.T) {
 	cases := []struct {
 		name    string
