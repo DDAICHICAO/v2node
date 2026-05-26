@@ -85,6 +85,44 @@ func TestCheckLimitAllowsUUIDDeviceOverlapFromBackendCache(t *testing.T) {
 	}
 }
 
+func TestMarkOnlineRefreshesStateAfterSnapshot(t *testing.T) {
+	const tag = "long-lived-session"
+	const uuid = "sntp-eclipse-device"
+	taguuid := format.UserTag(tag, uuid)
+	l := newTestLimiter(tag, []panel.UserInfo{{
+		Id:   12,
+		Uuid: uuid,
+	}}, nil, nil, true)
+
+	if !l.MarkOnline(taguuid, "::ffff:192.0.2.60") {
+		t.Fatal("expected online marker to be accepted")
+	}
+	onlineUsers, onlineDevices, err := l.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatalf("expected first online snapshot: %v", err)
+	}
+	if len(*onlineUsers) != 1 || len(*onlineDevices) != 1 {
+		t.Fatalf("expected first snapshot to include one online user/device, got users=%d devices=%d", len(*onlineUsers), len(*onlineDevices))
+	}
+
+	if !l.MarkOnline(taguuid, "192.0.2.60") {
+		t.Fatal("expected refreshed online marker to be accepted")
+	}
+	onlineUsers, onlineDevices, err = l.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatalf("expected refreshed online snapshot: %v", err)
+	}
+	if len(*onlineUsers) != 1 || len(*onlineDevices) != 1 {
+		t.Fatalf("expected refreshed snapshot to include one online user/device, got users=%d devices=%d", len(*onlineUsers), len(*onlineDevices))
+	}
+	if (*onlineUsers)[0].UID != 12 || (*onlineUsers)[0].IP != "192.0.2.60" {
+		t.Fatalf("unexpected refreshed online user: %+v", (*onlineUsers)[0])
+	}
+	if (*onlineDevices)[0].UUID != uuid {
+		t.Fatalf("expected device uuid %q, got %+v", uuid, (*onlineDevices)[0])
+	}
+}
+
 func TestCheckLimitRejectsUUIDDeviceLimitWhenPendingExceedsLimit(t *testing.T) {
 	const tag = "uuid-pending-limit"
 	l := newTestLimiter(tag, []panel.UserInfo{

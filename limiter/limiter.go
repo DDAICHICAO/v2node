@@ -318,6 +318,39 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	}
 }
 
+func (l *Limiter) MarkOnline(taguuid string, ip string) bool {
+	ip = normalizeIP(ip)
+	if ip == "" {
+		return false
+	}
+
+	v, ok := l.UserLimitInfo.Load(taguuid)
+	if !ok {
+		return false
+	}
+	info := v.(*UserLimitInfo)
+	if _, blocked := info.BlockedIPs[ip]; blocked {
+		return false
+	}
+
+	newipMap := new(sync.Map)
+	newipMap.Store(ip, info.UID)
+	if existing, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
+		existing.(*sync.Map).Store(ip, info.UID)
+	}
+	if oldUid, ok := l.OldUserOnline.Load(ip); ok {
+		if oldUidInt, ok := oldUid.(int); ok && oldUidInt == info.UID {
+			l.OldUserOnline.Delete(ip)
+		}
+	}
+	if oldUid, ok := l.OldUserOnlineDevice.Load(taguuid); ok {
+		if oldUidInt, ok := oldUid.(int); ok && oldUidInt == info.UID {
+			l.OldUserOnlineDevice.Delete(taguuid)
+		}
+	}
+	return true
+}
+
 func (l *Limiter) GetOnlineDeviceState() (*[]panel.OnlineUser, *[]panel.OnlineDevice, error) {
 	var onlineUser []panel.OnlineUser
 	var onlineDevice []panel.OnlineDevice

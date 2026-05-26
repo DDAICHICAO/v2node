@@ -728,6 +728,9 @@ func (s *sntpEclipseSession) readFrame(c *sntpEclipseCipher) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if l, err := limiter.GetLimiter(s.tag); err == nil {
+		l.MarkOnline(s.userTag, s.clientIP)
+	}
 	if s.v2 {
 		return decodeSntpEclipseV2Frame(plain)
 	}
