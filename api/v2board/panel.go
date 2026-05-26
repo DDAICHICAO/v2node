@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -35,6 +36,7 @@ type Client struct {
 	NodeId                  int
 	nodeEtag                string
 	userEtag                string
+	userSyncMu              sync.RWMutex
 	userSyncSeq             int64
 	responseBodyHash        string
 	UserList                *UserListBody

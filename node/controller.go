@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -22,6 +23,7 @@ type Controller struct {
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
 	deviceAliveMap          map[int]int
+	lastAliveRefresh        time.Time
 	netSampler              *netstat.Sampler
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo

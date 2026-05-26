@@ -140,9 +140,10 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 
 func (c *Client) GetUserDelta(ctx context.Context) (*UserDeltaData, error) {
 	const path = "/api/v2/server/user-delta"
+	sinceSeq := c.UserSyncSeq()
 	r, err := c.client.R().
 		SetContext(ctx).
-		SetQueryParam("since_seq", strconv.FormatInt(c.userSyncSeq, 10)).
+		SetQueryParam("since_seq", strconv.FormatInt(sinceSeq, 10)).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
@@ -166,12 +167,19 @@ func (c *Client) GetUserDelta(ctx context.Context) (*UserDeltaData, error) {
 }
 
 func (c *Client) SetUserSyncSeq(seq int64) {
-	if seq >= 0 {
+	if seq < 0 {
+		return
+	}
+	c.userSyncMu.Lock()
+	defer c.userSyncMu.Unlock()
+	if seq >= c.userSyncSeq {
 		c.userSyncSeq = seq
 	}
 }
 
 func (c *Client) UserSyncSeq() int64 {
+	c.userSyncMu.RLock()
+	defer c.userSyncMu.RUnlock()
 	return c.userSyncSeq
 }
 
@@ -184,7 +192,7 @@ func (c *Client) updateUserSyncSeqFromHeader(value string) {
 	if err != nil || seq < 0 {
 		return
 	}
-	c.userSyncSeq = seq
+	c.SetUserSyncSeq(seq)
 }
 
 // GetUserAlive will fetch the alive_ip count for users

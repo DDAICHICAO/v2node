@@ -154,6 +154,51 @@ func TestCheckLimitRejectsUUIDDeviceLimitWhenPendingExceedsLimit(t *testing.T) {
 	}
 }
 
+func TestUpdateAliveStateCopiesAndSwitchesDeviceMode(t *testing.T) {
+	const tag = "alive-state-snapshot"
+	const uuid = "limited-user"
+	l := newTestLimiter(tag, []panel.UserInfo{{
+		Id:          9,
+		Uuid:        uuid,
+		DeviceLimit: 1,
+	}}, map[int]int{9: 1}, nil, false)
+
+	alive := map[int]int{9: 0}
+	deviceAlive := map[int]int{9: 1}
+	l.UpdateAliveState(alive, deviceAlive, true)
+	alive[9] = 99
+	deviceAlive[9] = 99
+
+	_, reject, info := l.CheckLimit(format.UserTag(tag, uuid), "192.0.2.50", true)
+	if reject {
+		t.Fatalf("expected copied device alive overlap to allow first pending device, got %+v", info)
+	}
+	if !info.UseDeviceLimitByUUID && info.Reason != LimitRejectReasonNone {
+		t.Fatalf("unexpected reject info after device alive update: %+v", info)
+	}
+
+	l.UpdateAliveState(map[int]int{9: 1}, nil, false)
+	_, reject, info = l.CheckLimit(format.UserTag(tag, "another-device"), "192.0.2.51", true)
+	if !reject || info.Reason != LimitRejectReasonUserNotFound || info.UseDeviceLimitByUUID {
+		t.Fatalf("expected missing user reject with device mode disabled, got reject=%v info=%+v", reject, info)
+	}
+}
+
+func TestUpdateUserDeletingOneUUIDKeepsUIDAliveCache(t *testing.T) {
+	const tag = "delete-one-device"
+	l := newTestLimiter(tag, []panel.UserInfo{
+		{Id: 9, Uuid: "device-a", DeviceLimit: 1},
+		{Id: 9, Uuid: "device-b", DeviceLimit: 1},
+	}, map[int]int{9: 1}, map[int]int{9: 1}, true)
+
+	l.UpdateUser(tag, nil, []panel.UserInfo{{Id: 9, Uuid: "device-b"}}, nil)
+
+	_, reject, info := l.CheckLimit(format.UserTag(tag, "device-a"), "192.0.2.70", true)
+	if reject {
+		t.Fatalf("expected remaining device to keep backend alive overlap, got %+v", info)
+	}
+}
+
 func TestUpdateUserDisablesExistingBucketWhenSpeedLimitRemoved(t *testing.T) {
 	const tag = "speed-limit-removed"
 	const uuid = "limited-user"

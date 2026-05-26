@@ -64,7 +64,7 @@ func (c *Controller) checkUpdateTask(ctx context.Context) {
 		return
 	}
 	if currentVersion := localVersion(); updateTaskIsDowngrade(currentVersion, task.Version) {
-		c.reportUpdateStatus(*task, updateStatusSkipped, "target version is older than current version "+currentVersion)
+		c.markUpdateTaskSkipped(*task, "target version is older than current version "+currentVersion)
 		return
 	}
 
@@ -147,6 +147,20 @@ func (c *Controller) reportUpdateStatus(task panel.UpdateTask, status string, me
 			"err":    err,
 		}).Error("Report update status failed")
 	}
+}
+
+func (c *Controller) markUpdateTaskSkipped(task panel.UpdateTask, message string) {
+	state := updateState{
+		TaskID:    task.TaskID,
+		Version:   task.Version,
+		Status:    updateStatusSkipped,
+		Message:   message,
+		UpdatedAt: time.Now().Unix(),
+	}
+	if err := writeUpdateState(state); err != nil {
+		log.WithField("err", err).Error("Write skipped update state failed")
+	}
+	c.reportUpdateStatus(task, updateStatusSkipped, message)
 }
 
 func performUpdate(task panel.UpdateTask, report func(status, message string)) error {
@@ -423,7 +437,11 @@ func localVersion() string {
 
 func updateTaskApplied(taskID string) bool {
 	state, err := readUpdateState()
-	return err == nil && state.TaskID == taskID && state.Status == updateStatusSuccess
+	return err == nil && state.TaskID == taskID && updateTaskStatusIsApplied(state.Status)
+}
+
+func updateTaskStatusIsApplied(status string) bool {
+	return status == updateStatusSuccess || status == updateStatusSkipped
 }
 
 func updateTaskIsDowngrade(currentVersion string, targetVersion string) bool {

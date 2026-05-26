@@ -40,21 +40,21 @@ import (
 )
 
 const (
-	sntpEclipseProtocol            = "sntp-eclipse"
-	sntpEclipseModeV1              = "sntp-eclipse-v1"
-	sntpEclipseModeV2              = "sntp-eclipse-v2"
-	sntpEclipseVersionV1      byte = 1
-	sntpEclipseVersionV2      byte = 2
-	sntpEclipseCmdTCP         byte = 1
-	sntpEclipseCmdUDP         byte = 2
-	sntpEclipseHelloPlainSize      = 496
-	sntpEclipseHelloSealSize       = sntpEclipseHelloPlainSize + chacha20poly1305.Overhead
-	sntpEclipseReplyPlainSize      = 48
-	sntpEclipseReplySealSize       = sntpEclipseReplyPlainSize + chacha20poly1305.Overhead
-	sntpEclipseMaxFramePlain       = 16 * 1024
-	sntpEclipseMaxFrameSeal        = sntpEclipseMaxFramePlain + chacha20poly1305.Overhead
-	sntpEclipseHandshakeTTL        = 10 * time.Minute
-	sntpEclipseOnlineRefresh       = 5 * time.Second
+	sntpEclipseProtocol                  = "sntp-eclipse"
+	sntpEclipseModeV1                    = "sntp-eclipse-v1"
+	sntpEclipseModeV2                    = "sntp-eclipse-v2"
+	sntpEclipseVersionV1            byte = 1
+	sntpEclipseVersionV2            byte = 2
+	sntpEclipseCmdTCP               byte = 1
+	sntpEclipseCmdUDP               byte = 2
+	sntpEclipseHelloPlainSize            = 496
+	sntpEclipseHelloSealSize             = sntpEclipseHelloPlainSize + chacha20poly1305.Overhead
+	sntpEclipseReplyPlainSize            = 48
+	sntpEclipseReplySealSize             = sntpEclipseReplyPlainSize + chacha20poly1305.Overhead
+	sntpEclipseMaxFramePlain             = 16 * 1024
+	sntpEclipseMaxFrameSeal              = sntpEclipseMaxFramePlain + chacha20poly1305.Overhead
+	sntpEclipseHandshakeTTL              = 10 * time.Minute
+	defaultSntpEclipseOnlineRefresh      = 5 * time.Second
 )
 
 var (
@@ -75,6 +75,7 @@ type SntpEclipseServer struct {
 	dispatcher          routing.Dispatcher
 	counter             *counter.TrafficCounter
 	replay              *sntpEclipseReplayCache
+	onlineRefresh       time.Duration
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -93,20 +94,21 @@ type sntpEclipseHello struct {
 }
 
 type sntpEclipseSession struct {
-	conn       net.Conn
-	clientIP   string
-	hello      sntpEclipseHello
-	c2s        *sntpEclipseCipher
-	s2c        *sntpEclipseCipher
-	tag        string
-	userTag    string
-	uid        int
-	xray       *xcore.Instance
-	dispatcher routing.Dispatcher
-	serverName string
-	v2         bool
-	writeMu    sync.Mutex
-	onlineMark atomic.Int64
+	conn          net.Conn
+	clientIP      string
+	hello         sntpEclipseHello
+	c2s           *sntpEclipseCipher
+	s2c           *sntpEclipseCipher
+	tag           string
+	userTag       string
+	uid           int
+	xray          *xcore.Instance
+	dispatcher    routing.Dispatcher
+	serverName    string
+	v2            bool
+	onlineRefresh time.Duration
+	writeMu       sync.Mutex
+	onlineMark    atomic.Int64
 }
 
 type sntpEclipseFrameReader struct {
@@ -193,6 +195,7 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Inst
 		dispatcher:          dispatcher,
 		counter:             counter.NewTrafficCounter(),
 		replay:              newSntpEclipseReplayCache(sntpEclipseHandshakeTTL),
+		onlineRefresh:       sntpEclipseOnlineRefreshInterval(nodeInfo),
 		closed:              make(chan struct{}),
 		users:               make(map[string]int),
 	}, nil
@@ -208,6 +211,7 @@ func (s *SntpEclipseServer) Start() error {
 	log.WithFields(log.Fields{
 		"tag":                   s.tag,
 		"listen":                s.listenAddr,
+		"online_refresh":        s.onlineRefresh.String(),
 		"mode":                  s.mode,
 		"accept_proxy_protocol": s.acceptProxyProtocol,
 	}).Info("SNTP Eclipse ingress started")
@@ -351,18 +355,19 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 	}
 	_ = conn.SetDeadline(time.Time{})
 	session := &sntpEclipseSession{
-		conn:       conn,
-		clientIP:   clientIP,
-		hello:      hello,
-		c2s:        handshake.c2s,
-		s2c:        handshake.s2c,
-		tag:        s.tag,
-		userTag:    userTag,
-		uid:        uid,
-		xray:       s.xray,
-		dispatcher: s.dispatcher,
-		serverName: s.tag,
-		v2:         handshake.v2,
+		conn:          conn,
+		clientIP:      clientIP,
+		hello:         hello,
+		c2s:           handshake.c2s,
+		s2c:           handshake.s2c,
+		tag:           s.tag,
+		userTag:       userTag,
+		uid:           uid,
+		xray:          s.xray,
+		dispatcher:    s.dispatcher,
+		serverName:    s.tag,
+		v2:            handshake.v2,
+		onlineRefresh: s.onlineRefresh,
 	}
 	switch hello.Command {
 	case sntpEclipseCmdTCP:
@@ -741,7 +746,11 @@ func (s *sntpEclipseSession) readFrame(c *sntpEclipseCipher) ([]byte, error) {
 func (s *sntpEclipseSession) markOnline() {
 	now := time.Now().UnixNano()
 	last := s.onlineMark.Load()
-	if last > 0 && time.Duration(now-last) < sntpEclipseOnlineRefresh {
+	refresh := s.onlineRefresh
+	if refresh <= 0 {
+		refresh = defaultSntpEclipseOnlineRefresh
+	}
+	if last > 0 && time.Duration(now-last) < refresh {
 		return
 	}
 	if !s.onlineMark.CompareAndSwap(last, now) {
@@ -749,6 +758,38 @@ func (s *sntpEclipseSession) markOnline() {
 	}
 	if l, err := limiter.GetLimiter(s.tag); err == nil {
 		l.MarkOnline(s.userTag, s.clientIP)
+	}
+}
+
+func sntpEclipseOnlineRefreshInterval(nodeInfo *panel.NodeInfo) time.Duration {
+	if nodeInfo == nil || nodeInfo.Common == nil || nodeInfo.Common.BaseConfig == nil {
+		return defaultSntpEclipseOnlineRefresh
+	}
+	raw := nodeInfo.Common.BaseConfig.SntpEclipseOnlineRefresh
+	if duration, ok := sntpEclipseIntervalSeconds(raw); ok && duration > 0 {
+		return duration
+	}
+	return defaultSntpEclipseOnlineRefresh
+}
+
+func sntpEclipseIntervalSeconds(raw any) (time.Duration, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return 0, false
+	case int:
+		return time.Duration(value) * time.Second, true
+	case int64:
+		return time.Duration(value) * time.Second, true
+	case float64:
+		return time.Duration(value) * time.Second, true
+	case string:
+		seconds, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return 0, false
+		}
+		return time.Duration(seconds) * time.Second, true
+	default:
+		return 0, false
 	}
 }
 

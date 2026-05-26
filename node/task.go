@@ -84,41 +84,48 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 func (c *Controller) syncUserState(ctx context.Context) error {
 	delta, err := c.apiClient.GetUserDelta(ctx)
 	if err == nil && delta != nil && !delta.FullRequired {
-		if err := c.refreshAliveState(ctx); err != nil {
-			return err
-		}
-		pruneUnix, canPrune := userDeltaPruneTime(delta)
-		if len(delta.Events) == 0 {
-			log.WithField("tag", c.tag).Debug("User delta no change")
-			if canPrune {
-				if err := c.pruneExpiredUsers(pruneUnix); err != nil {
-					return err
-				}
-			}
-			c.apiClient.SetUserSyncSeq(delta.LatestSeq)
-			return nil
-		}
-		newU, changed := applyUserDeltaEvents(c.userList, delta.Events)
-		if !changed {
-			log.WithField("tag", c.tag).Debug("User delta no applicable change")
-			if canPrune {
-				if err := c.pruneExpiredUsers(pruneUnix); err != nil {
-					return err
-				}
-			}
-			c.apiClient.SetUserSyncSeq(delta.LatestSeq)
-			return nil
-		}
-		if err := c.applyUserList(newU); err != nil {
-			return err
-		}
-		if canPrune {
-			if err := c.pruneExpiredUsers(pruneUnix); err != nil {
+		if validateErr := validateUserDelta(delta); validateErr != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": validateErr,
+			}).Warn("User delta invalid, fallback to full user list")
+		} else {
+			if err := c.refreshAliveStateIfDue(ctx, false); err != nil {
 				return err
 			}
+			pruneUnix, canPrune := userDeltaPruneTime(delta)
+			if len(delta.Events) == 0 {
+				log.WithField("tag", c.tag).Debug("User delta no change")
+				if canPrune {
+					if err := c.pruneExpiredUsers(pruneUnix); err != nil {
+						return err
+					}
+				}
+				c.apiClient.SetUserSyncSeq(delta.LatestSeq)
+				return nil
+			}
+			newU, changed := applyUserDeltaEvents(c.userList, delta.Events)
+			if !changed {
+				log.WithField("tag", c.tag).Debug("User delta no applicable change")
+				if canPrune {
+					if err := c.pruneExpiredUsers(pruneUnix); err != nil {
+						return err
+					}
+				}
+				c.apiClient.SetUserSyncSeq(delta.LatestSeq)
+				return nil
+			}
+			if err := c.applyUserList(newU); err != nil {
+				return err
+			}
+			if canPrune {
+				if err := c.pruneExpiredUsers(pruneUnix); err != nil {
+					return err
+				}
+			}
+			c.apiClient.SetUserSyncSeq(delta.LatestSeq)
+			return nil
 		}
-		c.apiClient.SetUserSyncSeq(delta.LatestSeq)
-		return nil
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -147,7 +154,7 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 		return nil
 	}
 
-	if err := c.refreshAliveState(ctx); err != nil {
+	if err := c.refreshAliveStateIfDue(ctx, true); err != nil {
 		return err
 	}
 
@@ -165,6 +172,25 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 	return nil
 }
 
+func (c *Controller) refreshAliveStateIfDue(ctx context.Context, force bool) error {
+	if !force && !c.lastAliveRefresh.IsZero() && time.Since(c.lastAliveRefresh) < c.aliveStateRefreshInterval() {
+		return nil
+	}
+	if err := c.refreshAliveState(ctx); err != nil {
+		return err
+	}
+	c.lastAliveRefresh = time.Now()
+	return nil
+}
+
+func (c *Controller) aliveStateRefreshInterval() time.Duration {
+	const minInterval = 30 * time.Second
+	if c.info != nil && c.info.PullInterval > minInterval {
+		return c.info.PullInterval
+	}
+	return minInterval
+}
+
 func (c *Controller) refreshAliveState(ctx context.Context) error {
 	newA, err := c.apiClient.GetUserAlive(ctx)
 	if err != nil {
@@ -178,12 +204,10 @@ func (c *Controller) refreshAliveState(ctx context.Context) error {
 		return nil
 	}
 
-	// update alive list
-	if newA != nil {
-		c.limiter.AliveList = newA
-	}
-	if c.supportsDeviceLimitByUUID() {
-		newDeviceAlive, err := c.apiClient.GetUserDeviceAlive(ctx)
+	useDeviceLimitByUUID := c.supportsDeviceLimitByUUID()
+	var newDeviceAlive map[int]int
+	if useDeviceLimitByUUID {
+		newDeviceAlive, err = c.apiClient.GetUserDeviceAlive(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
@@ -192,32 +216,25 @@ func (c *Controller) refreshAliveState(ctx context.Context) error {
 				"tag": c.tag,
 				"err": err,
 			}).Error("Get device alive list failed")
+			if newA != nil {
+				c.aliveMap = newA
+			}
+			c.limiter.UpdateAliveState(newA, nil, useDeviceLimitByUUID)
 			return nil
 		}
 		if newDeviceAlive != nil {
 			c.deviceAliveMap = newDeviceAlive
-			c.limiter.DeviceAliveList = newDeviceAlive
-			c.limiter.UseDeviceLimitByUUID = true
 		}
-	} else {
-		c.limiter.UseDeviceLimitByUUID = false
 	}
+	if newA != nil {
+		c.aliveMap = newA
+	}
+	c.limiter.UpdateAliveState(newA, newDeviceAlive, useDeviceLimitByUUID)
 	return nil
 }
 
 func (c *Controller) applyUserList(newU []panel.UserInfo) error {
 	deleted, added, modified := compareUserList(c.userList, newU)
-	if len(deleted) > 0 {
-		// have deleted users
-		err := c.server.DelUsers(deleted, c.tag, c.info)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Delete users failed")
-			return nil
-		}
-	}
 	if len(added) > 0 {
 		// have added users
 		_, err := c.server.AddUsers(&vCore.AddUsersParams{
@@ -230,7 +247,26 @@ func (c *Controller) applyUserList(newU []panel.UserInfo) error {
 				"tag": c.tag,
 				"err": err,
 			}).Error("Add users failed")
-			return nil
+			return err
+		}
+	}
+	if len(deleted) > 0 {
+		// have deleted users
+		err := c.server.DelUsers(deleted, c.tag, c.info)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Delete users failed")
+			if len(added) > 0 {
+				if rollbackErr := c.server.DelUsers(added, c.tag, c.info); rollbackErr != nil {
+					log.WithFields(log.Fields{
+						"tag": c.tag,
+						"err": rollbackErr,
+					}).Error("Rollback added users failed")
+				}
+			}
+			return err
 		}
 	}
 	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {

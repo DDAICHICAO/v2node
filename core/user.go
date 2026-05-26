@@ -169,23 +169,18 @@ func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.User
 }
 
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
-	v.users.mapLock.Lock()
-	for i := range p.Users {
-		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
-	}
 	if server, ok := v.eclipse[p.Tag]; ok {
 		server.AddUsers(p.Users)
-		v.users.mapLock.Unlock()
+		v.commitUserUIDs(p.Tag, p.Users)
 		return len(p.Users), nil
 	}
 	if server, ok := v.mieru[p.Tag]; ok {
-		v.users.mapLock.Unlock()
 		if err := server.AddUsers(p.Users); err != nil {
 			return 0, err
 		}
+		v.commitUserUIDs(p.Tag, p.Users)
 		return len(p.Users), nil
 	}
-	defer v.users.mapLock.Unlock()
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
 	case "vmess":
@@ -212,19 +207,40 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("get user manager error: %s", err)
 	}
+	addedEmails := make([]string, 0, len(users))
 	for _, u := range users {
 		mUser, err := u.ToMemoryUser()
 		if err != nil {
+			rollbackAddedUsers(man, addedEmails)
 			return 0, err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err = man.AddUser(ctx, mUser)
 		cancel()
 		if err != nil {
+			rollbackAddedUsers(man, addedEmails)
 			return 0, err
 		}
+		addedEmails = append(addedEmails, u.Email)
 	}
+	v.commitUserUIDs(p.Tag, p.Users)
 	return len(users), nil
+}
+
+func (v *V2Core) commitUserUIDs(tag string, users []panel.UserInfo) {
+	v.users.mapLock.Lock()
+	defer v.users.mapLock.Unlock()
+	for i := range users {
+		v.users.uidMap[format.UserTag(tag, users[i].Uuid)] = users[i].Id
+	}
+}
+
+func rollbackAddedUsers(man proxy.UserManager, emails []string) {
+	for _, email := range emails {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = man.RemoveUser(ctx, email)
+		cancel()
+	}
 }
 
 type trafficCounterReport struct {

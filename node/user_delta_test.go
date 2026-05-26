@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/core"
+	"github.com/wyx2685/v2node/limiter"
 )
 
 func TestApplyUserDeltaEventsUpsertReplacesUserRows(t *testing.T) {
@@ -56,6 +58,33 @@ func TestApplyUserDeltaEventsDeleteRemovesAllRowsForUserID(t *testing.T) {
 	assertUserListEqual(t, got, want)
 }
 
+func TestApplyUserDeltaEventsSortsEventsBySeq(t *testing.T) {
+	oldUsers := []panel.UserInfo{
+		{Id: 1, Uuid: "legacy-1"},
+	}
+	events := []panel.UserDeltaEvent{
+		{
+			Seq:    2,
+			Action: panel.UserDeltaActionUpsert,
+			UserID: 1,
+			Users: []panel.UserInfo{
+				{Id: 1, Uuid: "new-device-1", SpeedLimit: 30},
+			},
+		},
+		{Seq: 1, Action: panel.UserDeltaActionDelete, UserID: 1},
+	}
+
+	got, changed := applyUserDeltaEvents(oldUsers, events)
+	if !changed {
+		t.Fatal("expected sorted delta events to change user list")
+	}
+
+	want := []panel.UserInfo{
+		{Id: 1, Uuid: "new-device-1", SpeedLimit: 30},
+	}
+	assertUserListEqual(t, got, want)
+}
+
 func TestApplyUserDeltaEventsNoEventsKeepsList(t *testing.T) {
 	oldUsers := []panel.UserInfo{{Id: 1, Uuid: "legacy-1"}}
 
@@ -102,6 +131,40 @@ func TestUserDeltaPruneTimeRequiresPanelServerTime(t *testing.T) {
 	}
 }
 
+func TestValidateUserDeltaRejectsLatestSeqBehindEvent(t *testing.T) {
+	err := validateUserDelta(&panel.UserDeltaData{
+		LatestSeq: 1,
+		Events: []panel.UserDeltaEvent{
+			{Seq: 2, Action: panel.UserDeltaActionDelete, UserID: 1},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected latest_seq lower than event seq to be rejected")
+	}
+}
+
+func TestApplyUserListReturnsAddUsersError(t *testing.T) {
+	const tag = "apply-user-list-error"
+	limiter.Init()
+	l := limiter.AddLimiter("unsupported", tag, nil, nil, nil, false)
+	c := &Controller{
+		server:  core.New(nil),
+		tag:     tag,
+		limiter: l,
+		info: &panel.NodeInfo{
+			Type: "unsupported",
+		},
+	}
+
+	err := c.applyUserList([]panel.UserInfo{{Id: 1, Uuid: "new-user"}})
+	if err == nil {
+		t.Fatal("expected add users error to be returned")
+	}
+	if len(c.userList) != 0 {
+		t.Fatalf("expected local user list to stay unchanged after add failure, got %+v", c.userList)
+	}
+}
+
 func TestUpdateTaskIsDowngrade(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -123,6 +186,18 @@ func TestUpdateTaskIsDowngrade(t *testing.T) {
 				t.Fatalf("updateTaskIsDowngrade(%q, %q)=%v, want %v", tc.current, tc.target, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestUpdateTaskStatusIsAppliedIncludesSkipped(t *testing.T) {
+	if !updateTaskStatusIsApplied(updateStatusSuccess) {
+		t.Fatal("expected success status to be treated as applied")
+	}
+	if !updateTaskStatusIsApplied(updateStatusSkipped) {
+		t.Fatal("expected skipped status to be treated as applied")
+	}
+	if updateTaskStatusIsApplied(updateStatusFailed) {
+		t.Fatal("expected failed status to remain retryable")
 	}
 }
 

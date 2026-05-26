@@ -79,6 +79,8 @@ type BaseConfig struct {
 	DeviceAliveReport          bool   `json:"device_alive_report"`
 	DeviceLimitByUUID          bool   `json:"device_limit_by_uuid"`
 	DeviceLimitEnforcementMode string `json:"device_limit_enforcement_mode"`
+	// Optional seconds between SNTP Eclipse online refresh marks.
+	SntpEclipseOnlineRefresh any `json:"sntp_eclipse_online_refresh"`
 }
 
 type TlsSettings struct {

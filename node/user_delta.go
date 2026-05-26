@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"sort"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -10,6 +11,7 @@ func applyUserDeltaEvents(oldUsers []panel.UserInfo, events []panel.UserDeltaEve
 	if len(events) == 0 {
 		return oldUsers, false
 	}
+	events = sortedUserDeltaEvents(events)
 
 	usersByUUID := make(map[string]panel.UserInfo, len(oldUsers))
 	uuidsByUserID := make(map[int]map[string]struct{}, len(oldUsers))
@@ -29,6 +31,8 @@ func applyUserDeltaEvents(oldUsers []panel.UserInfo, events []panel.UserDeltaEve
 
 		switch event.Action {
 		case panel.UserDeltaActionUpsert:
+			// user_upsert carries the full current row set for one user. Remove
+			// every old UUID for that user before adding the replacement rows.
 			if userID > 0 {
 				deleteUserID(usersByUUID, uuidsByUserID, userID)
 			}
@@ -71,6 +75,33 @@ func applyUserDeltaEvents(oldUsers []panel.UserInfo, events []panel.UserDeltaEve
 		return next[i].Uuid < next[j].Uuid
 	})
 	return next, true
+}
+
+func sortedUserDeltaEvents(events []panel.UserDeltaEvent) []panel.UserDeltaEvent {
+	if len(events) <= 1 {
+		return events
+	}
+	next := append([]panel.UserDeltaEvent(nil), events...)
+	sort.SliceStable(next, func(i, j int) bool {
+		return next[i].Seq < next[j].Seq
+	})
+	return next
+}
+
+func validateUserDelta(delta *panel.UserDeltaData) error {
+	if delta == nil || len(delta.Events) == 0 {
+		return nil
+	}
+	maxSeq := delta.Events[0].Seq
+	for _, event := range delta.Events[1:] {
+		if event.Seq > maxSeq {
+			maxSeq = event.Seq
+		}
+	}
+	if maxSeq > delta.LatestSeq {
+		return fmt.Errorf("latest_seq %d is behind max event seq %d", delta.LatestSeq, maxSeq)
+	}
+	return nil
 }
 
 func addUserToIndex(usersByUUID map[string]panel.UserInfo, uuidsByUserID map[int]map[string]struct{}, user panel.UserInfo) {
