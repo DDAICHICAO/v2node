@@ -175,12 +175,24 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
 		SampleInterval: throughput.IntervalSeconds,
 		SampledAt:      throughput.CapturedAt.Unix(),
 	}
+	c.appendAccessAuditRuntimeStatus(&status)
 	if err := c.apiClient.ReportNodeRuntimeStatus(reportCtx, status); err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
 		}).Debug("Report node runtime status failed")
 	}
+}
+
+func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeStatus) {
+	if c == nil || status == nil || c.server == nil || c.server.Config == nil {
+		return
+	}
+	audit := c.server.Config.AccessAuditConfig
+	status.AccessAuditReported = true
+	status.AccessAuditEnabled = audit.Enabled
+	status.AccessAuditEndpoint = strings.TrimSpace(audit.Endpoint)
+	status.AccessAuditTokenConfigured = strings.TrimSpace(audit.Token) != ""
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []panel.UserInfo) {

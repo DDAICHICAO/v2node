@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/conf"
+	"github.com/wyx2685/v2node/core"
 )
 
 func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
@@ -98,5 +100,35 @@ func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
 	}
 	if err := applyAccessAuditConfigTask(task, configPath); err == nil {
 		t.Fatal("expected missing endpoint error")
+	}
+}
+
+func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
+	controller := &Controller{
+		server: &core.V2Core{
+			Config: &conf.Conf{
+				AccessAuditConfig: conf.AccessAuditConfig{
+					Enabled:  true,
+					Endpoint: " https://logs.sntp.uk/api/v1/access-events ",
+					Token:    " secret ",
+				},
+			},
+		},
+	}
+
+	status := panel.NodeRuntimeStatus{}
+	controller.appendAccessAuditRuntimeStatus(&status)
+
+	if !status.AccessAuditReported {
+		t.Fatal("expected access audit runtime status to be reported")
+	}
+	if !status.AccessAuditEnabled {
+		t.Fatal("expected access audit to be enabled")
+	}
+	if status.AccessAuditEndpoint != "https://logs.sntp.uk/api/v1/access-events" {
+		t.Fatalf("unexpected access audit endpoint %q", status.AccessAuditEndpoint)
+	}
+	if !status.AccessAuditTokenConfigured {
+		t.Fatal("expected token to be reported as configured")
 	}
 }
