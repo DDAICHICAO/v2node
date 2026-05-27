@@ -68,6 +68,10 @@ func (c *Controller) checkUpdateTask(ctx context.Context) {
 		go c.runAccessAuditConfigTask(*task)
 		return
 	}
+	if updateTaskIsApiHostConfig(*task) {
+		go c.runApiHostConfigTask(*task)
+		return
+	}
 	if task.Version == "" {
 		return
 	}

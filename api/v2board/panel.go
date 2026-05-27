@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"github.com/wyx2685/v2node/common/instance"
+	"github.com/wyx2685/v2node/common/publicip"
 	selfversion "github.com/wyx2685/v2node/common/version"
 	"github.com/wyx2685/v2node/conf"
 )
@@ -76,6 +78,11 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	}
 	queryParams["instance_id"] = instance.ResolveID(c.APIHost, c.NodeID)
 	queryParams["capabilities"] = strings.Join(deviceLimitCapabilities, ",")
+	machineIPCtx, cancelMachineIP := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelMachineIP()
+	if machineIP := publicip.Detect(machineIPCtx); machineIP != "" {
+		queryParams["machine_ip"] = machineIP
+	}
 	client.SetQueryParams(queryParams)
 	return &Client{
 		client:                  client,

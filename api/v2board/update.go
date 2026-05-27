@@ -15,6 +15,7 @@ type UpdateTask struct {
 	DownloadURL string           `json:"download_url"`
 	SHA256      string           `json:"sha256"`
 	AccessAudit *AccessAuditTask `json:"access_audit,omitempty"`
+	ApiHost     *ApiHostTask     `json:"api_host,omitempty"`
 }
 
 type AccessAuditTask struct {
@@ -26,6 +27,11 @@ type AccessAuditTask struct {
 	FlushInterval string `json:"flush_interval"`
 	Timeout       string `json:"timeout"`
 	SNTPAccess    *bool  `json:"sntp_access,omitempty"`
+}
+
+type ApiHostTask struct {
+	ApiHost      string `json:"api_host"`
+	MatchApiHost string `json:"match_api_host,omitempty"`
 }
 
 type UpdateReport struct {
