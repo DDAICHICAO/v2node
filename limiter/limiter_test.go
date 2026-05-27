@@ -163,6 +163,32 @@ func TestRefreshOnlineUIDsFromLastSnapshotKeepsLongLivedTrafficOnline(t *testing
 	}
 }
 
+func TestAnyTLSRecordsOnlineEvenWhenNetworkFlagIsNotTCP(t *testing.T) {
+	const tag = "anytls-online"
+	const uuid = "device-a"
+	taguuid := format.UserTag(tag, uuid)
+	Init()
+	l := AddLimiter("anytls", tag, []panel.UserInfo{{
+		Id:   12,
+		Uuid: uuid,
+	}}, nil, nil, true)
+
+	_, reject, info := l.CheckLimit(taguuid, "192.0.2.81", false)
+	if reject {
+		t.Fatalf("expected anytls connection to be accepted, got reject info: %+v", info)
+	}
+	onlineUsers, onlineDevices, err := l.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatalf("expected online snapshot: %v", err)
+	}
+	if len(*onlineUsers) != 1 || len(*onlineDevices) != 1 {
+		t.Fatalf("expected anytls snapshot to include one user/device, got users=%d devices=%d", len(*onlineUsers), len(*onlineDevices))
+	}
+	if (*onlineUsers)[0].UID != 12 || (*onlineUsers)[0].IP != "192.0.2.81" {
+		t.Fatalf("unexpected anytls online user: %+v", (*onlineUsers)[0])
+	}
+}
+
 func TestCheckLimitRejectsUUIDDeviceLimitWhenPendingExceedsLimit(t *testing.T) {
 	const tag = "uuid-pending-limit"
 	l := newTestLimiter(tag, []panel.UserInfo{
