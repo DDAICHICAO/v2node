@@ -78,12 +78,22 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	}
 	queryParams["instance_id"] = instance.ResolveID(c.APIHost, c.NodeID)
 	queryParams["capabilities"] = strings.Join(deviceLimitCapabilities, ",")
-	machineIPCtx, cancelMachineIP := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancelMachineIP()
-	if machineIP := publicip.Detect(machineIPCtx); machineIP != "" {
-		queryParams["machine_ip"] = machineIP
+	configuredMachineIP := publicip.Normalize(c.MachineIP)
+	if configuredMachineIP != "" {
+		queryParams["machine_ip"] = configuredMachineIP
 	}
 	client.SetQueryParams(queryParams)
+	client.OnBeforeRequest(func(_ *resty.Client, req *resty.Request) error {
+		if configuredMachineIP != "" || req.QueryParam.Get("machine_ip") != "" {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(req.Context(), 3*time.Second)
+		defer cancel()
+		if machineIP := publicip.Detect(ctx); machineIP != "" {
+			req.SetQueryParam("machine_ip", machineIP)
+		}
+		return nil
+	})
 	return &Client{
 		client:                  client,
 		Token:                   c.Key,

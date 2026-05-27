@@ -11,6 +11,7 @@ import (
 )
 
 const maxIPResponseBytes = 128
+const failedDetectRetryInterval = time.Minute
 
 var defaultEndpoints = []string{
 	"https://api.ipify.org",
@@ -20,6 +21,7 @@ var defaultEndpoints = []string{
 
 var detectMu sync.Mutex
 var detectedIP string
+var nextDetectAt time.Time
 
 var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -71,18 +73,28 @@ func Normalize(value string) string {
 func Detect(ctx context.Context) string {
 	detectMu.Lock()
 	cached := detectedIP
+	nextAt := nextDetectAt
 	detectMu.Unlock()
 	if cached != "" {
 		return cached
 	}
+	if !nextAt.IsZero() && time.Now().Before(nextAt) {
+		return ""
+	}
 
 	ip := DetectFromEndpoints(ctx, defaultEndpoints)
 	if ip == "" {
+		detectMu.Lock()
+		if detectedIP == "" {
+			nextDetectAt = time.Now().Add(failedDetectRetryInterval)
+		}
+		detectMu.Unlock()
 		return ""
 	}
 
 	detectMu.Lock()
 	detectedIP = ip
+	nextDetectAt = time.Time{}
 	detectMu.Unlock()
 	return ip
 }
