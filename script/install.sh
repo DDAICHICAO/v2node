@@ -40,6 +40,32 @@ VERSION_ARG=""
 API_HOST_ARG=""
 NODE_ID_ARG=""
 API_KEY_ARG=""
+ACCESS_AUDIT_ENABLED_ARG="${ACCESS_AUDIT_ENABLED:-false}"
+ACCESS_AUDIT_ENDPOINT_ARG="${ACCESS_AUDIT_ENDPOINT:-}"
+ACCESS_AUDIT_TOKEN_ARG="${ACCESS_AUDIT_TOKEN:-}"
+ACCESS_AUDIT_BATCH_SIZE_ARG="${ACCESS_AUDIT_BATCH_SIZE:-1000}"
+ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG="${ACCESS_AUDIT_MAX_QUEUE_SIZE:-10000}"
+ACCESS_AUDIT_FLUSH_INTERVAL_ARG="${ACCESS_AUDIT_FLUSH_INTERVAL:-1s}"
+ACCESS_AUDIT_TIMEOUT_ARG="${ACCESS_AUDIT_TIMEOUT:-5s}"
+SNTP_ACCESS_ARG="${SNTP_ACCESS:-true}"
+
+normalize_bool() {
+    local value
+    value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$value" in
+        1|true|yes|y|on) echo "true" ;;
+        0|false|no|n|off) echo "false" ;;
+        *) echo "$2" ;;
+    esac
+}
+
+positive_int_or_default() {
+    if [[ "$1" =~ ^[1-9][0-9]*$ ]]; then
+        echo "$1"
+    else
+        echo "$2"
+    fi
+}
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -50,8 +76,24 @@ parse_args() {
                 NODE_ID_ARG="$2"; shift 2 ;;
             --api-key)
                 API_KEY_ARG="$2"; shift 2 ;;
+            --access-audit-enabled)
+                ACCESS_AUDIT_ENABLED_ARG="$2"; shift 2 ;;
+            --access-audit-endpoint)
+                ACCESS_AUDIT_ENDPOINT_ARG="$2"; shift 2 ;;
+            --access-audit-token)
+                ACCESS_AUDIT_TOKEN_ARG="$2"; shift 2 ;;
+            --access-audit-batch-size)
+                ACCESS_AUDIT_BATCH_SIZE_ARG="$2"; shift 2 ;;
+            --access-audit-max-queue-size)
+                ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG="$2"; shift 2 ;;
+            --access-audit-flush-interval)
+                ACCESS_AUDIT_FLUSH_INTERVAL_ARG="$2"; shift 2 ;;
+            --access-audit-timeout)
+                ACCESS_AUDIT_TIMEOUT_ARG="$2"; shift 2 ;;
+            --sntp-access)
+                SNTP_ACCESS_ARG="$2"; shift 2 ;;
             -h|--help)
-                echo "用法: $0 [版本号] [--api-host URL] [--node-id ID] [--api-key KEY]"
+                echo "用法: $0 [版本号] [--api-host URL] [--node-id ID] [--api-key KEY] [--access-audit-enabled true|false] [--access-audit-endpoint URL] [--access-audit-token TOKEN]"
                 exit 0 ;;
             --*)
                 echo "未知参数: $1"; exit 1 ;;
@@ -222,6 +264,19 @@ generate_v2node_config() {
         local api_host="$1"
         local node_id="$2"
         local api_key="$3"
+        local access_audit_enabled
+        local sntp_access
+        local access_audit_batch_size
+        local access_audit_max_queue_size
+        local access_audit_flush_interval
+        local access_audit_timeout
+
+        access_audit_enabled=$(normalize_bool "$ACCESS_AUDIT_ENABLED_ARG" "false")
+        sntp_access=$(normalize_bool "$SNTP_ACCESS_ARG" "true")
+        access_audit_batch_size=$(positive_int_or_default "$ACCESS_AUDIT_BATCH_SIZE_ARG" "1000")
+        access_audit_max_queue_size=$(positive_int_or_default "$ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG" "10000")
+        access_audit_flush_interval="${ACCESS_AUDIT_FLUSH_INTERVAL_ARG:-1s}"
+        access_audit_timeout="${ACCESS_AUDIT_TIMEOUT_ARG:-5s}"
 
         mkdir -p /etc/v2node >/dev/null 2>&1
         cat > /etc/v2node/config.json <<EOF
@@ -229,16 +284,17 @@ generate_v2node_config() {
     "Log": {
         "Level": "warning",
         "Output": "",
-        "Access": "none"
+        "Access": "none",
+        "SNTPAccess": ${sntp_access}
     },
     "AccessAudit": {
-        "Enabled": false,
-        "Endpoint": "",
-        "Token": "",
-        "BatchSize": 1000,
-        "MaxQueueSize": 10000,
-        "FlushInterval": "1s",
-        "Timeout": "5s"
+        "Enabled": ${access_audit_enabled},
+        "Endpoint": "${ACCESS_AUDIT_ENDPOINT_ARG}",
+        "Token": "${ACCESS_AUDIT_TOKEN_ARG}",
+        "BatchSize": ${access_audit_batch_size},
+        "MaxQueueSize": ${access_audit_max_queue_size},
+        "FlushInterval": "${access_audit_flush_interval}",
+        "Timeout": "${access_audit_timeout}"
     },
     "Nodes": [
         {
