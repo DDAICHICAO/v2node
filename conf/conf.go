@@ -41,7 +41,7 @@ func New() *Conf {
 			Level:      "warning",
 			Output:     "",
 			Access:     "none",
-			SNTPAccess: true,
+			SNTPAccess: false,
 		},
 		AccessAuditConfig: AccessAuditConfig{
 			BatchSize:     DefaultAccessAuditBatchSize,

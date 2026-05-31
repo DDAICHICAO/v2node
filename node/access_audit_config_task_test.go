@@ -87,6 +87,55 @@ func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
 	}
 }
 
+func TestApplyAccessAuditConfigTaskDefaultsLocalSntpAccessOff(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	initial := []byte(`{
+  "Log": {
+    "Level": "warning",
+    "Output": "",
+    "Access": "none"
+  },
+  "Nodes": []
+}`)
+	if err := os.WriteFile(configPath, initial, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	task := panel.UpdateTask{
+		TaskID: "access-audit-default-log-test",
+		Type:   accessAuditTaskType,
+		AccessAudit: &panel.AccessAuditTask{
+			Enabled:       true,
+			Endpoint:      "https://logs.sntp.uk/api/v1/access-events",
+			Token:         "token",
+			BatchSize:     1000,
+			MaxQueueSize:  10000,
+			FlushInterval: "1s",
+			Timeout:       "5s",
+		},
+	}
+
+	if err := applyAccessAuditConfigTask(task, configPath); err != nil {
+		t.Fatalf("apply config task: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("decode updated config: %v", err)
+	}
+	logConfig, ok := config["Log"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing Log config: %#v", config["Log"])
+	}
+	if logConfig["SNTPAccess"] != false {
+		t.Fatalf("expected SNTPAccess to default false, got %#v", logConfig["SNTPAccess"])
+	}
+}
+
 func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

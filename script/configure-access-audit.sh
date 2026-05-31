@@ -5,7 +5,7 @@ CONFIG_PATH="${CONFIG_PATH:-/etc/v2node/config.json}"
 ACCESS_AUDIT_ENDPOINT="${ACCESS_AUDIT_ENDPOINT:-${1:-}}"
 ACCESS_AUDIT_TOKEN="${ACCESS_AUDIT_TOKEN:-${2:-}}"
 ACCESS_AUDIT_ENABLED="${ACCESS_AUDIT_ENABLED:-true}"
-SNTP_ACCESS="${SNTP_ACCESS:-true}"
+SNTP_ACCESS="${SNTP_ACCESS:-false}"
 ACCESS_AUDIT_BATCH_SIZE="${ACCESS_AUDIT_BATCH_SIZE:-1000}"
 ACCESS_AUDIT_MAX_QUEUE_SIZE="${ACCESS_AUDIT_MAX_QUEUE_SIZE:-10000}"
 ACCESS_AUDIT_FLUSH_INTERVAL="${ACCESS_AUDIT_FLUSH_INTERVAL:-1s}"
@@ -129,7 +129,7 @@ config["Log"] = log_config
 log_config.setdefault("Level", "warning")
 log_config.setdefault("Output", "")
 log_config.setdefault("Access", "none")
-log_config["SNTPAccess"] = parse_bool(os.environ.get("SNTP_ACCESS", "true"))
+log_config["SNTPAccess"] = parse_bool(os.environ.get("SNTP_ACCESS", "false"))
 
 enabled = parse_bool(os.environ.get("ACCESS_AUDIT_ENABLED", "true"))
 config["AccessAudit"] = {

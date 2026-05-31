@@ -114,6 +114,8 @@ func applyAccessAuditConfigTask(task panel.UpdateTask, configPath string) error 
 	}
 	if normalized.SNTPAccess != nil {
 		logConfig["SNTPAccess"] = *normalized.SNTPAccess
+	} else {
+		logConfig["SNTPAccess"] = false
 	}
 
 	config["AccessAudit"] = map[string]any{

@@ -13,7 +13,7 @@ ACCESS_AUDIT_BATCH_SIZE_ARG="${ACCESS_AUDIT_BATCH_SIZE:-1000}"
 ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG="${ACCESS_AUDIT_MAX_QUEUE_SIZE:-10000}"
 ACCESS_AUDIT_FLUSH_INTERVAL_ARG="${ACCESS_AUDIT_FLUSH_INTERVAL:-1s}"
 ACCESS_AUDIT_TIMEOUT_ARG="${ACCESS_AUDIT_TIMEOUT:-5s}"
-SNTP_ACCESS_ARG="${SNTP_ACCESS:-true}"
+SNTP_ACCESS_ARG="${SNTP_ACCESS:-false}"
 
 normalize_bool() {
     local value
@@ -458,7 +458,7 @@ generate_v2node_config() {
         local access_audit_timeout
 
         access_audit_enabled=$(normalize_bool "$ACCESS_AUDIT_ENABLED_ARG" "false")
-        sntp_access=$(normalize_bool "$SNTP_ACCESS_ARG" "true")
+        sntp_access=$(normalize_bool "$SNTP_ACCESS_ARG" "false")
         access_audit_batch_size=$(positive_int_or_default "$ACCESS_AUDIT_BATCH_SIZE_ARG" "1000")
         access_audit_max_queue_size=$(positive_int_or_default "$ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG" "10000")
         access_audit_flush_interval="${ACCESS_AUDIT_FLUSH_INTERVAL_ARG:-1s}"

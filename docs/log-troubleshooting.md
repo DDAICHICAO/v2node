@@ -13,7 +13,8 @@
   "Log": {
     "Level": "warning",
     "Output": "",
-    "Access": "none"
+    "Access": "none",
+    "SNTPAccess": false
   }
 }
 ```
@@ -26,7 +27,7 @@
 | `Output: ""` | 写到 stdout，由 systemd journal 收集 |
 | `Access: "none"` | 关闭 Xray 原生 access log，避免 `email: tag|uuid` 这类底层日志刷屏 |
 
-`SNTP user access ...` 是 v2node 自己的业务访问审计，默认开启，并且不需要把 `Level` 调成 `info`。如果临时不想输出这类访问审计，可以手动加：
+`SNTP user access ...` 是 v2node 自己的本地业务访问审计，默认关闭，并且不需要把 `Level` 调成 `info`。如果临时需要在本机 journal 里排查访问明细，可以手动改为：
 
 ```json
 {
@@ -34,7 +35,7 @@
     "Level": "warning",
     "Output": "",
     "Access": "none",
-    "SNTPAccess": false
+    "SNTPAccess": true
   }
 }
 ```
@@ -54,7 +55,7 @@
 
 ## 远端 ClickHouse 访问审计
 
-默认只写本机 journal 或 `Log.Output` 文件，不会把访问明细发到远端。需要把 `SNTP user access ...` 同步写入独立日志库时，可以在 `/etc/v2node/config.json` 顶层增加 `AccessAudit`：
+默认不会把访问明细发到远端。需要把访问明细写入独立日志库时，可以在 `/etc/v2node/config.json` 顶层增加 `AccessAudit`：
 
 ```json
 {

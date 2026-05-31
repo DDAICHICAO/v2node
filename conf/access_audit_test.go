@@ -27,6 +27,13 @@ func TestAccessAuditNormalizeDefaultsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestNewDefaultsDisableLocalSntpAccessLog(t *testing.T) {
+	cfg := New()
+	if cfg.LogConfig.SNTPAccess {
+		t.Fatal("expected local SNTP access log to be disabled by default")
+	}
+}
+
 func TestAccessAuditNormalizeRequiresEndpointAndTokenWhenEnabled(t *testing.T) {
 	cfg := AccessAuditConfig{Enabled: true, Endpoint: "https://logs.sntp.uk/api/v1/access-events"}
 	if err := cfg.Normalize(); err == nil {
