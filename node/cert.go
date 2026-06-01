@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -101,6 +103,10 @@ func generateSelfSslCertificate(domain, certPath, keyPath string) error {
 		Bytes: cert,
 	})
 	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
 		return err
 	}
 	f, err = os.OpenFile(keyPath, os.O_CREATE|os.O_RDWR, 0644)
@@ -112,7 +118,44 @@ func generateSelfSslCertificate(domain, certPath, keyPath string) error {
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
 	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func certSha256Fingerprint(certPath string) (string, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", err
+	}
+
+	remaining := data
+	for {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			break
+		}
+		remaining = rest
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(cert.Raw)
+		return hex.EncodeToString(sum[:]), nil
+	}
+
+	cert, err := x509.ParseCertificate(data)
+	if err == nil {
+		sum := sha256.Sum256(cert.Raw)
+		return hex.EncodeToString(sum[:]), nil
+	}
+
+	return "", fmt.Errorf("no certificate found in %s", certPath)
 }

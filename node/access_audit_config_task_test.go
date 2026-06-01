@@ -1,7 +1,11 @@
 package node
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
@@ -179,5 +183,57 @@ func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	}
 	if !status.AccessAuditTokenConfigured {
 		t.Fatal("expected token to be reported as configured")
+	}
+}
+
+func TestAppendTLSRuntimeStatusReportsLocalCertFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "trojan114.cer")
+	keyPath := filepath.Join(dir, "trojan114.key")
+	if err := generateSelfSslCertificate("tls.example.com", certPath, keyPath); err != nil {
+		t.Fatalf("generate cert: %v", err)
+	}
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("expected PEM certificate")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	sum := sha256.Sum256(cert.Raw)
+	expectedFingerprint := hex.EncodeToString(sum[:])
+
+	controller := &Controller{
+		info: &panel.NodeInfo{
+			Security: panel.Tls,
+			Common: &panel.CommonNode{
+				TlsSettings: panel.TlsSettings{
+					ServerName: "tls.example.com",
+				},
+				CertInfo: &panel.CertInfo{
+					CertFile:   certPath,
+					CertDomain: "tls.example.com",
+				},
+			},
+		},
+	}
+
+	status := panel.NodeRuntimeStatus{}
+	controller.appendTLSRuntimeStatus(&status)
+
+	if status.TLSCertSHA256 != expectedFingerprint {
+		t.Fatalf("unexpected certificate fingerprint %q, want %q", status.TLSCertSHA256, expectedFingerprint)
+	}
+	if status.TLSCertFile != certPath {
+		t.Fatalf("unexpected certificate file %q", status.TLSCertFile)
+	}
+	if status.TLSVerifyPeerCertByName != "tls.example.com" {
+		t.Fatalf("unexpected verify name %q", status.TLSVerifyPeerCertByName)
 	}
 }

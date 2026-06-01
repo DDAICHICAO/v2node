@@ -14,6 +14,9 @@ type NodeRuntimeStatus struct {
 	TxBytes                    uint64   `json:"tx_bytes"`
 	SampleInterval             float64  `json:"sample_interval"`
 	SampledAt                  int64    `json:"sampled_at"`
+	TLSCertSHA256              string   `json:"tls_cert_sha256,omitempty"`
+	TLSCertFile                string   `json:"tls_cert_file,omitempty"`
+	TLSVerifyPeerCertByName    string   `json:"tls_verify_peer_cert_by_name,omitempty"`
 	AccessAuditReported        bool     `json:"access_audit_reported,omitempty"`
 	AccessAuditEnabled         bool     `json:"access_audit_enabled"`
 	AccessAuditEndpoint        string   `json:"access_audit_endpoint,omitempty"`

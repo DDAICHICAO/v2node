@@ -176,6 +176,7 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
 		SampledAt:      throughput.CapturedAt.Unix(),
 	}
 	c.appendAccessAuditRuntimeStatus(&status)
+	c.appendTLSRuntimeStatus(&status)
 	if err := c.apiClient.ReportNodeRuntimeStatus(reportCtx, status); err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -193,6 +194,35 @@ func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeSta
 	status.AccessAuditEnabled = audit.Enabled
 	status.AccessAuditEndpoint = strings.TrimSpace(audit.Endpoint)
 	status.AccessAuditTokenConfigured = strings.TrimSpace(audit.Token) != ""
+}
+
+func (c *Controller) appendTLSRuntimeStatus(status *panel.NodeRuntimeStatus) {
+	if c == nil || status == nil || c.info == nil || c.info.Security != panel.Tls || c.info.Common == nil || c.info.Common.CertInfo == nil {
+		return
+	}
+
+	certFile := strings.TrimSpace(c.info.Common.CertInfo.CertFile)
+	if certFile == "" {
+		return
+	}
+
+	fingerprint, err := certSha256Fingerprint(certFile)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"tag":       c.tag,
+			"cert_file": certFile,
+			"err":       err,
+		}).Debug("Read TLS certificate fingerprint failed")
+		return
+	}
+
+	status.TLSCertSHA256 = fingerprint
+	status.TLSCertFile = certFile
+	verifyName := strings.TrimSpace(c.info.Common.TlsSettings.PrimaryServerName())
+	if verifyName == "" {
+		verifyName = strings.TrimSpace(c.info.Common.CertInfo.CertDomain)
+	}
+	status.TLSVerifyPeerCertByName = verifyName
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []panel.UserInfo) {
