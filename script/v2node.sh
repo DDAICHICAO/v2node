@@ -33,6 +33,51 @@ positive_int_or_default() {
     fi
 }
 
+generate_v2node_nodes_json() {
+        local api_host="$1"
+        local node_ids="$2"
+        local api_key="$3"
+        local compact_node_ids
+        local ids=()
+        local id
+        local i
+        local comma
+
+        compact_node_ids=$(printf '%s' "$node_ids" | tr -d '[:space:]')
+        if [[ -z "$compact_node_ids" ]]; then
+            echo "node id is required" >&2
+            return 1
+        fi
+
+        IFS=',' read -r -a ids <<< "$compact_node_ids"
+        if [[ ${#ids[@]} -eq 0 ]]; then
+            echo "node id is required" >&2
+            return 1
+        fi
+
+        for id in "${ids[@]}"; do
+            if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
+                echo "node id must be a positive integer, or a comma-separated positive integer list: ${node_ids}" >&2
+                return 1
+            fi
+        done
+
+        for i in "${!ids[@]}"; do
+            comma=","
+            if [[ "$i" -eq $((${#ids[@]} - 1)) ]]; then
+                comma=""
+            fi
+            cat <<EOF
+        {
+            "ApiHost": "${api_host}",
+            "NodeID": ${ids[$i]},
+            "ApiKey": "${api_key}",
+            "Timeout": 15
+        }${comma}
+EOF
+        done
+}
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -456,6 +501,7 @@ generate_v2node_config() {
         local access_audit_max_queue_size
         local access_audit_flush_interval
         local access_audit_timeout
+        local nodes_json
 
         access_audit_enabled=$(normalize_bool "$ACCESS_AUDIT_ENABLED_ARG" "false")
         sntp_access=$(normalize_bool "$SNTP_ACCESS_ARG" "false")
@@ -463,6 +509,10 @@ generate_v2node_config() {
         access_audit_max_queue_size=$(positive_int_or_default "$ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG" "10000")
         access_audit_flush_interval="${ACCESS_AUDIT_FLUSH_INTERVAL_ARG:-1s}"
         access_audit_timeout="${ACCESS_AUDIT_TIMEOUT_ARG:-5s}"
+        if ! nodes_json=$(generate_v2node_nodes_json "$api_host" "$node_id" "$api_key"); then
+            echo -e "${red}Invalid node id: ${node_id}${plain}"
+            return 1
+        fi
 
         mkdir -p /etc/v2node >/dev/null 2>&1
         cat > /etc/v2node/config.json <<EOF
@@ -483,12 +533,7 @@ generate_v2node_config() {
         "Timeout": "${access_audit_timeout}"
     },
     "Nodes": [
-        {
-            "ApiHost": "${api_host}",
-            "NodeID": ${node_id},
-            "ApiKey": "${api_key}",
-            "Timeout": 15
-        }
+${nodes_json}
     ]
 }
 EOF
@@ -518,7 +563,7 @@ generate_config_file() {
     read -rp "节点通讯密钥: " api_key
 
     # 生成配置文件（覆盖可能从包中复制的模板）
-    generate_v2node_config "$api_host" "$node_id" "$api_key"
+    generate_v2node_config "$api_host" "$node_id" "$api_key" || before_show_menu
 }
 
 # 放开防火墙端口

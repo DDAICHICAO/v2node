@@ -67,6 +67,51 @@ positive_int_or_default() {
     fi
 }
 
+generate_v2node_nodes_json() {
+        local api_host="$1"
+        local node_ids="$2"
+        local api_key="$3"
+        local compact_node_ids
+        local ids=()
+        local id
+        local i
+        local comma
+
+        compact_node_ids=$(printf '%s' "$node_ids" | tr -d '[:space:]')
+        if [[ -z "$compact_node_ids" ]]; then
+            echo "node id is required" >&2
+            return 1
+        fi
+
+        IFS=',' read -r -a ids <<< "$compact_node_ids"
+        if [[ ${#ids[@]} -eq 0 ]]; then
+            echo "node id is required" >&2
+            return 1
+        fi
+
+        for id in "${ids[@]}"; do
+            if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
+                echo "node id must be a positive integer, or a comma-separated positive integer list: ${node_ids}" >&2
+                return 1
+            fi
+        done
+
+        for i in "${!ids[@]}"; do
+            comma=","
+            if [[ "$i" -eq $((${#ids[@]} - 1)) ]]; then
+                comma=""
+            fi
+            cat <<EOF
+        {
+            "ApiHost": "${api_host}",
+            "NodeID": ${ids[$i]},
+            "ApiKey": "${api_key}",
+            "Timeout": 15
+        }${comma}
+EOF
+        done
+}
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -93,7 +138,7 @@ parse_args() {
             --sntp-access)
                 SNTP_ACCESS_ARG="$2"; shift 2 ;;
             -h|--help)
-                echo "用法: $0 [版本号] [--api-host URL] [--node-id ID] [--api-key KEY] [--access-audit-enabled true|false] [--access-audit-endpoint URL] [--access-audit-token TOKEN]"
+                echo "用法: $0 [版本号] [--api-host URL] [--node-id ID[,ID...]] [--api-key KEY] [--access-audit-enabled true|false] [--access-audit-endpoint URL] [--access-audit-token TOKEN]"
                 exit 0 ;;
             --*)
                 echo "未知参数: $1"; exit 1 ;;
@@ -270,6 +315,7 @@ generate_v2node_config() {
         local access_audit_max_queue_size
         local access_audit_flush_interval
         local access_audit_timeout
+        local nodes_json
 
         access_audit_enabled=$(normalize_bool "$ACCESS_AUDIT_ENABLED_ARG" "false")
         sntp_access=$(normalize_bool "$SNTP_ACCESS_ARG" "false")
@@ -277,6 +323,10 @@ generate_v2node_config() {
         access_audit_max_queue_size=$(positive_int_or_default "$ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG" "10000")
         access_audit_flush_interval="${ACCESS_AUDIT_FLUSH_INTERVAL_ARG:-1s}"
         access_audit_timeout="${ACCESS_AUDIT_TIMEOUT_ARG:-5s}"
+        if ! nodes_json=$(generate_v2node_nodes_json "$api_host" "$node_id" "$api_key"); then
+            echo -e "${red}Invalid --node-id: ${node_id}${plain}"
+            return 1
+        fi
 
         mkdir -p /etc/v2node >/dev/null 2>&1
         cat > /etc/v2node/config.json <<EOF
@@ -297,12 +347,7 @@ generate_v2node_config() {
         "Timeout": "${access_audit_timeout}"
     },
     "Nodes": [
-        {
-            "ApiHost": "${api_host}",
-            "NodeID": ${node_id},
-            "ApiKey": "${api_key}",
-            "Timeout": 15
-        }
+${nodes_json}
     ]
 }
 EOF
@@ -476,9 +521,12 @@ EOF
     if [[ ! -f /etc/v2node/config.json ]]; then
         # 如果通过 CLI 传入了完整参数，则直接生成配置并跳过交互
         if [[ -n "$API_HOST_ARG" && -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
-            generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG"
-            echo -e "${green}已根据参数生成 /etc/v2node/config.json${plain}"
-            first_install=false
+            if generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG"; then
+                echo -e "${green}已根据参数生成 /etc/v2node/config.json${plain}"
+                first_install=false
+            else
+                exit 1
+            fi
         else
             cp config.json /etc/v2node/
             first_install=true
@@ -537,7 +585,7 @@ EOF
             read -rp "节点通讯密钥: " api_key
 
             # 生成配置文件（覆盖可能从包中复制的模板）
-            generate_v2node_config "$api_host" "$node_id" "$api_key"
+            generate_v2node_config "$api_host" "$node_id" "$api_key" || exit 1
         else
             echo "${green}已跳过自动生成配置。如需后续生成，可执行: v2node generate${plain}"
         fi
