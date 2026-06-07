@@ -83,12 +83,14 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 
 func (c *Controller) syncUserState(ctx context.Context) error {
 	delta, err := c.apiClient.GetUserDelta(ctx)
+	forceFullUserList := false
 	if err == nil && delta != nil && !delta.FullRequired {
 		if validateErr := validateUserDelta(delta); validateErr != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": validateErr,
 			}).Warn("User delta invalid, fallback to full user list")
+			forceFullUserList = true
 		} else {
 			if err := c.refreshAliveStateIfDue(ctx, false); err != nil {
 				return err
@@ -139,10 +141,16 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 		}
 	} else if delta != nil && delta.FullRequired {
 		log.WithField("tag", c.tag).Info("User delta requires full user list")
+		forceFullUserList = true
 	}
 
 	// get user info
-	newU, err := c.apiClient.GetUserList(ctx)
+	var newU []panel.UserInfo
+	if forceFullUserList {
+		newU, err = c.apiClient.GetFullUserList(ctx)
+	} else {
+		newU, err = c.apiClient.GetUserList(ctx)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -159,7 +167,7 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 	}
 
 	// node no changed, check users
-	if len(newU) == 0 {
+	if newU == nil {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}

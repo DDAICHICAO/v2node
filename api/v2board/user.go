@@ -78,13 +78,23 @@ type DeviceAliveMap struct {
 
 // GetUserList will pull user from v2board
 func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
+	return c.getUserList(ctx, false)
+}
+
+func (c *Client) GetFullUserList(ctx context.Context) ([]UserInfo, error) {
+	return c.getUserList(ctx, true)
+}
+
+func (c *Client) getUserList(ctx context.Context, force bool) ([]UserInfo, error) {
 	const path = "/api/v1/server/UniProxy/user"
-	r, err := c.client.R().
+	req := c.client.R().
 		SetContext(ctx).
-		SetHeader("If-None-Match", c.userEtag).
 		SetHeader("X-Response-Format", "msgpack").
-		SetDoNotParseResponse(true).
-		Get(path)
+		SetDoNotParseResponse(true)
+	if !force && c.userEtag != "" {
+		req.SetHeader("If-None-Match", c.userEtag)
+	}
+	r, err := req.Get(path)
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +145,9 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	}
 	c.userEtag = r.Header().Get("ETag")
 	c.updateUserSyncSeqFromHeader(r.Header().Get("X-User-Sync-Seq"))
+	if userlist.Users == nil {
+		userlist.Users = []UserInfo{}
+	}
 	return userlist.Users, nil
 }
 
