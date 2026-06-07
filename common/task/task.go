@@ -33,7 +33,7 @@ func (t *Task) Start(first bool) error {
 		defer timer.Stop()
 		if first {
 			if err := t.ExecuteWithTimeout(); err != nil {
-				return
+				log.Errorf("Task %s execution error: %v", t.Name, err)
 			}
 		}
 
@@ -48,7 +48,6 @@ func (t *Task) Start(first bool) error {
 
 			if err := t.ExecuteWithTimeout(); err != nil {
 				log.Errorf("Task %s execution error: %v", t.Name, err)
-				return
 			}
 		}
 	}()
