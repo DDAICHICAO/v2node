@@ -94,6 +94,10 @@ func (c *Client) getUserList(ctx context.Context, force bool) ([]UserInfo, error
 	if !force && c.userEtag != "" {
 		req.SetHeader("If-None-Match", c.userEtag)
 	}
+	if force {
+		req.SetHeader("X-Force-Full-User-List", "1")
+		req.SetQueryParam("force_full", "1")
+	}
 	r, err := req.Get(path)
 	if err != nil {
 		return nil, err

@@ -31,8 +31,12 @@ func TestUserSyncSeqKeepsHighestSequence(t *testing.T) {
 
 func TestGetFullUserListSkipsIfNoneMatch(t *testing.T) {
 	var gotIfNoneMatch string
+	var gotForceHeader string
+	var gotForceQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotIfNoneMatch = r.Header.Get("If-None-Match")
+		gotForceHeader = r.Header.Get("X-Force-Full-User-List")
+		gotForceQuery = r.URL.Query().Get("force_full")
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("ETag", `"next"`)
 		w.Header().Set("X-User-Sync-Seq", "12")
@@ -51,6 +55,12 @@ func TestGetFullUserListSkipsIfNoneMatch(t *testing.T) {
 	}
 	if gotIfNoneMatch != "" {
 		t.Fatalf("expected forced full user list to skip If-None-Match, got %q", gotIfNoneMatch)
+	}
+	if gotForceHeader != "1" {
+		t.Fatalf("expected forced full user list header, got %q", gotForceHeader)
+	}
+	if gotForceQuery != "1" {
+		t.Fatalf("expected forced full user list query flag, got %q", gotForceQuery)
 	}
 	if users == nil {
 		t.Fatal("expected 200 empty users response to return a non-nil slice")
