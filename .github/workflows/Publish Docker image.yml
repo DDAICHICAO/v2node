@@ -2,11 +2,13 @@ name: Publish Docker image
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
-  pull_request:
-    branches:
-      - 'master'
+  # Temporarily disable automatic Docker publishing.
+  # Re-enable these triggers when GHCR images are needed again.
+  # release:
+  #   types: [published]
+  # pull_request:
+  #   branches:
+  #     - 'master'
 
 env:
   REGISTRY: ghcr.io
