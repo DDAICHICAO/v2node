@@ -23,7 +23,7 @@ func TestRenderSnellConfigWritesListenPSKVersionAndObfs(t *testing.T) {
 	config := renderSnellConfig(node, credential)
 
 	for _, line := range []string{
-		"listen = 0.0.0.0:20001",
+		"listen = 0.0.0.0:20001,[::]:20001",
 		"psk = secret",
 		"version = 6",
 		"obfs = http",
@@ -32,6 +32,13 @@ func TestRenderSnellConfigWritesListenPSKVersionAndObfs(t *testing.T) {
 		if !strings.Contains(config, line) {
 			t.Fatalf("expected config to contain %q, got:\n%s", line, config)
 		}
+	}
+}
+
+func TestRenderSnellListenUsesExplicitListenIPWhenProvided(t *testing.T) {
+	got := renderSnellListen("127.0.0.1", 20001, 6)
+	if got != "127.0.0.1:20001" {
+		t.Fatalf("renderSnellListen()=%q, want 127.0.0.1:20001", got)
 	}
 }
 

@@ -20,6 +20,7 @@ type snellProcess struct {
 	Port       int
 	ConfigPath string
 	Command    *exec.Cmd
+	Done       <-chan error
 }
 
 func snellListenerKey(snellID, userID, port int) string {
@@ -27,17 +28,13 @@ func snellListenerKey(snellID, userID, port int) string {
 }
 
 func renderSnellConfig(node panel.ManagedSnellNode, credential panel.ManagedSnellCredential) string {
-	listenIP := strings.TrimSpace(node.ListenIP)
-	if listenIP == "" {
-		listenIP = "0.0.0.0"
-	}
 	version := node.Version
 	if version <= 0 {
 		version = 6
 	}
 
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "listen = %s\n", net.JoinHostPort(listenIP, strconv.Itoa(credential.Port)))
+	fmt.Fprintf(&builder, "listen = %s\n", renderSnellListen(node.ListenIP, credential.Port, version))
 	fmt.Fprintf(&builder, "psk = %s\n", credential.PSK)
 	fmt.Fprintf(&builder, "version = %d\n", version)
 	if obfs := strings.TrimSpace(node.Obfs); obfs != "" {
@@ -47,6 +44,20 @@ func renderSnellConfig(node panel.ManagedSnellNode, credential panel.ManagedSnel
 		fmt.Fprintf(&builder, "obfs-host = %s\n", obfsHost)
 	}
 	return builder.String()
+}
+
+func renderSnellListen(listenIP string, port int, version int) string {
+	listenIP = strings.TrimSpace(listenIP)
+	if listenIP == "" {
+		listenIP = "0.0.0.0"
+	}
+
+	portText := strconv.Itoa(port)
+	if version >= 6 && listenIP == "0.0.0.0" {
+		return net.JoinHostPort("0.0.0.0", portText) + "," + net.JoinHostPort("::", portText)
+	}
+
+	return net.JoinHostPort(listenIP, portText)
 }
 
 func writeSnellConfig(configDir string, node panel.ManagedSnellNode, credential panel.ManagedSnellCredential) (string, error) {
@@ -92,21 +103,42 @@ func startSnellProcess(binary, configPath string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+func watchSnellProcess(cmd *exec.Cmd) <-chan error {
+	done := make(chan error, 1)
+	if cmd == nil {
+		close(done)
+		return done
+	}
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
+	return done
+}
+
+func processExited(process *snellProcess) (bool, string) {
+	if process == nil || process.Done == nil {
+		return false, ""
+	}
+	select {
+	case err, ok := <-process.Done:
+		if !ok || err == nil {
+			return true, "snell process exited"
+		}
+		return true, err.Error()
+	default:
+		return false, ""
+	}
+}
+
 func stopSnellProcess(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil || cmd.ProcessState != nil {
 		return nil
 	}
 
 	killErr := cmd.Process.Kill()
-	waitErr := cmd.Wait()
-	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
-			waitErr = nil
-		}
-	}
 	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 		return killErr
 	}
-	return waitErr
+	return nil
 }

@@ -17,6 +17,8 @@ type Task struct {
 	Running  bool
 	ReloadCh chan struct{}
 	Stop     chan struct{}
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
 func (t *Task) Start(first bool) error {
@@ -27,6 +29,7 @@ func (t *Task) Start(first bool) error {
 	}
 	t.Running = true
 	t.Stop = make(chan struct{})
+	t.cancel = nil
 	t.Access.Unlock()
 	go func() {
 		timer := time.NewTimer(t.Interval)
@@ -57,7 +60,17 @@ func (t *Task) Start(first bool) error {
 
 func (t *Task) ExecuteWithTimeout() error {
 	ctx, cancel := context.WithTimeout(context.Background(), min(5*t.Interval, 5*time.Minute))
-	defer cancel()
+	t.Access.Lock()
+	t.cancel = cancel
+	t.wg.Add(1)
+	t.Access.Unlock()
+	defer func() {
+		cancel()
+		t.Access.Lock()
+		t.cancel = nil
+		t.Access.Unlock()
+		t.wg.Done()
+	}()
 	done := make(chan error, 1)
 
 	go func() {
@@ -85,12 +98,18 @@ func (t *Task) ExecuteWithTimeout() error {
 }
 
 func (t *Task) safeStop() {
+	var cancel context.CancelFunc
 	t.Access.Lock()
 	if t.Running {
 		t.Running = false
 		close(t.Stop)
 	}
+	cancel = t.cancel
 	t.Access.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	t.wg.Wait()
 }
 
 func (t *Task) Close() {

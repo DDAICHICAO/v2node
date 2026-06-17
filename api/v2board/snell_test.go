@@ -15,7 +15,7 @@ func TestGetManagedSnellDecodesDesiredState(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("unexpected method %s", r.Method)
 		}
-		if r.URL.Path != "/api/v2/server/managed-snell" {
+		if r.URL.Path != "/api/v2/server/snell/config" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -57,14 +57,14 @@ func TestReportManagedSnellStatusPostsPayload(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method %s", r.Method)
 		}
-		if r.URL.Path != "/api/v2/server/managed-snell/status" {
+		if r.URL.Path != "/api/v2/server/snell/statuses" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":true}`))
+		_, _ = w.Write([]byte(`{"data":{"accepted_users":1,"rejected_users":0,"accepted_bytes":579}}`))
 	}))
 	defer server.Close()
 
@@ -81,34 +81,58 @@ func TestReportManagedSnellStatusPostsPayload(t *testing.T) {
 
 func TestReportManagedSnellTrafficPostsPayload(t *testing.T) {
 	var payload struct {
-		SnellID int                 `json:"snell_id"`
-		Data    map[string][2]int64 `json:"data"`
+		SnellID int                       `json:"snell_id"`
+		Mode    string                    `json:"mode"`
+		Data    []ManagedSnellTrafficUser `json:"data"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method %s", r.Method)
 		}
-		if r.URL.Path != "/api/v2/server/managed-snell/traffic" {
+		if r.URL.Path != "/api/v2/server/snell/1/traffic" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":true}`))
+		_, _ = w.Write([]byte(`{"data":{"accepted_users":1,"rejected_users":0,"accepted_bytes":579}}`))
 	}))
 	defer server.Close()
 
 	client := &Client{client: resty.New().SetBaseURL(server.URL)}
 
-	err := client.ReportManagedSnellTraffic(context.Background(), 1, map[int][2]int64{1001: {123, 456}})
+	err := client.ReportManagedSnellTraffic(context.Background(), 1, []ManagedSnellTrafficUser{
+		{UserID: 1001, Port: 20001, Upload: 123, Download: 456},
+	})
 	if err != nil {
 		t.Fatalf("ReportManagedSnellTraffic: %v", err)
 	}
 	if payload.SnellID != 1 {
 		t.Fatalf("unexpected snell_id %d", payload.SnellID)
 	}
-	if payload.Data["1001"] != [2]int64{123, 456} {
+	if payload.Mode != "delta" {
+		t.Fatalf("unexpected report mode %q", payload.Mode)
+	}
+	want := []ManagedSnellTrafficUser{{UserID: 1001, Port: 20001, Upload: 123, Download: 456}}
+	if len(payload.Data) != len(want) || payload.Data[0] != want[0] {
 		t.Fatalf("unexpected traffic payload: %+v", payload.Data)
+	}
+}
+
+func TestReportManagedSnellTrafficRejectsSemanticFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"accepted_users":0,"rejected_users":1,"accepted_bytes":0}}`))
+	}))
+	defer server.Close()
+
+	client := &Client{client: resty.New().SetBaseURL(server.URL)}
+
+	err := client.ReportManagedSnellTraffic(context.Background(), 1, []ManagedSnellTrafficUser{
+		{UserID: 1001, Port: 20001, Upload: 123, Download: 456},
+	})
+	if err == nil {
+		t.Fatal("expected semantic rejection error")
 	}
 }
