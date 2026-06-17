@@ -37,10 +37,10 @@ func renderSnellConfig(node panel.ManagedSnellNode, credential panel.ManagedSnel
 	fmt.Fprintf(&builder, "listen = %s\n", renderSnellListen(node.ListenIP, credential.Port, version))
 	fmt.Fprintf(&builder, "psk = %s\n", credential.PSK)
 	fmt.Fprintf(&builder, "version = %d\n", version)
-	if obfs := strings.TrimSpace(node.Obfs); obfs != "" {
+	if obfs := strings.TrimSpace(node.Obfs); version < 6 && obfs != "" {
 		fmt.Fprintf(&builder, "obfs = %s\n", obfs)
 	}
-	if obfsHost := strings.TrimSpace(node.ObfsHost); obfsHost != "" {
+	if obfsHost := strings.TrimSpace(node.ObfsHost); version < 6 && obfsHost != "" {
 		fmt.Fprintf(&builder, "obfs-host = %s\n", obfsHost)
 	}
 	return builder.String()

@@ -7,7 +7,7 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
-func TestRenderSnellConfigWritesListenPSKVersionAndObfs(t *testing.T) {
+func TestRenderSnellConfigSkipsObfsForVersion6(t *testing.T) {
 	node := panel.ManagedSnellNode{
 		ID:       1,
 		Version:  6,
@@ -26,11 +26,14 @@ func TestRenderSnellConfigWritesListenPSKVersionAndObfs(t *testing.T) {
 		"listen = 0.0.0.0:20001,[::]:20001",
 		"psk = secret",
 		"version = 6",
-		"obfs = http",
-		"obfs-host = download.example.com",
 	} {
 		if !strings.Contains(config, line) {
 			t.Fatalf("expected config to contain %q, got:\n%s", line, config)
+		}
+	}
+	for _, line := range []string{"obfs = http", "obfs-host = download.example.com"} {
+		if strings.Contains(config, line) {
+			t.Fatalf("expected version 6 config to skip %q, got:\n%s", line, config)
 		}
 	}
 }
