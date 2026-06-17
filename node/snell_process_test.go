@@ -23,15 +23,15 @@ func TestRenderSnellConfigSkipsObfsForVersion6(t *testing.T) {
 	config := renderSnellConfig(node, credential)
 
 	for _, line := range []string{
+		"[snell-server]",
 		"listen = 0.0.0.0:20001,[::]:20001",
 		"psk = secret",
-		"version = 6",
 	} {
 		if !strings.Contains(config, line) {
 			t.Fatalf("expected config to contain %q, got:\n%s", line, config)
 		}
 	}
-	for _, line := range []string{"obfs = http", "obfs-host = download.example.com"} {
+	for _, line := range []string{"version = 6", "obfs = http", "obfs-host = download.example.com"} {
 		if strings.Contains(config, line) {
 			t.Fatalf("expected version 6 config to skip %q, got:\n%s", line, config)
 		}

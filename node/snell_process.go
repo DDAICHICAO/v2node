@@ -34,9 +34,9 @@ func renderSnellConfig(node panel.ManagedSnellNode, credential panel.ManagedSnel
 	}
 
 	var builder strings.Builder
+	builder.WriteString("[snell-server]\n")
 	fmt.Fprintf(&builder, "listen = %s\n", renderSnellListen(node.ListenIP, credential.Port, version))
 	fmt.Fprintf(&builder, "psk = %s\n", credential.PSK)
-	fmt.Fprintf(&builder, "version = %d\n", version)
 	if obfs := strings.TrimSpace(node.Obfs); version < 6 && obfs != "" {
 		fmt.Fprintf(&builder, "obfs = %s\n", obfs)
 	}
