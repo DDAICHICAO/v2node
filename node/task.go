@@ -31,24 +31,6 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	_ = c.nodeInfoMonitorPeriodic.Start(false)
 	log.WithField("tag", c.tag).Info("Start report node status")
 	_ = c.userReportPeriodic.Start(false)
-	if c.managedSnell != nil {
-		c.managedSnellSyncPeriodic = &task.Task{
-			Name:     "managedSnellSync",
-			Interval: managedSnellTaskInterval(node.PullInterval),
-			Execute:  c.managedSnellSyncTask,
-			ReloadCh: c.server.ReloadCh,
-		}
-		c.managedSnellTrafficPeriodic = &task.Task{
-			Name:     "managedSnellTraffic",
-			Interval: managedSnellTaskInterval(node.PushInterval),
-			Execute:  c.managedSnellTrafficTask,
-			ReloadCh: c.server.ReloadCh,
-		}
-		log.WithField("tag", c.tag).Info("Start managed snell sync")
-		_ = c.managedSnellSyncPeriodic.Start(true)
-		log.WithField("tag", c.tag).Info("Start managed snell traffic report")
-		_ = c.managedSnellTrafficPeriodic.Start(false)
-	}
 	if node.Security == panel.Tls {
 		switch c.info.Common.CertInfo.CertMode {
 		case "none", "", "file", "self":
@@ -97,41 +79,6 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	c.checkStreamUnlockTask(ctx)
 
 	return c.syncUserState(ctx)
-}
-
-func managedSnellTaskInterval(interval time.Duration) time.Duration {
-	if interval > 0 {
-		return interval
-	}
-	return time.Minute
-}
-
-func (c *Controller) managedSnellSyncTask(ctx context.Context) error {
-	if c == nil || c.managedSnell == nil || c.apiClient == nil {
-		return nil
-	}
-	if err := c.managedSnell.syncDesiredState(ctx, c.apiClient); err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Sync managed snell failed")
-		return nil
-	}
-	return nil
-}
-
-func (c *Controller) managedSnellTrafficTask(ctx context.Context) error {
-	if c == nil || c.managedSnell == nil || c.apiClient == nil {
-		return nil
-	}
-	if err := c.managedSnell.reportTraffic(ctx, c.apiClient); err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Report managed snell traffic failed")
-		return nil
-	}
-	return nil
 }
 
 func (c *Controller) syncUserState(ctx context.Context) error {

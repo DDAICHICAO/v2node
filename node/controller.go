@@ -16,33 +16,29 @@ import (
 )
 
 type Controller struct {
-	server                      *core.V2Core
-	apiClient                   *panel.Client
-	tag                         string
-	limiter                     *limiter.Limiter
-	userList                    []panel.UserInfo
-	aliveMap                    map[int]int
-	deviceAliveMap              map[int]int
-	lastAliveRefresh            time.Time
-	netSampler                  *netstat.Sampler
-	conf                        *conf.NodeConfig
-	info                        *panel.NodeInfo
-	nodeInfoMonitorPeriodic     *task.Task
-	userReportPeriodic          *task.Task
-	renewCertPeriodic           *task.Task
-	managedSnellSyncPeriodic    *task.Task
-	managedSnellTrafficPeriodic *task.Task
-	managedSnell                *managedSnellManager
+	server                  *core.V2Core
+	apiClient               *panel.Client
+	tag                     string
+	limiter                 *limiter.Limiter
+	userList                []panel.UserInfo
+	aliveMap                map[int]int
+	deviceAliveMap          map[int]int
+	lastAliveRefresh        time.Time
+	netSampler              *netstat.Sampler
+	conf                    *conf.NodeConfig
+	info                    *panel.NodeInfo
+	nodeInfoMonitorPeriodic *task.Task
+	userReportPeriodic      *task.Task
+	renewCertPeriodic       *task.Task
 }
 
 // NewController return a Node controller with default parameters.
 func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInfo) *Controller {
 	controller := &Controller{
-		apiClient:    api,
-		info:         info,
-		conf:         conf,
-		netSampler:   netstat.NewSampler(),
-		managedSnell: newManagedSnellManager(api),
+		apiClient:  api,
+		info:       info,
+		conf:       conf,
+		netSampler: netstat.NewSampler(),
 	}
 	return controller
 }
@@ -148,17 +144,6 @@ func (c *Controller) Close() error {
 	}
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
-	}
-	if c.managedSnellSyncPeriodic != nil {
-		c.managedSnellSyncPeriodic.Close()
-	}
-	if c.managedSnellTrafficPeriodic != nil {
-		c.managedSnellTrafficPeriodic.Close()
-	}
-	if c.managedSnell != nil {
-		if err := c.managedSnell.Close(); err != nil {
-			log.Errorf("close managed snell failed: %v", err)
-		}
 	}
 	err := c.server.DelNode(c.tag)
 	if err != nil {
