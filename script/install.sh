@@ -389,6 +389,24 @@ download_v2node_archive() {
     fi
 }
 
+download_file_with_fallback() {
+    local target="$1"
+    shift
+    local url
+
+    rm -f "$target"
+    for url in "$@"; do
+        echo "Downloading from ${url}"
+        if curl -fL --connect-timeout 15 --retry 2 --retry-delay 2 -o "$target" "$url" && [[ -s "$target" ]]; then
+            return 0
+        fi
+        echo -e "${yellow}Download failed, trying next mirror: ${url}${plain}"
+        rm -f "$target"
+    done
+
+    return 1
+}
+
 replace_v2node_install_dir() {
     local source_dir="$1"
     local install_dir="/usr/local/v2node"
@@ -549,7 +567,12 @@ EOF
     fi
 
 
-    curl -o /usr/bin/v2node -Ls https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/v2node.sh
+    if ! download_file_with_fallback /usr/bin/v2node \
+        "https://cdn.jsdelivr.net/gh/DDAICHICAO/v2node@dev/script/v2node.sh" \
+        "https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/v2node.sh"; then
+        echo -e "${red}Failed to download v2node management script${plain}"
+        exit 1
+    fi
     chmod +x /usr/bin/v2node
 
     cd $cur_dir
