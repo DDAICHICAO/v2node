@@ -10,11 +10,13 @@ import (
 
 const DefaultNodeRetryCount = 1
 const DefaultNodeTimeout = 15
+const DefaultStatePath = "/etc/v2node/offline-state"
 
 type Conf struct {
 	LogConfig         LogConfig         `mapstructure:"Log"`
 	AccessAuditConfig AccessAuditConfig `mapstructure:"AccessAudit"`
 	NodeConfigs       []NodeConfig      `mapstructure:"Nodes"`
+	StatePath         string            `mapstructure:"StatePath"`
 	PprofPort         int               `mapstructure:"PprofPort"`
 }
 
@@ -49,6 +51,7 @@ func New() *Conf {
 			FlushInterval: DefaultAccessAuditFlushInterval,
 			Timeout:       DefaultAccessAuditTimeout,
 		},
+		StatePath: DefaultStatePath,
 	}
 }
 
@@ -65,6 +68,10 @@ func (p *Conf) LoadFromPath(filePath string) error {
 	}
 	if err := v.Unmarshal(p); err != nil {
 		return fmt.Errorf("unmarshal config error: %s", err)
+	}
+	p.StatePath = strings.TrimSpace(p.StatePath)
+	if p.StatePath == "" {
+		p.StatePath = DefaultStatePath
 	}
 	p.LogConfig.Normalize()
 	if err := p.AccessAuditConfig.Normalize(); err != nil {
