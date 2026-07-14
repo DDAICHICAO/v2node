@@ -42,3 +42,46 @@ func TestTaskStartContinuesAfterExecuteError(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskTimeoutDoesNotReloadUnlessEnabled(t *testing.T) {
+	reloadCh := make(chan struct{}, 1)
+	periodic := &Task{
+		Name:     "panel-sync",
+		Interval: 5 * time.Millisecond,
+		Execute: func(context.Context) error {
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		},
+		ReloadCh: reloadCh,
+	}
+	if err := periodic.ExecuteWithTimeout(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v, want deadline exceeded", err)
+	}
+	select {
+	case <-reloadCh:
+		t.Fatal("panel task timeout triggered reload")
+	default:
+	}
+}
+
+func TestTaskTimeoutReloadsWhenExplicitlyEnabled(t *testing.T) {
+	reloadCh := make(chan struct{}, 1)
+	periodic := &Task{
+		Name:            "certificate-recovery",
+		Interval:        5 * time.Millisecond,
+		ReloadOnTimeout: true,
+		Execute: func(context.Context) error {
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		},
+		ReloadCh: reloadCh,
+	}
+	if err := periodic.ExecuteWithTimeout(); err != nil {
+		t.Fatalf("ExecuteWithTimeout error=%v", err)
+	}
+	select {
+	case <-reloadCh:
+	default:
+		t.Fatal("explicit reload policy did not signal reload")
+	}
+}

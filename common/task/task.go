@@ -10,15 +10,16 @@ import (
 )
 
 type Task struct {
-	Name     string
-	Interval time.Duration
-	Execute  func(context.Context) error
-	Access   sync.RWMutex
-	Running  bool
-	ReloadCh chan struct{}
-	Stop     chan struct{}
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	Name            string
+	Interval        time.Duration
+	Execute         func(context.Context) error
+	Access          sync.RWMutex
+	Running         bool
+	ReloadCh        chan struct{}
+	ReloadOnTimeout bool
+	Stop            chan struct{}
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 func (t *Task) Start(first bool) error {
@@ -79,14 +80,17 @@ func (t *Task) ExecuteWithTimeout() error {
 
 	select {
 	case <-ctx.Done():
+		if !t.ReloadOnTimeout {
+			log.Warningf("Task %s execution timed out, keeping current runtime", t.Name)
+			return ctx.Err()
+		}
 		log.Errorf("Task %s execution timed out, reloading", t.Name)
-		if t.ReloadCh != nil {
-			select {
-			case t.ReloadCh <- struct{}{}:
-			default:
-			}
-		} else {
-			log.Panic("Reload failed")
+		if t.ReloadCh == nil {
+			return errors.New("reload channel is nil")
+		}
+		select {
+		case t.ReloadCh <- struct{}{}:
+		default:
 		}
 		return nil
 	case err := <-done:
