@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -30,15 +29,20 @@ type Controller struct {
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
+	store                   *offlineStateStore
+	bootstrap               *offlineState
+	startedOffline          bool
 }
 
 // NewController return a Node controller with default parameters.
-func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInfo) *Controller {
+func NewController(api *panel.Client, conf *conf.NodeConfig, store *offlineStateStore, bootstrap *offlineState, startedOffline bool) *Controller {
 	controller := &Controller{
-		apiClient:  api,
-		info:       info,
-		conf:       conf,
-		netSampler: netstat.NewSampler(),
+		apiClient:      api,
+		conf:           conf,
+		netSampler:     netstat.NewSampler(),
+		store:          store,
+		bootstrap:      bootstrap,
+		startedOffline: startedOffline,
 	}
 	return controller
 }
@@ -47,34 +51,17 @@ func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInf
 func (c *Controller) Start(x *core.V2Core) error {
 	// Init Core
 	c.server = x
-	var err error
-	// First fetch Node Info
-	node := c.info
-	if node == nil {
-		c.info, err = c.apiClient.GetNodeInfo(context.Background())
-		if err != nil {
-			return fmt.Errorf("get node info error: %s", err)
-		}
-		node = c.info
+	if c.bootstrap == nil || c.bootstrap.NodeInfo == nil {
+		return errors.New("bootstrap state is incomplete")
 	}
-	// Update user
-	c.userList, err = c.apiClient.GetUserList(context.Background())
-	if err != nil {
-		return fmt.Errorf("get user list error: %s", err)
-	}
-	if len(c.userList) == 0 {
-		return errors.New("add users error: not have any user")
-	}
-	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to get user alive list: %s", err)
-	}
-	c.deviceAliveMap = make(map[int]int)
-	if c.supportsDeviceLimitByUUID() {
-		c.deviceAliveMap, err = c.apiClient.GetUserDeviceAlive(context.Background())
-		if err != nil {
-			return fmt.Errorf("failed to get user device alive list: %s", err)
-		}
+	node := c.bootstrap.NodeInfo
+	c.info = node
+	c.userList = make([]panel.UserInfo, len(c.bootstrap.Users))
+	copy(c.userList, c.bootstrap.Users)
+	c.aliveMap = cloneIntMap(c.bootstrap.Alive)
+	c.deviceAliveMap = cloneIntMap(c.bootstrap.DeviceAlive)
+	if c.aliveMap == nil || c.deviceAliveMap == nil {
+		return errors.New("bootstrap user state is incomplete")
 	}
 	c.tag = node.Tag
 
@@ -82,13 +69,13 @@ func (c *Controller) Start(x *core.V2Core) error {
 	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap, c.deviceAliveMap, c.supportsDeviceLimitByUUID())
 	c.limiter = l
 	if node.Security == panel.Tls {
-		err = c.requestCert()
+		err := c.requestCert()
 		if err != nil {
 			return fmt.Errorf("request cert error: %s", err)
 		}
 	}
 	// Add new tag
-	err = c.server.AddNode(c.tag, node)
+	err := c.server.AddNode(c.tag, node)
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
@@ -108,8 +95,34 @@ func (c *Controller) Start(x *core.V2Core) error {
 		}).Debug("Prime network throughput sampler failed")
 	}
 	c.info = node
+	if !c.startedOffline {
+		if err := c.persistOfflineState(node); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Persist initial offline snapshot failed")
+		}
+	}
 	c.startTasks(node)
 	return nil
+}
+
+func (c *Controller) persistOfflineState(info *panel.NodeInfo) error {
+	if c.store == nil {
+		return errors.New("offline state store is nil")
+	}
+	state := &offlineState{
+		Version:     offlineStateVersion,
+		APIHost:     normalizeAPIHost(c.conf.APIHost),
+		NodeID:      c.conf.NodeID,
+		SavedAt:     time.Now().Unix(),
+		NodeInfo:    info,
+		Users:       append([]panel.UserInfo{}, c.userList...),
+		Alive:       cloneIntMap(c.aliveMap),
+		DeviceAlive: cloneIntMap(c.deviceAliveMap),
+		UserSyncSeq: c.apiClient.UserSyncSeq(),
+	}
+	return c.store.Save(*c.conf, state)
 }
 
 func (c *Controller) supportsDeviceLimitByUUID() bool {

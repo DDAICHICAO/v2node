@@ -2,7 +2,9 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -15,22 +17,39 @@ type Node struct {
 	NodeInfos   []*panel.NodeInfo
 }
 
-func New(nodes []conf.NodeConfig) (*Node, error) {
+func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 	n := &Node{
 		controllers: make([]*Controller, len(nodes)),
 		NodeInfos:   make([]*panel.NodeInfo, len(nodes)),
 	}
+	store := newOfflineStateStore(statePath)
 	for i, node := range nodes {
 		p, err := panel.New(&node)
 		if err != nil {
 			return nil, err
 		}
-		info, err := p.GetNodeInfo(context.Background())
+		cached, err := store.Load(node)
 		if err != nil {
-			return nil, err
+			cached = nil
+			if errors.Is(err, os.ErrNotExist) {
+				log.WithFields(log.Fields{
+					"api_host": normalizeAPIHost(node.APIHost),
+					"node_id":  node.NodeID,
+				}).Debug("Offline snapshot does not exist")
+			} else {
+				log.WithFields(log.Fields{
+					"api_host": normalizeAPIHost(node.APIHost),
+					"node_id":  node.NodeID,
+					"err":      err,
+				}).Warning("Offline snapshot is invalid; trying panel state")
+			}
 		}
-		n.controllers[i] = NewController(p, &node, info)
-		n.NodeInfos[i] = info
+		bootstrap, startedOffline, err := loadBootstrapState(context.Background(), p, node, cached)
+		if err != nil {
+			return nil, fmt.Errorf("load node [%s-%d] bootstrap state: %w", node.APIHost, node.NodeID, err)
+		}
+		n.controllers[i] = NewController(p, &node, store, bootstrap, startedOffline)
+		n.NodeInfos[i] = bootstrap.NodeInfo
 	}
 	return n, nil
 }
