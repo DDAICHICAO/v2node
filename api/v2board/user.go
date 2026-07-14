@@ -214,30 +214,30 @@ func (c *Client) updateUserSyncSeqFromHeader(value string) {
 
 // GetUserAlive will fetch the alive_ip count for users
 func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
-	c.AliveMap = &AliveMap{}
+	aliveMap := &AliveMap{}
 	const path = "/api/v1/server/UniProxy/alivelist"
 	r, err := c.client.R().
 		SetContext(ctx).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+		return nil, err
 	}
-	if r == nil || r.RawResponse == nil || r.StatusCode() >= 399 {
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+	if r == nil || r.RawResponse == nil {
+		return nil, fmt.Errorf("received nil alive response")
+	}
+	if r.StatusCode() >= 400 {
+		return nil, fmt.Errorf("get user alive http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
 	}
 	defer r.RawResponse.Body.Close()
-	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
-		fmt.Printf("unmarshal user alive list error: %s", err)
-		c.AliveMap.Alive = make(map[int]int)
+	if err := json.Unmarshal(r.Body(), aliveMap); err != nil {
+		return nil, fmt.Errorf("decode user alive list error: %w", err)
 	}
-
-	return c.AliveMap.Alive, nil
+	if aliveMap.Alive == nil {
+		aliveMap.Alive = make(map[int]int)
+	}
+	c.AliveMap = aliveMap
+	return aliveMap.Alive, nil
 }
 
 func (c *Client) GetUserDeviceAlive(ctx context.Context) (map[int]int, error) {
@@ -248,20 +248,17 @@ func (c *Client) GetUserDeviceAlive(ctx context.Context) (map[int]int, error) {
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		deviceAlive.AliveDevices = make(map[int]int)
-		return deviceAlive.AliveDevices, nil
+		return nil, err
 	}
-	if r == nil || r.RawResponse == nil || r.StatusCode() >= 399 {
-		deviceAlive.AliveDevices = make(map[int]int)
-		return deviceAlive.AliveDevices, nil
+	if r == nil || r.RawResponse == nil {
+		return nil, fmt.Errorf("received nil device alive response")
+	}
+	if r.StatusCode() >= 400 {
+		return nil, fmt.Errorf("get user device alive http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
 	}
 	defer r.RawResponse.Body.Close()
 	if err := json.Unmarshal(r.Body(), deviceAlive); err != nil {
-		fmt.Printf("unmarshal user device alive list error: %s", err)
-		deviceAlive.AliveDevices = make(map[int]int)
+		return nil, fmt.Errorf("decode user device alive list error: %w", err)
 	}
 	if deviceAlive.AliveDevices == nil {
 		deviceAlive.AliveDevices = make(map[int]int)
@@ -301,13 +298,19 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 		}
 	}
 	const path = "/api/v1/server/UniProxy/push"
-	_, err := c.client.R().
+	r, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
 	if err != nil {
 		return err
+	}
+	if r == nil {
+		return fmt.Errorf("received nil user traffic report response")
+	}
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("user traffic report failed: status %d", r.StatusCode())
 	}
 	return nil
 }
@@ -328,20 +331,26 @@ func (c *Client) ReportUserDeviceTraffic(ctx context.Context, userDeviceTraffic 
 		return nil
 	}
 	const path = "/api/v1/server/UniProxy/pushDevices"
-	_, err := c.client.R().
+	r, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
 	if err != nil {
 		return err
+	}
+	if r == nil {
+		return fmt.Errorf("received nil user device traffic report response")
+	}
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("user device traffic report failed: status %d", r.StatusCode())
 	}
 	return nil
 }
 
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
-	_, err := c.client.R().
+	r, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
@@ -350,13 +359,18 @@ func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]stri
 	if err != nil {
 		return err
 	}
-
+	if r == nil {
+		return fmt.Errorf("received nil online user report response")
+	}
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("online user report failed: status %d", r.StatusCode())
+	}
 	return nil
 }
 
 func (c *Client) ReportNodeOnlineDevices(ctx context.Context, data *map[int][]OnlineDeviceReportItem) error {
 	const path = "/api/v1/server/UniProxy/aliveDevices"
-	_, err := c.client.R().
+	r, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
@@ -365,6 +379,11 @@ func (c *Client) ReportNodeOnlineDevices(ctx context.Context, data *map[int][]On
 	if err != nil {
 		return err
 	}
-
+	if r == nil {
+		return fmt.Errorf("received nil online device report response")
+	}
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("online device report failed: status %d", r.StatusCode())
+	}
 	return nil
 }

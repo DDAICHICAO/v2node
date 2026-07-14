@@ -1,12 +1,27 @@
 package node
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
 	"github.com/wyx2685/v2node/limiter"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("V2NODE_TEST_VERSION_HELPER") == "1" && len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println("v2node test")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestApplyUserDeltaEventsUpsertReplacesUserRows(t *testing.T) {
 	oldUsers := []panel.UserInfo{
@@ -162,6 +177,124 @@ func TestApplyUserListReturnsAddUsersError(t *testing.T) {
 	}
 	if len(c.userList) != 0 {
 		t.Fatalf("expected local user list to stay unchanged after add failure, got %+v", c.userList)
+	}
+}
+
+func TestSyncUserStateKeepsUsersWhenPanelUnavailable(t *testing.T) {
+	t.Setenv("V2NODE_TEST_VERSION_HELPER", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "panel unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	cfg := conf.NodeConfig{APIHost: server.URL, NodeID: 1, Key: "test", MachineIP: "127.0.0.1"}
+	client, err := panel.New(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := []panel.UserInfo{{Id: 1, Uuid: "cached-user"}}
+	c := &Controller{apiClient: client, userList: append([]panel.UserInfo(nil), original...)}
+
+	if err := c.syncUserState(context.Background()); err == nil {
+		t.Fatal("expected panel error")
+	}
+	assertUserListEqual(t, c.userList, original)
+}
+
+func TestRefreshAliveStateDoesNotApplyPartialPanelData(t *testing.T) {
+	t.Setenv("V2NODE_TEST_VERSION_HELPER", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/server/UniProxy/alivelist":
+			_, _ = w.Write([]byte(`{"alive":{"1":9}}`))
+		case "/api/v1/server/UniProxy/deviceAliveList":
+			http.Error(w, "panel unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := conf.NodeConfig{APIHost: server.URL, NodeID: 1, Key: "test", MachineIP: "127.0.0.1"}
+	client, err := panel.New(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Controller{
+		apiClient:      client,
+		info:           testOfflineNodeInfo(1),
+		aliveMap:       map[int]int{1: 1},
+		deviceAliveMap: map[int]int{1: 2},
+	}
+	c.info.Common.BaseConfig.DeviceLimitByUUID = true
+
+	if err := c.refreshAliveState(context.Background()); err == nil {
+		t.Fatal("expected device alive panel error")
+	}
+	if c.aliveMap[1] != 1 || c.deviceAliveMap[1] != 2 {
+		t.Fatalf("partial panel state was applied: alive=%v device=%v", c.aliveMap, c.deviceAliveMap)
+	}
+}
+
+func TestNodeInfoMonitorPersistsNewConfigBeforeReload(t *testing.T) {
+	t.Setenv("V2NODE_TEST_VERSION_HELPER", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocol":"vless","server_port":8443,"base_config":{"push_interval":60,"pull_interval":60}}`))
+	}))
+	defer server.Close()
+
+	cfg := conf.NodeConfig{APIHost: server.URL, NodeID: 1, Key: "test", MachineIP: "127.0.0.1"}
+	client, err := panel.New(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notDirectory := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(notDirectory, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reloadCh := make(chan struct{}, 1)
+	c := &Controller{
+		apiClient:      client,
+		conf:           &cfg,
+		store:          newOfflineStateStore(notDirectory),
+		server:         &core.V2Core{ReloadCh: reloadCh},
+		tag:            "test-node",
+		info:           testOfflineNodeInfo(1),
+		userList:       []panel.UserInfo{},
+		aliveMap:       map[int]int{},
+		deviceAliveMap: map[int]int{},
+	}
+
+	if err := c.nodeInfoMonitor(context.Background()); err == nil {
+		t.Fatal("expected snapshot save failure")
+	}
+	if c.pendingNodeInfo == nil {
+		t.Fatal("new node info was not retained for retry")
+	}
+	select {
+	case <-reloadCh:
+		t.Fatal("reload was signaled before snapshot save succeeded")
+	default:
+	}
+
+	store := newOfflineStateStore(t.TempDir())
+	c.store = store
+	if err := c.nodeInfoMonitor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reloadCh:
+	default:
+		t.Fatal("reload was not signaled after snapshot save")
+	}
+	got, err := store.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NodeInfo.Common.ServerPort != 8443 {
+		t.Fatalf("saved server port=%d, want 8443", got.NodeInfo.Common.ServerPort)
 	}
 }
 

@@ -69,3 +69,67 @@ func TestGetFullUserListSkipsIfNoneMatch(t *testing.T) {
 		t.Fatalf("expected sync seq 12, got %d", got)
 	}
 }
+
+func TestAliveStateRequestsReturnPanelErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "panel unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL)}
+	if _, err := c.GetUserAlive(context.Background()); err == nil {
+		t.Fatal("GetUserAlive hid panel error")
+	}
+	if _, err := c.GetUserDeviceAlive(context.Background()); err == nil {
+		t.Fatal("GetUserDeviceAlive hid panel error")
+	}
+}
+
+func TestUserReportRequestsReturnPanelErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "panel unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL)}
+	onlineUsers := map[int][]string{1: {"127.0.0.1"}}
+	onlineDevices := map[int][]OnlineDeviceReportItem{1: {{UUID: "device", IP: "127.0.0.1"}}}
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "traffic", run: func() error {
+			return c.ReportUserTraffic(context.Background(), []UserTraffic{{UID: 1, Upload: 1}})
+		}},
+		{name: "device traffic", run: func() error {
+			return c.ReportUserDeviceTraffic(context.Background(), []UserDeviceTraffic{{UID: 1, UUID: "device", Upload: 1}})
+		}},
+		{name: "online users", run: func() error {
+			return c.ReportNodeOnlineUsers(context.Background(), &onlineUsers)
+		}},
+		{name: "online devices", run: func() error {
+			return c.ReportNodeOnlineDevices(context.Background(), &onlineDevices)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.run(); err == nil {
+				t.Fatal("report request hid panel error")
+			}
+		})
+	}
+}
+
+func TestGetNodeInfoReturnsRepeatedHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "panel unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL), APIHost: server.URL, NodeId: 1}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := c.GetNodeInfo(context.Background()); err == nil {
+			t.Fatalf("attempt %d hid panel error", attempt)
+		}
+	}
+}

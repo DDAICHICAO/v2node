@@ -32,6 +32,8 @@ type Controller struct {
 	store                   *offlineStateStore
 	bootstrap               *offlineState
 	startedOffline          bool
+	offlineTracker          offlineTracker
+	pendingNodeInfo         *panel.NodeInfo
 }
 
 // NewController return a Node controller with default parameters.
@@ -102,6 +104,10 @@ func (c *Controller) Start(x *core.V2Core) error {
 				"err": err,
 			}).Error("Persist initial offline snapshot failed")
 		}
+	} else {
+		offlineErr := errors.New("panel unavailable during bootstrap; using offline snapshot")
+		c.recordPanelFailureAt("sync", "bootstrap", offlineErr, time.Unix(c.bootstrap.SavedAt, 0))
+		c.recordPanelFailureAt("sync", "bootstrap", offlineErr, time.Now())
 	}
 	c.startTasks(node)
 	return nil

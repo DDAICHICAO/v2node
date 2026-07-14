@@ -13,7 +13,8 @@ import (
 
 const nodeRuntimeStatusReportTimeout = 2 * time.Second
 
-func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
+func (c *Controller) reportUserTrafficTask(ctx context.Context) error {
+	var reportErr error
 	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
@@ -25,15 +26,13 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	userTraffic, userDeviceTraffic, _ = c.server.GetUserTrafficReport(c.tag, reportmin)
 	trafficReported := len(userTraffic) == 0
 	if len(userTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
+		err := c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
 			}).Info("Report user traffic failed")
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
+			reportErr = errors.Join(reportErr, err)
 		} else {
 			trafficReported = true
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
@@ -41,15 +40,13 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		}
 	}
 	if trafficReported && c.supportsDeviceTrafficReport() && len(userDeviceTraffic) > 0 {
-		err = c.apiClient.ReportUserDeviceTraffic(ctx, userDeviceTraffic)
+		err := c.apiClient.ReportUserDeviceTraffic(ctx, userDeviceTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
 			}).Info("Report user device traffic failed")
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
+			reportErr = errors.Join(reportErr, err)
 		} else {
 			log.WithField("tag", c.tag).Infof("Report %d devices traffic", len(userDeviceTraffic))
 		}
@@ -103,9 +100,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 					"tag": c.tag,
 					"err": err,
 				}).Info("Report online users failed")
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return err
-				}
+				reportErr = errors.Join(reportErr, err)
 			}
 		}
 		if c.supportsDeviceAliveReport() && len(deviceResult) != 0 {
@@ -132,22 +127,27 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 						"tag": c.tag,
 						"err": err,
 					}).Info("Report online devices failed")
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						return err
-					}
+					reportErr = errors.Join(reportErr, err)
 				}
 			}
 		}
 		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
 	}
 
-	c.reportNodeRuntimeStatus(ctx)
+	if err := c.reportNodeRuntimeStatus(ctx); err != nil {
+		reportErr = errors.Join(reportErr, err)
+	}
+	if reportErr != nil {
+		c.recordPanelFailure("report", "report node state", reportErr)
+		return reportErr
+	}
+	c.recordPanelSuccess("report")
 	return nil
 }
 
-func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
+func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) error {
 	if c.netSampler == nil {
-		return
+		return nil
 	}
 	throughput, ok, err := c.netSampler.Sample()
 	if err != nil {
@@ -155,10 +155,10 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
 			"tag": c.tag,
 			"err": err,
 		}).Debug("Sample network throughput failed")
-		return
+		return nil
 	}
 	if !ok || throughput == nil {
-		return
+		return nil
 	}
 
 	reportCtx, cancel := context.WithTimeout(ctx, nodeRuntimeStatusReportTimeout)
@@ -182,7 +182,9 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) {
 			"tag": c.tag,
 			"err": err,
 		}).Debug("Report node runtime status failed")
+		return err
 	}
+	return nil
 }
 
 func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeStatus) {

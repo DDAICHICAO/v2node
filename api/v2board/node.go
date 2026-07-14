@@ -168,6 +168,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if r.StatusCode() == 304 {
 		return nil, nil
 	}
+	if r.StatusCode() >= 400 {
+		return nil, fmt.Errorf("get node info http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
+	}
 	hash := sha256.Sum256(r.Body())
 	newBodyHash := hex.EncodeToString(hash[:])
 	if c.responseBodyHash == newBodyHash {
@@ -175,10 +178,6 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	}
 	c.responseBodyHash = newBodyHash
 	c.nodeEtag = r.Header().Get("ETag")
-	if r.StatusCode() >= 400 {
-		return nil, fmt.Errorf("get node info http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
-	}
-
 	if r != nil {
 		defer func() {
 			if r.RawBody() != nil {

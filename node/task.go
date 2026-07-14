@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -49,36 +50,72 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 }
 
 func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
+	if c.pendingNodeInfo != nil {
+		if err := c.persistOfflineState(c.pendingNodeInfo); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Persist pending node configuration failed")
+			return err
+		}
+		if err := c.queueReload(); err != nil {
+			return err
+		}
+		c.pendingNodeInfo = nil
+		return nil
+	}
+
 	// get node info
 	newN, err := c.apiClient.GetNodeInfo(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Get node info failed")
-		return nil
+		c.recordPanelFailure("sync", "get node info", err)
+		return fmt.Errorf("get node info: %w", err)
 	}
 	if newN != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
-		}).Error("Got new node info, reload")
-		if c.server.ReloadCh != nil {
-			select {
-			case c.server.ReloadCh <- struct{}{}:
-			default:
-			}
-		} else {
-			log.Panic("Reload failed")
+		}).Info("Got new node info; persist before reload")
+		c.pendingNodeInfo = newN
+		if err := c.persistOfflineState(newN); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Persist new node configuration failed; reload deferred")
+			return err
 		}
+		if err := c.queueReload(); err != nil {
+			return err
+		}
+		c.pendingNodeInfo = nil
+		return nil
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 	c.checkUpdateTask(ctx)
 	c.checkStreamUnlockTask(ctx)
 
-	return c.syncUserState(ctx)
+	if err := c.syncUserState(ctx); err != nil {
+		c.recordPanelFailure("sync", "sync user state", err)
+		return err
+	}
+	c.recordPanelSuccess("sync")
+	if err := c.persistOfflineState(c.info); err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Error("Persist synchronized offline snapshot failed")
+	}
+	return nil
+}
+
+func (c *Controller) queueReload() error {
+	if c.server == nil || c.server.ReloadCh == nil {
+		return errors.New("reload channel is nil")
+	}
+	select {
+	case c.server.ReloadCh <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (c *Controller) syncUserState(ctx context.Context) error {
@@ -152,14 +189,11 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 		newU, err = c.apiClient.GetUserList(ctx)
 	}
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
 		}).Error("Get user list failed")
-		return nil
+		return fmt.Errorf("get user list: %w", err)
 	}
 
 	if err := c.refreshAliveStateIfDue(ctx, true); err != nil {
@@ -202,42 +236,28 @@ func (c *Controller) aliveStateRefreshInterval() time.Duration {
 func (c *Controller) refreshAliveState(ctx context.Context) error {
 	newA, err := c.apiClient.GetUserAlive(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Get alive list failed")
-		return nil
+		return fmt.Errorf("get alive list: %w", err)
+	}
+	if newA == nil {
+		return errors.New("get alive list: panel returned no data")
 	}
 
 	useDeviceLimitByUUID := c.supportsDeviceLimitByUUID()
-	var newDeviceAlive map[int]int
+	newDeviceAlive := make(map[int]int)
 	if useDeviceLimitByUUID {
 		newDeviceAlive, err = c.apiClient.GetUserDeviceAlive(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Get device alive list failed")
-			if newA != nil {
-				c.aliveMap = newA
-			}
-			c.limiter.UpdateAliveState(newA, nil, useDeviceLimitByUUID)
-			return nil
+			return fmt.Errorf("get device alive list: %w", err)
 		}
-		if newDeviceAlive != nil {
-			c.deviceAliveMap = newDeviceAlive
+		if newDeviceAlive == nil {
+			return errors.New("get device alive list: panel returned no data")
 		}
 	}
-	if newA != nil {
-		c.aliveMap = newA
+	c.aliveMap = cloneIntMap(newA)
+	c.deviceAliveMap = cloneIntMap(newDeviceAlive)
+	if c.limiter != nil {
+		c.limiter.UpdateAliveState(newA, newDeviceAlive, useDeviceLimitByUUID)
 	}
-	c.limiter.UpdateAliveState(newA, newDeviceAlive, useDeviceLimitByUUID)
 	return nil
 }
 
