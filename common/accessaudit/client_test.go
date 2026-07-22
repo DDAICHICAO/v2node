@@ -12,6 +12,97 @@ import (
 	"time"
 )
 
+func TestFlowEventNormalizeBuildsStableIdentityAndCompletion(t *testing.T) {
+	startedAt := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	eventAt := startedAt.Add(5 * time.Minute)
+
+	for _, tt := range []struct {
+		name       string
+		sampleType string
+		completed  bool
+	}{
+		{name: "checkpoint", sampleType: FlowSampleCheckpoint, completed: false},
+		{name: "final", sampleType: FlowSampleFinal, completed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			event := FlowEvent{
+				SessionID:         "session-a",
+				Sequence:          7,
+				SampleType:        tt.sampleType,
+				EventTime:         eventAt,
+				IntervalStartedAt: startedAt,
+				NodeID:            42,
+				UID:               145817,
+				TargetHost:        "example.com",
+				TargetPort:        443,
+				Network:           "tcp",
+				UploadBytes:       12,
+				DownloadBytes:     34,
+			}
+
+			if err := event.Normalize(eventAt); err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			if event.EventID != "42:session-a:00000007" {
+				t.Fatalf("unexpected event id %q", event.EventID)
+			}
+			if event.Completed != tt.completed {
+				t.Fatalf("completed=%v want %v", event.Completed, tt.completed)
+			}
+
+			firstID := event.EventID
+			if err := event.Normalize(eventAt.Add(time.Hour)); err != nil {
+				t.Fatalf("normalize retry: %v", err)
+			}
+			if event.EventID != firstID {
+				t.Fatalf("event id changed across retry: %q -> %q", firstID, event.EventID)
+			}
+		})
+	}
+}
+
+func TestFlowEventNormalizeRejectsInvalidInput(t *testing.T) {
+	valid := func() FlowEvent {
+		startedAt := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+		return FlowEvent{
+			SessionID:         "session-a",
+			Sequence:          1,
+			SampleType:        FlowSampleCheckpoint,
+			EventTime:         startedAt.Add(time.Minute),
+			IntervalStartedAt: startedAt,
+			NodeID:            1,
+			UID:               2,
+			TargetHost:        "example.com",
+			TargetPort:        443,
+			Network:           "tcp",
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*FlowEvent)
+	}{
+		{name: "missing node", mutate: func(event *FlowEvent) { event.NodeID = 0 }},
+		{name: "missing session", mutate: func(event *FlowEvent) { event.SessionID = "" }},
+		{name: "missing sequence", mutate: func(event *FlowEvent) { event.Sequence = 0 }},
+		{name: "unknown sample", mutate: func(event *FlowEvent) { event.SampleType = "unknown" }},
+		{name: "missing event time", mutate: func(event *FlowEvent) { event.EventTime = time.Time{} }},
+		{name: "missing interval start", mutate: func(event *FlowEvent) { event.IntervalStartedAt = time.Time{} }},
+		{name: "event before interval", mutate: func(event *FlowEvent) { event.EventTime = event.IntervalStartedAt.Add(-time.Second) }},
+		{name: "byte overflow", mutate: func(event *FlowEvent) { event.UploadBytes = ^uint64(0); event.DownloadBytes = 1 }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := valid()
+			tt.mutate(&event)
+			if err := event.Normalize(time.Now()); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
 func TestClientFlushesSignedBatch(t *testing.T) {
 	received := make(chan *http.Request, 1)
 	bodies := make(chan string, 1)
