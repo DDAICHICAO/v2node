@@ -177,6 +177,10 @@ func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
 
 func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	controller := &Controller{
+		conf: &conf.NodeConfig{
+			APIHost: "https://panel.example",
+			NodeID:  121,
+		},
 		server: &core.V2Core{
 			Config: &conf.Conf{
 				AccessAuditConfig: conf.AccessAuditConfig{
@@ -208,6 +212,22 @@ func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	}
 	if !status.FlowTrafficConfigReported || !status.FlowTrafficEnabled {
 		t.Fatalf("expected flow traffic status to be reported: %#v", status)
+	}
+	if status.MachineInstanceID == "" {
+		t.Fatal("expected machine instance id to be reported")
+	}
+
+	otherController := &Controller{
+		conf: &conf.NodeConfig{
+			APIHost: "https://panel.example",
+			NodeID:  363,
+		},
+		server: controller.server,
+	}
+	otherStatus := panel.NodeRuntimeStatus{}
+	otherController.appendAccessAuditRuntimeStatus(&otherStatus)
+	if otherStatus.MachineInstanceID != status.MachineInstanceID {
+		t.Fatalf("same process must report one machine identity across node ids: %q != %q", otherStatus.MachineInstanceID, status.MachineInstanceID)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 
 type NodeRuntimeStatus struct {
 	Hostname                     string   `json:"hostname,omitempty"`
+	MachineInstanceID            string   `json:"machine_instance_id,omitempty"`
 	Interfaces                   []string `json:"interfaces"`
 	RxBps                        int64    `json:"rx_bps"`
 	TxBps                        int64    `json:"tx_bps"`

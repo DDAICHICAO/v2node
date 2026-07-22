@@ -408,6 +408,7 @@ func TestFlowEventNormalizeRejectsInvalidInput(t *testing.T) {
 		{name: "missing interval start", mutate: func(event *FlowEvent) { event.IntervalStartedAt = time.Time{} }},
 		{name: "event before interval", mutate: func(event *FlowEvent) { event.EventTime = event.IntervalStartedAt.Add(-time.Second) }},
 		{name: "byte overflow", mutate: func(event *FlowEvent) { event.UploadBytes = ^uint64(0); event.DownloadBytes = 1 }},
+		{name: "implausible byte delta", mutate: func(event *FlowEvent) { event.UploadBytes = (uint64(1) << 50) + 1 }},
 	}
 
 	for _, tt := range tests {

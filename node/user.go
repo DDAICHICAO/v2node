@@ -10,6 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/accessaudit"
+	"github.com/wyx2685/v2node/common/instance"
 )
 
 const nodeRuntimeStatusReportTimeout = 2 * time.Second
@@ -193,6 +194,9 @@ func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeSta
 		return
 	}
 	audit := c.server.Config.AccessAuditConfig
+	if c.conf != nil {
+		status.MachineInstanceID = instance.ResolveMachineID(c.conf.APIHost)
+	}
 	status.AccessAuditReported = true
 	status.AccessAuditEnabled = audit.Enabled
 	status.AccessAuditEndpoint = strings.TrimSpace(audit.Endpoint)

@@ -11,6 +11,7 @@ const (
 	FlowEventType        = "flow_traffic"
 	FlowSampleCheckpoint = "checkpoint"
 	FlowSampleFinal      = "final"
+	maxDirectionalBytes  = uint64(1) << 50 // 1 PiB per checkpoint/final delta.
 )
 
 // FlowEvent is one idempotent traffic delta for a routed proxy session.
@@ -84,6 +85,9 @@ func (e *FlowEvent) Normalize(now time.Time) error {
 }
 
 func (e FlowEvent) TotalBytes() (uint64, error) {
+	if e.UploadBytes > maxDirectionalBytes || e.DownloadBytes > maxDirectionalBytes {
+		return 0, errors.New("directional traffic delta exceeds 1 PiB")
+	}
 	if ^uint64(0)-e.UploadBytes < e.DownloadBytes {
 		return 0, errors.New("upload_bytes + download_bytes overflows uint64")
 	}

@@ -76,8 +76,10 @@ Xray dispatcher 最终路由 -> 每连接双向字节增量 -> `common/accessaud
 
 - 在最终路由选定后包装双向连接，客户端写入计为上传，客户端读取计为下载，不替换既有全局计费 `TrafficCounter`。
 - 短连接关闭时发送 final；长连接每 5 分钟发送增量 checkpoint，异常退出仍尝试 final 后重新抛出 panic。
-- 使用稳定 `event_id`、单调 sequence 和持久 bbolt 队列；临时失败保留重试，422 批次二分并只隔离坏的单事件。
+- 使用稳定 `event_id`、单调 sequence 和持久 bbolt 队列；临时失败保留重试，400/413 批次二分并只隔离坏的单事件。
 - spool 默认上限 256 MiB、最长 24 小时，达到边界时记录 dropped 时间窗口；状态上报暴露 pending、oldest、dropped、rejected、重试和最近成功/错误。
+- 同一进程配置多个 NodeID 时，运行状态额外上报不随 NodeID 变化的 `machine_instance_id`；面板据此只采用同一机器最新的一份全局 flow spool 状态，避免重复累计。
+- 节点与 ingest 都拒绝任一方向超过 1 PiB 的单条增量，防止异常计数器污染后续小时、每日聚合和用户画像。
 - ClickHouse 负责用途归因，MySQL `v2_stat_user*` 继续负责账单权威；两者通过 coverage/gap 明确展示差异。
 
 ### 验证
@@ -96,7 +98,7 @@ git diff --check
 1. `flow_traffic_config_reported` 与 `flow_traffic_enabled` 是否符合面板配置。
 2. `pending_events/pending_bytes` 是否回落，`oldest_event_at` 是否持续变旧。
 3. `dropped_*` 或 `rejected_*` 是否增长并与用户工单日期重叠。
-4. `last_error_code` 是否为 401、422、502 或网络错误；`/health=200` 不能证明 ClickHouse 写入正常。
+4. `last_error_code` 是否为 400/413、401/403、502 或网络错误；`/health=200` 不能证明 ClickHouse 写入正常。
 5. ClickHouse raw 最新事件、小时/每日聚合延迟和 MySQL/ClickHouse coverage 是否同时恢复。
 
 ### 相关文件、命令与提交
