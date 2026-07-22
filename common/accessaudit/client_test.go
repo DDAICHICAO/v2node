@@ -7,10 +7,151 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestBoltFlowSpoolPersistsFIFOAndCounters(t *testing.T) {
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "flow.db")
+	config := SpoolConfig{
+		Path:     path,
+		MaxBytes: 1 << 20,
+		MaxAge:   24 * time.Hour,
+		Now:      func() time.Time { return now },
+	}
+
+	spool, err := NewBoltFlowSpool(config)
+	if err != nil {
+		t.Fatalf("open spool: %v", err)
+	}
+	for sequence := uint32(1); sequence <= 3; sequence++ {
+		if err := spool.Enqueue(flowEventForTest(sequence, now)); err != nil {
+			t.Fatalf("enqueue %d: %v", sequence, err)
+		}
+	}
+
+	items, err := spool.Peek(2)
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if len(items) != 2 || items[0].Event.Sequence != 1 || items[1].Event.Sequence != 2 {
+		t.Fatalf("unexpected FIFO items: %#v", items)
+	}
+	if err := spool.Ack([]uint64{items[0].Key, items[1].Key}); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if err := spool.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	spool, err = NewBoltFlowSpool(config)
+	if err != nil {
+		t.Fatalf("reopen spool: %v", err)
+	}
+	defer spool.Close()
+	items, err = spool.Peek(10)
+	if err != nil {
+		t.Fatalf("peek after reopen: %v", err)
+	}
+	if len(items) != 1 || items[0].Event.Sequence != 3 || items[0].Event.EventID != "9:session-a:00000003" {
+		t.Fatalf("unexpected persisted item: %#v", items)
+	}
+
+	if err := spool.Reject([]uint64{items[0].Key}); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	stats, err := spool.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.PendingEvents != 0 || stats.RejectedEvents != 1 || stats.RejectedBytes == 0 {
+		t.Fatalf("unexpected stats after reject: %#v", stats)
+	}
+	if stats.RejectedEventFrom != now.Unix() || stats.RejectedEventTo != now.Unix() {
+		t.Fatalf("unexpected rejected time range: %#v", stats)
+	}
+}
+
+func TestBoltFlowSpoolDropsOldestAtCapacityAndExpiresOldItems(t *testing.T) {
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "flow.db")
+	spool, err := NewBoltFlowSpool(SpoolConfig{
+		Path:     path,
+		MaxBytes: 1,
+		MaxAge:   time.Hour,
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("open spool: %v", err)
+	}
+
+	if err := spool.Enqueue(flowEventForTest(1, now)); err != nil {
+		t.Fatalf("enqueue over capacity: %v", err)
+	}
+	stats, err := spool.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.PendingEvents != 0 || stats.DroppedEvents != 1 || stats.DroppedBytes == 0 {
+		t.Fatalf("unexpected capacity stats: %#v", stats)
+	}
+	if err := spool.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	spool, err = NewBoltFlowSpool(SpoolConfig{
+		Path:     path,
+		MaxBytes: 1 << 20,
+		MaxAge:   time.Hour,
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("reopen spool: %v", err)
+	}
+	defer spool.Close()
+	if err := spool.Enqueue(flowEventForTest(2, now)); err != nil {
+		t.Fatalf("enqueue expiring item: %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	items, err := spool.Peek(10)
+	if err != nil {
+		t.Fatalf("peek after expiration: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected expired spool to be empty: %#v", items)
+	}
+	stats, err = spool.Stats()
+	if err != nil {
+		t.Fatalf("stats after expiration: %v", err)
+	}
+	if stats.DroppedEvents != 2 || stats.DroppedEventFrom == 0 || stats.DroppedEventTo != time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC).Unix() {
+		t.Fatalf("unexpected persistent dropped stats: %#v", stats)
+	}
+}
+
+func flowEventForTest(sequence uint32, eventTime time.Time) FlowEvent {
+	event := FlowEvent{
+		SessionID:         "session-a",
+		Sequence:          sequence,
+		SampleType:        FlowSampleCheckpoint,
+		EventTime:         eventTime,
+		IntervalStartedAt: eventTime.Add(-time.Minute),
+		NodeID:            9,
+		UID:               145817,
+		TargetHost:        "example.com",
+		TargetPort:        443,
+		Network:           "tcp",
+		UploadBytes:       uint64(sequence) * 10,
+		DownloadBytes:     uint64(sequence) * 20,
+	}
+	if err := event.Normalize(eventTime); err != nil {
+		panic(err)
+	}
+	return event
+}
 
 func TestFlowEventNormalizeBuildsStableIdentityAndCompletion(t *testing.T) {
 	startedAt := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
