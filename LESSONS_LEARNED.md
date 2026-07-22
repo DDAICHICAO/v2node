@@ -57,3 +57,52 @@ git diff --check
 - 超时隔离：`common/task/task.go`
 - 关键提交：`3e55be3`、`46294d7`、`f2611ef`、`1cdcaf2`
 - 排查命令：`systemctl status v2node --no-pager`、`journalctl -u v2node --since '30 min ago' --no-pager`
+
+## 2026-07-22：连接次数不能替代用户双向流量画像
+
+### 症状
+
+后台只能按连接事件猜测用户访问用途，无法解释某个自然日为什么上传或下载突然升高，也无法与倍率后的计费量核对。
+
+### 受影响链路
+
+Xray dispatcher 最终路由 -> 每连接双向字节增量 -> `common/accessaudit` bbolt spool -> HMAC 签名 ingest -> ClickHouse 原始/小时/每日聚合 -> v2board MySQL 权威对账与用途分类 -> 管理端画像和单日诊断。
+
+### 根因
+
+连接开始事件没有传输字节、持续时间、检查点或完成状态。连接多不等于流量大，连接方向也不能从请求次数推导；长连接如果只等关闭再上报，还会让正在发生的高流量长时间不可见。
+
+### 修复
+
+- 在最终路由选定后包装双向连接，客户端写入计为上传，客户端读取计为下载，不替换既有全局计费 `TrafficCounter`。
+- 短连接关闭时发送 final；长连接每 5 分钟发送增量 checkpoint，异常退出仍尝试 final 后重新抛出 panic。
+- 使用稳定 `event_id`、单调 sequence 和持久 bbolt 队列；临时失败保留重试，422 批次二分并只隔离坏的单事件。
+- spool 默认上限 256 MiB、最长 24 小时，达到边界时记录 dropped 时间窗口；状态上报暴露 pending、oldest、dropped、rejected、重试和最近成功/错误。
+- ClickHouse 负责用途归因，MySQL `v2_stat_user*` 继续负责账单权威；两者通过 coverage/gap 明确展示差异。
+
+### 验证
+
+```powershell
+$env:GOEXPERIMENT='jsonv2'
+go test ./common/accessaudit ./conf ./core/app/dispatcher ./node
+go vet ./common/accessaudit ./core/app/dispatcher ./node
+git diff --check
+```
+
+定向测试覆盖签名批次、重试保留、坏事件隔离、队列持久化与容量/年龄裁剪、方向计数、checkpoint/final、MUX 连接生命周期和 panic final。Windows 当前 CGO 关闭，因此 `go test -race` 不能作为本机有效门禁。
+
+### 下次优先检查
+
+1. `flow_traffic_config_reported` 与 `flow_traffic_enabled` 是否符合面板配置。
+2. `pending_events/pending_bytes` 是否回落，`oldest_event_at` 是否持续变旧。
+3. `dropped_*` 或 `rejected_*` 是否增长并与用户工单日期重叠。
+4. `last_error_code` 是否为 401、422、502 或网络错误；`/health=200` 不能证明 ClickHouse 写入正常。
+5. ClickHouse raw 最新事件、小时/每日聚合延迟和 MySQL/ClickHouse coverage 是否同时恢复。
+
+### 相关文件、命令与提交
+
+- 事件与队列：`common/accessaudit/flow_event.go`、`spool.go`、`flow_client.go`。
+- 方向采集：`core/app/dispatcher/flow_traffic.go`、`default.go`。
+- 配置与状态：`conf/access_audit.go`、`api/v2board/status.go`、`node/user.go`。
+- 运维：v2board `docs/access-traffic-profile-diagnostics-runbook.md`。
+- 关键提交：`2cac267`、`4c140e7`、`fd03fb0`、`65b44ec`。
