@@ -49,6 +49,13 @@ func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
 			FlushInterval: "1s",
 			Timeout:       "5s",
 			SNTPAccess:    &sntpAccess,
+			FlowTraffic: &panel.FlowTrafficTask{
+				Enabled:            true,
+				CheckpointInterval: "5m",
+				SpoolPath:          "/var/lib/v2node/access-audit-spool/flow.db",
+				MaxSpoolBytes:      268435456,
+				MaxSpoolAge:        "24h",
+			},
 		},
 	}
 
@@ -77,6 +84,10 @@ func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
 	}
 	if audit["Enabled"] != true || audit["Endpoint"] != "https://logs.sntp.uk/api/v1/access-events" || audit["Token"] != "token" {
 		t.Fatalf("unexpected AccessAudit: %#v", audit)
+	}
+	flowTraffic, ok := audit["FlowTraffic"].(map[string]any)
+	if !ok || flowTraffic["Enabled"] != true || flowTraffic["CheckpointInterval"] != "5m" || flowTraffic["MaxSpoolBytes"] != float64(268435456) {
+		t.Fatalf("unexpected FlowTraffic config: %#v", audit["FlowTraffic"])
 	}
 	nodes, ok := config["Nodes"].([]any)
 	if !ok || len(nodes) != 1 {
@@ -138,6 +149,14 @@ func TestApplyAccessAuditConfigTaskDefaultsLocalSntpAccessOff(t *testing.T) {
 	if logConfig["SNTPAccess"] != false {
 		t.Fatalf("expected SNTPAccess to default false, got %#v", logConfig["SNTPAccess"])
 	}
+	audit, ok := config["AccessAudit"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing AccessAudit config: %#v", config["AccessAudit"])
+	}
+	flowTraffic, ok := audit["FlowTraffic"].(map[string]any)
+	if !ok || flowTraffic["Enabled"] != false || flowTraffic["CheckpointInterval"] != "5m" || flowTraffic["MaxSpoolAge"] != "24h" {
+		t.Fatalf("unexpected default FlowTraffic config: %#v", audit["FlowTraffic"])
+	}
 }
 
 func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
@@ -158,12 +177,19 @@ func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
 
 func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	controller := &Controller{
+		conf: &conf.NodeConfig{
+			APIHost: "https://panel.example",
+			NodeID:  121,
+		},
 		server: &core.V2Core{
 			Config: &conf.Conf{
 				AccessAuditConfig: conf.AccessAuditConfig{
 					Enabled:  true,
 					Endpoint: " https://logs.sntp.uk/api/v1/access-events ",
 					Token:    " secret ",
+					FlowTraffic: conf.FlowTrafficConfig{
+						Enabled: true,
+					},
 				},
 			},
 		},
@@ -183,6 +209,25 @@ func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	}
 	if !status.AccessAuditTokenConfigured {
 		t.Fatal("expected token to be reported as configured")
+	}
+	if !status.FlowTrafficConfigReported || !status.FlowTrafficEnabled {
+		t.Fatalf("expected flow traffic status to be reported: %#v", status)
+	}
+	if status.MachineInstanceID == "" {
+		t.Fatal("expected machine instance id to be reported")
+	}
+
+	otherController := &Controller{
+		conf: &conf.NodeConfig{
+			APIHost: "https://panel.example",
+			NodeID:  363,
+		},
+		server: controller.server,
+	}
+	otherStatus := panel.NodeRuntimeStatus{}
+	otherController.appendAccessAuditRuntimeStatus(&otherStatus)
+	if otherStatus.MachineInstanceID != status.MachineInstanceID {
+		t.Fatalf("same process must report one machine identity across node ids: %q != %q", otherStatus.MachineInstanceID, status.MachineInstanceID)
 	}
 }
 

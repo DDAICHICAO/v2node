@@ -17,6 +17,16 @@ const persistedIDFileName = "instance_id"
 // It is namespaced by panel host and node id so one physical machine can dock
 // multiple panel nodes without sharing the same instance key.
 func ResolveID(apiHost string, nodeID int) string {
+	return resolveID(apiHost + "|" + strconv.Itoa(nodeID))
+}
+
+// ResolveMachineID returns one stable identifier for the running v2node host,
+// independent of how many panel NodeIDs are configured in the same process.
+func ResolveMachineID(apiHost string) string {
+	return resolveID(apiHost + "|machine")
+}
+
+func resolveID(namespace string) string {
 	hostname := readHostname()
 	seed := readOrCreatePersistedID()
 	if seed == "" {
@@ -29,7 +39,7 @@ func ResolveID(apiHost string, nodeID int) string {
 		seed = "unknown"
 	}
 
-	sum := sha256.Sum256([]byte(apiHost + "|" + strconv.Itoa(nodeID) + "|" + seed))
+	sum := sha256.Sum256([]byte(namespace + "|" + seed))
 	prefix := sanitize(hostname)
 	if prefix == "" {
 		prefix = "node"

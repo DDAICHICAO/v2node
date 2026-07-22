@@ -126,6 +126,13 @@ func applyAccessAuditConfigTask(task panel.UpdateTask, configPath string) error 
 		"MaxQueueSize":  normalized.MaxQueueSize,
 		"FlushInterval": normalized.FlushInterval,
 		"Timeout":       normalized.Timeout,
+		"FlowTraffic": map[string]any{
+			"Enabled":            normalized.FlowTraffic.Enabled,
+			"CheckpointInterval": normalized.FlowTraffic.CheckpointInterval,
+			"SpoolPath":          normalized.FlowTraffic.SpoolPath,
+			"MaxSpoolBytes":      normalized.FlowTraffic.MaxSpoolBytes,
+			"MaxSpoolAge":        normalized.FlowTraffic.MaxSpoolAge,
+		},
 	}
 
 	output, err := json.MarshalIndent(config, "", "    ")
@@ -168,6 +175,12 @@ func normalizeAccessAuditTask(task panel.AccessAuditTask) (panel.AccessAuditTask
 	task.Token = strings.TrimSpace(task.Token)
 	task.FlushInterval = strings.TrimSpace(task.FlushInterval)
 	task.Timeout = strings.TrimSpace(task.Timeout)
+	if task.FlowTraffic == nil {
+		task.FlowTraffic = &panel.FlowTrafficTask{}
+	}
+	task.FlowTraffic.CheckpointInterval = strings.TrimSpace(task.FlowTraffic.CheckpointInterval)
+	task.FlowTraffic.SpoolPath = strings.TrimSpace(task.FlowTraffic.SpoolPath)
+	task.FlowTraffic.MaxSpoolAge = strings.TrimSpace(task.FlowTraffic.MaxSpoolAge)
 
 	if task.Enabled {
 		if task.Endpoint == "" {
@@ -193,11 +206,29 @@ func normalizeAccessAuditTask(task panel.AccessAuditTask) (panel.AccessAuditTask
 	if task.Timeout == "" {
 		task.Timeout = "5s"
 	}
+	if task.FlowTraffic.CheckpointInterval == "" {
+		task.FlowTraffic.CheckpointInterval = "5m"
+	}
+	if task.FlowTraffic.SpoolPath == "" {
+		task.FlowTraffic.SpoolPath = "/var/lib/v2node/access-audit-spool/flow.db"
+	}
+	if task.FlowTraffic.MaxSpoolBytes <= 0 {
+		task.FlowTraffic.MaxSpoolBytes = 268435456
+	}
+	if task.FlowTraffic.MaxSpoolAge == "" {
+		task.FlowTraffic.MaxSpoolAge = "24h"
+	}
 	if _, err := time.ParseDuration(task.FlushInterval); err != nil {
 		return task, fmt.Errorf("parse access_audit.flush_interval: %w", err)
 	}
 	if _, err := time.ParseDuration(task.Timeout); err != nil {
 		return task, fmt.Errorf("parse access_audit.timeout: %w", err)
+	}
+	if _, err := time.ParseDuration(task.FlowTraffic.CheckpointInterval); err != nil {
+		return task, fmt.Errorf("parse access_audit.flow_traffic.checkpoint_interval: %w", err)
+	}
+	if _, err := time.ParseDuration(task.FlowTraffic.MaxSpoolAge); err != nil {
+		return task, fmt.Errorf("parse access_audit.flow_traffic.max_spool_age: %w", err)
 	}
 	return task, nil
 }

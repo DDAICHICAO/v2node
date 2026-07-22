@@ -703,5 +703,11 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 		log.Record(accessMessage)
 	}
 
-	handler.Dispatch(ctx, link)
+	flowSession := newRoutedFlowTrafficSession(ctx, destination, handler.Tag())
+	if flowSession != nil {
+		link = flowSession.wrapLink(link)
+	}
+	dispatchWithFlowTraffic(ctx, link, flowSession, func(trackedLink *transport.Link) {
+		handler.Dispatch(ctx, trackedLink)
+	})
 }

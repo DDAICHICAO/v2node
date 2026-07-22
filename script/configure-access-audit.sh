@@ -10,6 +10,11 @@ ACCESS_AUDIT_BATCH_SIZE="${ACCESS_AUDIT_BATCH_SIZE:-1000}"
 ACCESS_AUDIT_MAX_QUEUE_SIZE="${ACCESS_AUDIT_MAX_QUEUE_SIZE:-10000}"
 ACCESS_AUDIT_FLUSH_INTERVAL="${ACCESS_AUDIT_FLUSH_INTERVAL:-1s}"
 ACCESS_AUDIT_TIMEOUT="${ACCESS_AUDIT_TIMEOUT:-5s}"
+ACCESS_FLOW_TRAFFIC_ENABLED="${ACCESS_FLOW_TRAFFIC_ENABLED:-false}"
+ACCESS_FLOW_CHECKPOINT_INTERVAL="${ACCESS_FLOW_CHECKPOINT_INTERVAL:-5m}"
+ACCESS_FLOW_SPOOL_PATH="${ACCESS_FLOW_SPOOL_PATH:-/var/lib/v2node/access-audit-spool/flow.db}"
+ACCESS_FLOW_MAX_SPOOL_BYTES="${ACCESS_FLOW_MAX_SPOOL_BYTES:-268435456}"
+ACCESS_FLOW_MAX_SPOOL_AGE="${ACCESS_FLOW_MAX_SPOOL_AGE:-24h}"
 RESTART_V2NODE="${RESTART_V2NODE:-true}"
 
 usage() {
@@ -30,6 +35,11 @@ Optional environment variables:
   ACCESS_AUDIT_MAX_QUEUE_SIZE=10000
   ACCESS_AUDIT_FLUSH_INTERVAL=1s
   ACCESS_AUDIT_TIMEOUT=5s
+  ACCESS_FLOW_TRAFFIC_ENABLED=false
+  ACCESS_FLOW_CHECKPOINT_INTERVAL=5m
+  ACCESS_FLOW_SPOOL_PATH=/var/lib/v2node/access-audit-spool/flow.db
+  ACCESS_FLOW_MAX_SPOOL_BYTES=268435456
+  ACCESS_FLOW_MAX_SPOOL_AGE=24h
   RESTART_V2NODE=true|false
 EOF
 }
@@ -71,6 +81,13 @@ if [[ $sntp_rc -eq 2 ]]; then
     exit 1
 fi
 
+flow_rc=0
+parse_bool_for_shell "$ACCESS_FLOW_TRAFFIC_ENABLED" || flow_rc=$?
+if [[ $flow_rc -eq 2 ]]; then
+    echo "ACCESS_FLOW_TRAFFIC_ENABLED must be true or false" >&2
+    exit 1
+fi
+
 if [[ $enabled_rc -eq 0 ]]; then
     if [[ -z "$ACCESS_AUDIT_ENDPOINT" || -z "$ACCESS_AUDIT_TOKEN" ]]; then
         echo "ACCESS_AUDIT_ENDPOINT and ACCESS_AUDIT_TOKEN are required when ACCESS_AUDIT_ENABLED=true" >&2
@@ -91,6 +108,11 @@ export ACCESS_AUDIT_BATCH_SIZE
 export ACCESS_AUDIT_MAX_QUEUE_SIZE
 export ACCESS_AUDIT_FLUSH_INTERVAL
 export ACCESS_AUDIT_TIMEOUT
+export ACCESS_FLOW_TRAFFIC_ENABLED
+export ACCESS_FLOW_CHECKPOINT_INTERVAL
+export ACCESS_FLOW_SPOOL_PATH
+export ACCESS_FLOW_MAX_SPOOL_BYTES
+export ACCESS_FLOW_MAX_SPOOL_AGE
 
 python3 <<'PY'
 import json
@@ -140,6 +162,13 @@ config["AccessAudit"] = {
     "MaxQueueSize": positive_int("ACCESS_AUDIT_MAX_QUEUE_SIZE", 10000),
     "FlushInterval": os.environ.get("ACCESS_AUDIT_FLUSH_INTERVAL", "1s").strip() or "1s",
     "Timeout": os.environ.get("ACCESS_AUDIT_TIMEOUT", "5s").strip() or "5s",
+    "FlowTraffic": {
+        "Enabled": parse_bool(os.environ.get("ACCESS_FLOW_TRAFFIC_ENABLED", "false")),
+        "CheckpointInterval": os.environ.get("ACCESS_FLOW_CHECKPOINT_INTERVAL", "5m").strip() or "5m",
+        "SpoolPath": os.environ.get("ACCESS_FLOW_SPOOL_PATH", "/var/lib/v2node/access-audit-spool/flow.db").strip() or "/var/lib/v2node/access-audit-spool/flow.db",
+        "MaxSpoolBytes": positive_int("ACCESS_FLOW_MAX_SPOOL_BYTES", 268435456),
+        "MaxSpoolAge": os.environ.get("ACCESS_FLOW_MAX_SPOOL_AGE", "24h").strip() or "24h",
+    },
 }
 
 directory = os.path.dirname(path) or "."
@@ -153,6 +182,10 @@ finally:
     if os.path.exists(tmp_path):
         os.unlink(tmp_path)
 PY
+
+if [[ $flow_rc -eq 0 ]]; then
+    install -d -m 0700 "$(dirname "$ACCESS_FLOW_SPOOL_PATH")"
+fi
 
 echo "updated $CONFIG_PATH"
 echo "backup saved to $backup_path"
