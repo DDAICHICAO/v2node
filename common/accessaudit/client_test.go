@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,182 @@ import (
 	"testing"
 	"time"
 )
+
+func TestFlowTrafficClientSendsHomogeneousSignedPayloadAndAcks(t *testing.T) {
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	var receivedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = body
+		if r.Header.Get("X-SNTP-Timestamp") != "1784714400" {
+			t.Errorf("unexpected timestamp %q", r.Header.Get("X-SNTP-Timestamp"))
+		}
+		if r.Header.Get("X-SNTP-Signature") != signForTest(body, "secret", "1784714400") {
+			t.Errorf("unexpected signature")
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	spool := openFlowSpoolForTest(t, now)
+	client, err := NewFlowClient(FlowClientConfig{
+		Enabled:    true,
+		Endpoint:   server.URL,
+		Token:      "secret",
+		BatchSize:  10,
+		Timeout:    time.Second,
+		HTTPClient: server.Client(),
+		Now:        func() time.Time { return now },
+		Spool:      spool,
+	})
+	if err != nil {
+		t.Fatalf("new flow client: %v", err)
+	}
+	defer client.Close()
+	if err := client.Report(flowEventForTest(1, now)); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if err := client.flushOnce(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	var payload struct {
+		EventType string      `json:"event_type"`
+		Events    []FlowEvent `json:"events"`
+	}
+	if err := json.Unmarshal(receivedBody, &payload); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if payload.EventType != FlowEventType || len(payload.Events) != 1 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	if payload.Events[0].EventID != "9:session-a:00000001" || payload.Events[0].UploadBytes != 10 || payload.Events[0].DownloadBytes != 20 {
+		t.Fatalf("unexpected flow event: %#v", payload.Events[0])
+	}
+	stats, err := spool.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.PendingEvents != 0 {
+		t.Fatalf("expected successful request to ack spool, got %#v", stats)
+	}
+	status := client.Status()
+	if status.LastSuccessAt != now.Unix() || status.RetryCount != 0 || status.LastErrorCode != "" {
+		t.Fatalf("unexpected success status: %#v", status)
+	}
+}
+
+func TestFlowTrafficClientRetainsEventsForTransientAndAuthFailures(t *testing.T) {
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name       string
+		statusCode int
+		errorCode  string
+	}{
+		{name: "auth", statusCode: http.StatusUnauthorized, errorCode: "auth"},
+		{name: "rate limited", statusCode: http.StatusTooManyRequests, errorCode: "rate_limited"},
+		{name: "upstream", statusCode: http.StatusBadGateway, errorCode: "clickhouse_5xx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer server.Close()
+			spool := openFlowSpoolForTest(t, now)
+			client, err := NewFlowClient(FlowClientConfig{
+				Enabled: true, Endpoint: server.URL, Token: "secret", BatchSize: 10,
+				Timeout: time.Second, HTTPClient: server.Client(), Now: func() time.Time { return now }, Spool: spool,
+			})
+			if err != nil {
+				t.Fatalf("new flow client: %v", err)
+			}
+			defer client.Close()
+			if err := client.Report(flowEventForTest(1, now)); err != nil {
+				t.Fatalf("report: %v", err)
+			}
+			if err := client.flushOnce(); err == nil {
+				t.Fatal("expected flush failure")
+			}
+			stats, err := spool.Stats()
+			if err != nil {
+				t.Fatalf("stats: %v", err)
+			}
+			if stats.PendingEvents != 1 {
+				t.Fatalf("failure must retain pending event: %#v", stats)
+			}
+			status := client.Status()
+			if status.LastErrorCode != tt.errorCode || status.RetryCount != 1 || status.LastErrorAt != now.Unix() {
+				t.Fatalf("unexpected failure status: %#v", status)
+			}
+		})
+	}
+}
+
+func TestFlowTrafficClientBisectsInvalidBatchAndRejectsOnlyBadSingleton(t *testing.T) {
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "session-bad") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	spool := openFlowSpoolForTest(t, now)
+	client, err := NewFlowClient(FlowClientConfig{
+		Enabled: true, Endpoint: server.URL, Token: "secret", BatchSize: 10,
+		Timeout: time.Second, HTTPClient: server.Client(), Now: func() time.Time { return now }, Spool: spool,
+	})
+	if err != nil {
+		t.Fatalf("new flow client: %v", err)
+	}
+	defer client.Close()
+	bad := flowEventForTest(1, now)
+	bad.SessionID = "session-bad"
+	bad.EventID = ""
+	if err := client.Report(bad); err != nil {
+		t.Fatalf("report bad: %v", err)
+	}
+	good := flowEventForTest(2, now)
+	good.SessionID = "session-good"
+	good.EventID = ""
+	if err := client.Report(good); err != nil {
+		t.Fatalf("report good: %v", err)
+	}
+	if err := client.flushOnce(); err != nil {
+		t.Fatalf("handled invalid batch should not block queue: %v", err)
+	}
+
+	stats, err := spool.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.PendingEvents != 0 || stats.RejectedEvents != 1 {
+		t.Fatalf("unexpected post-bisection stats: %#v", stats)
+	}
+	if requestCount != 3 {
+		t.Fatalf("expected full batch and two singleton requests, got %d", requestCount)
+	}
+	if client.Status().LastErrorCode != "invalid_event" {
+		t.Fatalf("expected sanitized invalid event status, got %#v", client.Status())
+	}
+}
+
+func openFlowSpoolForTest(t *testing.T, now time.Time) *BoltFlowSpool {
+	t.Helper()
+	spool, err := NewBoltFlowSpool(SpoolConfig{
+		Path: filepath.Join(t.TempDir(), "flow.db"), MaxBytes: 1 << 20, MaxAge: time.Hour,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("open spool: %v", err)
+	}
+	return spool
+}
 
 func TestBoltFlowSpoolPersistsFIFOAndCounters(t *testing.T) {
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)

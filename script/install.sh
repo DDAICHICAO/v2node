@@ -47,6 +47,11 @@ ACCESS_AUDIT_BATCH_SIZE_ARG="${ACCESS_AUDIT_BATCH_SIZE:-1000}"
 ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG="${ACCESS_AUDIT_MAX_QUEUE_SIZE:-10000}"
 ACCESS_AUDIT_FLUSH_INTERVAL_ARG="${ACCESS_AUDIT_FLUSH_INTERVAL:-1s}"
 ACCESS_AUDIT_TIMEOUT_ARG="${ACCESS_AUDIT_TIMEOUT:-5s}"
+ACCESS_FLOW_TRAFFIC_ENABLED_ARG="${ACCESS_FLOW_TRAFFIC_ENABLED:-false}"
+ACCESS_FLOW_CHECKPOINT_INTERVAL_ARG="${ACCESS_FLOW_CHECKPOINT_INTERVAL:-5m}"
+ACCESS_FLOW_SPOOL_PATH_ARG="${ACCESS_FLOW_SPOOL_PATH:-/var/lib/v2node/access-audit-spool/flow.db}"
+ACCESS_FLOW_MAX_SPOOL_BYTES_ARG="${ACCESS_FLOW_MAX_SPOOL_BYTES:-268435456}"
+ACCESS_FLOW_MAX_SPOOL_AGE_ARG="${ACCESS_FLOW_MAX_SPOOL_AGE:-24h}"
 SNTP_ACCESS_ARG="${SNTP_ACCESS:-false}"
 
 normalize_bool() {
@@ -135,6 +140,16 @@ parse_args() {
                 ACCESS_AUDIT_FLUSH_INTERVAL_ARG="$2"; shift 2 ;;
             --access-audit-timeout)
                 ACCESS_AUDIT_TIMEOUT_ARG="$2"; shift 2 ;;
+            --access-flow-traffic-enabled)
+                ACCESS_FLOW_TRAFFIC_ENABLED_ARG="$2"; shift 2 ;;
+            --access-flow-checkpoint-interval)
+                ACCESS_FLOW_CHECKPOINT_INTERVAL_ARG="$2"; shift 2 ;;
+            --access-flow-spool-path)
+                ACCESS_FLOW_SPOOL_PATH_ARG="$2"; shift 2 ;;
+            --access-flow-max-spool-bytes)
+                ACCESS_FLOW_MAX_SPOOL_BYTES_ARG="$2"; shift 2 ;;
+            --access-flow-max-spool-age)
+                ACCESS_FLOW_MAX_SPOOL_AGE_ARG="$2"; shift 2 ;;
             --sntp-access)
                 SNTP_ACCESS_ARG="$2"; shift 2 ;;
             -h|--help)
@@ -315,6 +330,11 @@ generate_v2node_config() {
         local access_audit_max_queue_size
         local access_audit_flush_interval
         local access_audit_timeout
+        local access_flow_traffic_enabled
+        local access_flow_checkpoint_interval
+        local access_flow_spool_path
+        local access_flow_max_spool_bytes
+        local access_flow_max_spool_age
         local nodes_json
 
         access_audit_enabled=$(normalize_bool "$ACCESS_AUDIT_ENABLED_ARG" "false")
@@ -323,6 +343,11 @@ generate_v2node_config() {
         access_audit_max_queue_size=$(positive_int_or_default "$ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG" "10000")
         access_audit_flush_interval="${ACCESS_AUDIT_FLUSH_INTERVAL_ARG:-1s}"
         access_audit_timeout="${ACCESS_AUDIT_TIMEOUT_ARG:-5s}"
+        access_flow_traffic_enabled=$(normalize_bool "$ACCESS_FLOW_TRAFFIC_ENABLED_ARG" "false")
+        access_flow_checkpoint_interval="${ACCESS_FLOW_CHECKPOINT_INTERVAL_ARG:-5m}"
+        access_flow_spool_path="${ACCESS_FLOW_SPOOL_PATH_ARG:-/var/lib/v2node/access-audit-spool/flow.db}"
+        access_flow_max_spool_bytes=$(positive_int_or_default "$ACCESS_FLOW_MAX_SPOOL_BYTES_ARG" "268435456")
+        access_flow_max_spool_age="${ACCESS_FLOW_MAX_SPOOL_AGE_ARG:-24h}"
         if ! nodes_json=$(generate_v2node_nodes_json "$api_host" "$node_id" "$api_key"); then
             echo -e "${red}Invalid --node-id: ${node_id}${plain}"
             return 1
@@ -344,13 +369,23 @@ generate_v2node_config() {
         "BatchSize": ${access_audit_batch_size},
         "MaxQueueSize": ${access_audit_max_queue_size},
         "FlushInterval": "${access_audit_flush_interval}",
-        "Timeout": "${access_audit_timeout}"
+        "Timeout": "${access_audit_timeout}",
+        "FlowTraffic": {
+            "Enabled": ${access_flow_traffic_enabled},
+            "CheckpointInterval": "${access_flow_checkpoint_interval}",
+            "SpoolPath": "${access_flow_spool_path}",
+            "MaxSpoolBytes": ${access_flow_max_spool_bytes},
+            "MaxSpoolAge": "${access_flow_max_spool_age}"
+        }
     },
     "Nodes": [
 ${nodes_json}
     ]
 }
 EOF
+        if [[ "$access_flow_traffic_enabled" == "true" ]]; then
+            install -d -m 0700 "$(dirname "$access_flow_spool_path")"
+        fi
         echo -e "${green}V2node 配置文件生成完成,正在重新启动服务${plain}"
         if [[ x"${release}" == x"alpine" ]]; then
             service v2node restart

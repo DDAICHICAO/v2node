@@ -29,6 +29,7 @@ type Config struct {
 	Timeout       time.Duration
 	HTTPClient    *http.Client
 	Now           func() time.Time
+	FlowTraffic   FlowConfig
 }
 
 type Event struct {
@@ -74,8 +75,11 @@ type Client struct {
 }
 
 var (
-	defaultMu     sync.RWMutex
-	defaultClient *Client
+	defaultMu          sync.RWMutex
+	defaultClient      *Client
+	defaultFlowClient  *FlowClient
+	defaultFlowConfig  FlowConfig
+	flowConfigReported bool
 )
 
 func Configure(config Config) error {
@@ -86,6 +90,12 @@ func Configure(config Config) error {
 		defaultClient.Close()
 		defaultClient = nil
 	}
+	if defaultFlowClient != nil {
+		defaultFlowClient.Close()
+		defaultFlowClient = nil
+	}
+	defaultFlowConfig = config.FlowTraffic
+	flowConfigReported = true
 	if !config.Enabled {
 		return nil
 	}
@@ -93,8 +103,39 @@ func Configure(config Config) error {
 	if err != nil {
 		return err
 	}
-	client.Start()
+	var flowClient *FlowClient
+	if config.FlowTraffic.Enabled {
+		spool, err := NewBoltFlowSpool(SpoolConfig{
+			Path:     config.FlowTraffic.SpoolPath,
+			MaxBytes: config.FlowTraffic.MaxSpoolBytes,
+			MaxAge:   config.FlowTraffic.MaxSpoolAge,
+			Now:      config.Now,
+		})
+		if err != nil {
+			return err
+		}
+		flowClient, err = NewFlowClient(FlowClientConfig{
+			Enabled:       true,
+			Endpoint:      config.Endpoint,
+			Token:         config.Token,
+			BatchSize:     config.BatchSize,
+			FlushInterval: config.FlushInterval,
+			Timeout:       config.Timeout,
+			HTTPClient:    config.HTTPClient,
+			Now:           config.Now,
+			Spool:         spool,
+		})
+		if err != nil {
+			_ = spool.Close()
+			return err
+		}
+	}
 	defaultClient = client
+	defaultFlowClient = flowClient
+	client.Start()
+	if flowClient != nil {
+		flowClient.Start()
+	}
 	return nil
 }
 
@@ -105,6 +146,11 @@ func Shutdown() {
 		defaultClient.Close()
 		defaultClient = nil
 	}
+	if defaultFlowClient != nil {
+		defaultFlowClient.Close()
+		defaultFlowClient = nil
+	}
+	defaultFlowConfig = FlowConfig{}
 }
 
 func Enqueue(event Event) bool {
@@ -115,6 +161,40 @@ func Enqueue(event Event) bool {
 		return false
 	}
 	return client.Enqueue(event)
+}
+
+func ReportFlow(event FlowEvent) error {
+	defaultMu.RLock()
+	client := defaultFlowClient
+	defaultMu.RUnlock()
+	if client == nil {
+		return errors.New("flow traffic reporting is disabled")
+	}
+	return client.Report(event)
+}
+
+func FlowTrafficEnabled() bool {
+	defaultMu.RLock()
+	defer defaultMu.RUnlock()
+	return defaultFlowClient != nil && defaultFlowConfig.Enabled
+}
+
+func FlowCheckpointInterval() time.Duration {
+	defaultMu.RLock()
+	defer defaultMu.RUnlock()
+	return defaultFlowConfig.CheckpointInterval
+}
+
+func CurrentFlowRuntimeStatus() FlowRuntimeStatus {
+	defaultMu.RLock()
+	client := defaultFlowClient
+	config := defaultFlowConfig
+	reported := flowConfigReported
+	defaultMu.RUnlock()
+	if client != nil {
+		return client.Status()
+	}
+	return FlowRuntimeStatus{ConfigReported: reported, Enabled: config.Enabled}
 }
 
 func NewClient(config Config) (*Client, error) {

@@ -25,6 +25,18 @@ func TestAccessAuditNormalizeDefaultsWhenDisabled(t *testing.T) {
 	if cfg.Timeout != DefaultAccessAuditTimeout {
 		t.Fatalf("expected default timeout, got %q", cfg.Timeout)
 	}
+	if cfg.FlowTraffic.CheckpointInterval != DefaultAccessFlowCheckpointInterval {
+		t.Fatalf("expected default checkpoint interval, got %q", cfg.FlowTraffic.CheckpointInterval)
+	}
+	if cfg.FlowTraffic.SpoolPath != DefaultAccessFlowSpoolPath {
+		t.Fatalf("expected default spool path, got %q", cfg.FlowTraffic.SpoolPath)
+	}
+	if cfg.FlowTraffic.MaxSpoolBytes != DefaultAccessFlowMaxSpoolBytes {
+		t.Fatalf("expected default max spool bytes, got %d", cfg.FlowTraffic.MaxSpoolBytes)
+	}
+	if cfg.FlowTraffic.MaxSpoolAge != DefaultAccessFlowMaxSpoolAge {
+		t.Fatalf("expected default max spool age, got %q", cfg.FlowTraffic.MaxSpoolAge)
+	}
 }
 
 func TestNewDefaultsDisableLocalSntpAccessLog(t *testing.T) {
@@ -55,6 +67,13 @@ func TestAccessAuditRuntimeConfigParsesDurations(t *testing.T) {
 		MaxQueueSize:  500,
 		FlushInterval: "2s",
 		Timeout:       "3s",
+		FlowTraffic: FlowTrafficConfig{
+			Enabled:            true,
+			CheckpointInterval: "2m",
+			SpoolPath:          "C:/temp/sntp-flow.db",
+			MaxSpoolBytes:      4096,
+			MaxSpoolAge:        "6h",
+		},
 	}
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("normalize enabled config: %v", err)
@@ -74,6 +93,12 @@ func TestAccessAuditRuntimeConfigParsesDurations(t *testing.T) {
 	}
 	if runtimeCfg.Timeout != 3*time.Second {
 		t.Fatalf("expected 3s timeout, got %s", runtimeCfg.Timeout)
+	}
+	if !runtimeCfg.FlowTraffic.Enabled || runtimeCfg.FlowTraffic.CheckpointInterval != 2*time.Minute {
+		t.Fatalf("unexpected flow runtime config: %#v", runtimeCfg.FlowTraffic)
+	}
+	if runtimeCfg.FlowTraffic.SpoolPath != "C:/temp/sntp-flow.db" || runtimeCfg.FlowTraffic.MaxSpoolBytes != 4096 || runtimeCfg.FlowTraffic.MaxSpoolAge != 6*time.Hour {
+		t.Fatalf("unexpected flow spool config: %#v", runtimeCfg.FlowTraffic)
 	}
 }
 

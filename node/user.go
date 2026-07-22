@@ -9,6 +9,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/accessaudit"
 )
 
 const nodeRuntimeStatusReportTimeout = 2 * time.Second
@@ -196,6 +197,24 @@ func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeSta
 	status.AccessAuditEnabled = audit.Enabled
 	status.AccessAuditEndpoint = strings.TrimSpace(audit.Endpoint)
 	status.AccessAuditTokenConfigured = strings.TrimSpace(audit.Token) != ""
+	flow := accessaudit.CurrentFlowRuntimeStatus()
+	status.FlowTrafficConfigReported = true
+	status.FlowTrafficEnabled = audit.FlowTraffic.Enabled
+	status.FlowTrafficLastSuccessAt = flow.LastSuccessAt
+	status.FlowTrafficLastErrorAt = flow.LastErrorAt
+	status.FlowTrafficLastErrorCode = flow.LastErrorCode
+	status.FlowTrafficRetryCount = flow.RetryCount
+	status.FlowTrafficPendingEvents = flow.PendingEvents
+	status.FlowTrafficPendingBytes = flow.PendingBytes
+	status.FlowTrafficOldestEventAt = flow.OldestEventAt
+	status.FlowTrafficDroppedEvents = flow.DroppedEvents
+	status.FlowTrafficDroppedBytes = flow.DroppedBytes
+	status.FlowTrafficDroppedEventFrom = flow.DroppedEventFrom
+	status.FlowTrafficDroppedEventTo = flow.DroppedEventTo
+	status.FlowTrafficRejectedEvents = flow.RejectedEvents
+	status.FlowTrafficRejectedBytes = flow.RejectedBytes
+	status.FlowTrafficRejectedEventFrom = flow.RejectedEventFrom
+	status.FlowTrafficRejectedEventTo = flow.RejectedEventTo
 }
 
 func (c *Controller) appendTLSRuntimeStatus(status *panel.NodeRuntimeStatus) {

@@ -19,14 +19,23 @@ type UpdateTask struct {
 }
 
 type AccessAuditTask struct {
-	Enabled       bool   `json:"enabled"`
-	Endpoint      string `json:"endpoint"`
-	Token         string `json:"token"`
-	BatchSize     int    `json:"batch_size"`
-	MaxQueueSize  int    `json:"max_queue_size"`
-	FlushInterval string `json:"flush_interval"`
-	Timeout       string `json:"timeout"`
-	SNTPAccess    *bool  `json:"sntp_access,omitempty"`
+	Enabled       bool             `json:"enabled"`
+	Endpoint      string           `json:"endpoint"`
+	Token         string           `json:"token"`
+	BatchSize     int              `json:"batch_size"`
+	MaxQueueSize  int              `json:"max_queue_size"`
+	FlushInterval string           `json:"flush_interval"`
+	Timeout       string           `json:"timeout"`
+	SNTPAccess    *bool            `json:"sntp_access,omitempty"`
+	FlowTraffic   *FlowTrafficTask `json:"flow_traffic,omitempty"`
+}
+
+type FlowTrafficTask struct {
+	Enabled            bool   `json:"enabled"`
+	CheckpointInterval string `json:"checkpoint_interval"`
+	SpoolPath          string `json:"spool_path"`
+	MaxSpoolBytes      int64  `json:"max_spool_bytes"`
+	MaxSpoolAge        string `json:"max_spool_age"`
 }
 
 type ApiHostTask struct {
