@@ -193,6 +193,8 @@ git diff --check
 
 定向测试覆盖旧库仅迁移一次、增量计数、批量单写、已接收结果待定、队列未接收超时、整批事务失败只回报一次、远端失败重启补传、400/413 二分、启动磁盘失败保持代理可用以及状态映射。Windows 缺少 gcc 时不能把 `go test -race` 记为已通过，应在 Linux 验证环境补跑。
 
+首台生产灰度先在 FlowTraffic 关闭时确认普通访问审计工作，再开启 FlowTraffic 连续观察 15 分钟。观察窗口内连接量约为 1700–2300，Pss_Anon 约为 216–276 MiB，MemoryPeak 约为 404 MiB；bbolt `BeginRWTx` 等待、`NRestarts`、真实 persistence failure、`reportUserTrafficTask` 超时、OOM、panic 和 fatal 均为 0。普通访问与 Flow 各出现 11 次按分钟限频的“结果待定”提示，未被误计为日志缺口；内存和 goroutine 随连接量回落，未复现原先持续增长到数 GiB 的现象。首台保留两类审计开启，扩大灰度前仍需取得明确的第二批主机清单和访问授权。
+
 ### 下次优先检查
 
 1. Pprof 中 `go.etcd.io/bbolt.(*DB).BeginRWTx` 等待栈是否增长。
