@@ -239,6 +239,76 @@ func TestFlowClientExposesPersistenceFailureGap(t *testing.T) {
 	}
 }
 
+func TestFlowClientTreatsAcceptedPersistenceDelayAsQueued(t *testing.T) {
+	now := time.Date(2026, 7, 23, 6, 0, 0, 0, time.UTC)
+	block := make(chan struct{})
+	spool := &failingFlowSpool{block: block}
+	client, err := NewFlowClient(FlowClientConfig{
+		Enabled: true, Endpoint: "http://127.0.0.1:1", Token: "secret",
+		BatchSize: 1, MaxQueueSize: 1, PersistTimeout: 20 * time.Millisecond,
+		Now: func() time.Time { return now }, Spool: spool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Report(flowEventForTest(1, now)); err != nil {
+		t.Fatalf("accepted delayed event must remain queued: %v", err)
+	}
+	status := client.Status()
+	if status.PersistTimeouts != 1 || status.PersistenceFailures != 0 {
+		t.Fatalf("delay must not be counted as a persistence gap: %#v", status)
+	}
+	close(block)
+	deadline := time.Now().Add(time.Second)
+	for {
+		stats, statsErr := spool.Stats()
+		if statsErr != nil {
+			t.Fatal(statsErr)
+		}
+		if stats.PendingEvents == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("accepted event was not eventually persisted: %#v", stats)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestFlowClientRecordsFailureThatArrivesAfterCallerTimeout(t *testing.T) {
+	now := time.Date(2026, 7, 23, 6, 5, 0, 0, time.UTC)
+	block := make(chan struct{})
+	spool := &failingFlowSpool{block: block, err: errors.New("disk read-only")}
+	client, err := NewFlowClient(FlowClientConfig{
+		Enabled: true, Endpoint: "http://127.0.0.1:1", Token: "secret",
+		BatchSize: 1, MaxQueueSize: 1, PersistTimeout: 20 * time.Millisecond,
+		Now: func() time.Time { return now }, Spool: spool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Report(flowEventForTest(1, now)); err != nil {
+		t.Fatalf("accepted event should report pending rather than failure: %v", err)
+	}
+	if status := client.Status(); status.PersistenceFailures != 0 {
+		t.Fatalf("unresolved delay must not be counted as a gap: %#v", status)
+	}
+	close(block)
+	deadline := time.Now().Add(time.Second)
+	for {
+		status := client.Status()
+		if status.PersistenceFailures == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("late transaction failure was not recorded: %#v", status)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestDetachDefaultClientsClearsPointersBeforeShutdownWait(t *testing.T) {
 	access := &Client{}
 	flow := &FlowClient{}
@@ -260,6 +330,7 @@ func TestDetachDefaultClientsClearsPointersBeforeShutdownWait(t *testing.T) {
 
 type failingFlowSpool struct {
 	mu    sync.Mutex
+	block chan struct{}
 	err   error
 	stats SpoolStats
 }
@@ -268,7 +339,15 @@ func (s *failingFlowSpool) Enqueue(event FlowEvent) error {
 	return s.EnqueueBatch([]FlowEvent{event})
 }
 
-func (s *failingFlowSpool) EnqueueBatch([]FlowEvent) error {
+func (s *failingFlowSpool) EnqueueBatch(events []FlowEvent) error {
+	if s.block != nil {
+		<-s.block
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err == nil {
+		s.stats.PendingEvents += uint64(len(events))
+	}
 	return s.err
 }
 

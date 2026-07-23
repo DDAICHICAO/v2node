@@ -4,7 +4,7 @@
 
 **Goal:** 在不关闭普通访问记录或 FlowTraffic 的前提下，把两类事件改为有界单写者批量持久化，消除 bbolt 全队列扫描和写锁等待导致的 goroutine、内存线性增长，并保留现有 `flow.db` 待上传数据。
 
-**Architecture:** 新建一个包内泛型 bbolt FIFO 核心，持久化增量统计，并仅在首次打开旧库时扫描重建元数据；FlowTraffic 和普通访问记录分别用 `flow.db`、`access.db` 的薄封装。每类事件各有一个容量受 `MaxQueueSize` 限制的单写者批处理器，最多聚合 10 ms 或 `min(BatchSize, 1000)` 条，在一个事务中落盘；上传器只从磁盘队列读，远端失败不会丢弃。数据面最多等待本地持久化 1 秒，硬失败继续放行业务流量，但记录可查询的缺口指标和限频日志。
+**Architecture:** 新建一个包内泛型 bbolt FIFO 核心，持久化增量统计，并仅在首次打开旧库时扫描重建元数据；FlowTraffic 和普通访问记录分别用 `flow.db`、`access.db` 的薄封装。每类事件各有一个容量受 `MaxQueueSize` 限制的单写者批处理器，最多聚合 10 ms 或 `min(BatchSize, 1000)` 条，在一个事务中落盘；上传器只从磁盘队列读，远端失败不会丢弃。数据面最多等待本地持久化结果 1 秒：已接收但结果待定的事件继续由单写队列提交并只记延迟，未接收或事务真实失败才记录可查询的缺口指标和限频错误，业务流量继续放行。
 
 **Tech Stack:** Go 1.26.1、`go.etcd.io/bbolt`、标准库 `net/http` / `sync` / `time`、现有 SNTP HMAC 协议、Go 单元测试、systemd、localhost-only pprof。
 
@@ -447,7 +447,7 @@ type persistBatcher[T any] struct {
 }
 ~~~
 
-`newPersistBatcher` 将 `BatchSize` 夹在 1..1000，`BatchWindow` 默认 10 ms，`SubmitTimeout` 默认 1 秒。`Submit` 使用同一个 1 秒 deadline 完成“进入有界 requests channel”和“等待 result”；result channel 容量为 1，超时后批处理器回写不会阻塞。`loop` 只有一个 goroutine；收到第一条后收集到批次上限或窗口到期，再调用一次 `Spool.EnqueueBatch`，把同一个结果逐条回送。不得为单条事件启动 goroutine。`Close(ctx)` 停止接收、排空已接收请求并等待 `doneCh`，context 到期返回 `ErrPersistenceTimeout`。
+`newPersistBatcher` 将 `BatchSize` 夹在 1..1000，`BatchWindow` 默认 10 ms，`SubmitTimeout` 默认 1 秒。`Submit` 使用同一个 1 秒 deadline 完成“进入有界 requests channel”和“等待 result”；result channel 容量为 1，超时后批处理器回写不会阻塞。进入 channel 前超时返回 `ErrPersistenceTimeout`，表示事件未被接收；进入 channel 后等待结果超时返回 `ErrPersistencePending`，事件仍由原单写循环提交。`loop` 只有一个 goroutine；收到第一条后收集到批次上限或窗口到期，再调用一次 `Spool.EnqueueBatch`，把同一个结果逐条回送。事务失败由 `OnFailure` 对整批回报一次，即使调用方已超时也能记录真实缺口；不得为单条事件启动 goroutine。`Close(ctx)` 停止接收、排空已接收请求并等待 `doneCh`，context 到期返回 `ErrPersistenceTimeout`。
 
 - [ ] **Step 4: 运行批处理器测试和竞态测试**
 
@@ -584,7 +584,7 @@ LastMigrationMillis       int64
 
 `BoltFlowSpool.RecordPersistenceFailure` 把未能写盘的数量、估算 JSON 字节和事件时间先累计到进程内 pending-gap；下一次成功的 bbolt 事务把它合并进 meta。`Stats` 返回“已持久化 meta + 尚未刷入 meta 的 pending-gap”，磁盘恢复后不重复累加。
 
-在 `FlowClient` 增加 `persister *persistBatcher[FlowEvent]`；`Start` 先启动 persister，再启动上传 loop；`Report` 先规范化并复制事件值，再调用 `persister.Submit`，成功才唤醒上传器。提交失败时调用 `RecordPersistenceFailure` 并输出按错误类别限频的 warning，日志不得包含 event、用户标识、IP、token。`Close` 先禁止新提交，用 2 秒 context 排空 persister，再停止上传器和关闭 spool。
+在 `FlowClient` 增加 `persister *persistBatcher[FlowEvent]`；`Start` 先启动 persister，再启动上传 loop；`Report` 先规范化并复制事件值，再调用 `persister.Submit`。批次提交成功后由 `OnSuccess` 唤醒上传器；已接收但结果待定时按排队成功返回并记录限频延迟 warning；未接收或事务真实失败才调用 `RecordPersistenceFailure`。事务失败由批处理器回调一次，避免调用方超时后漏记或同步返回时重复计数。日志不得包含 event、用户标识、IP、token。`Close` 先禁止新提交，用 2 秒 context 排空 persister，再停止上传器和关闭 spool。
 
 在 `Configure` / `Shutdown` 中先在 `defaultMu` 下交换全局指针，再释放锁关闭旧 client，禁止持锁等待批处理排空：
 
@@ -843,7 +843,7 @@ type AccessRuntimeStatus struct {
 func CurrentRuntimeStatus() AccessRuntimeStatus
 ~~~
 
-`NewClient` 打开 `access.db` 并建立 persister；`Enqueue` 等待本地持久化结果，成功返回 true 并唤醒上传器，失败返回 false、累计 persistence gap、输出限频 warning，但代理连接继续。`loop` 与 Flow 上传循环一致，只从 spool `Peek`；2xx 后 `Ack`，网络/超时/401/403/429/5xx 保留并指数退避，400/413 递归二分，单条坏事件 `Reject`。请求体仍由 `encodePayload` 生成，HMAC header 和 endpoint 不变。
+`NewClient` 打开 `access.db` 并建立 persister；`Enqueue` 最多等待本地持久化结果 1 秒。提交成功或事件已接收但结果待定时返回 true，后者只累计延迟指标；队列未接收或事务真实失败时返回 false、累计 persistence gap、输出限频错误，但代理连接继续。批次真实成功后由回调唤醒上传器。`loop` 与 Flow 上传循环一致，只从 spool `Peek`；2xx 后 `Ack`，网络/超时/401/403/429/5xx 保留并指数退避，400/413 递归二分，单条坏事件 `Reject`。请求体仍由 `encodePayload` 生成，HMAC header 和 endpoint 不变。
 
 `Config.MkdirAll` 只用于注入目录创建函数，默认 `os.MkdirAll`。`Configure` 遇到 access spool 打开失败或 Flow 旧库迁移失败时不得让 `core.Start` 失败：它保留代理服务，记录 `spool_open` / `migration` 状态和 persistence gap，并只启动成功初始化的那一类审计客户端。Flow 迁移失败不能覆盖、清空或改名旧 `flow.db`，也不能阻止普通 `access.db` 工作。
 
@@ -1080,7 +1080,7 @@ FlowTrafficLastMigrationMillis       int64  `json:"flow_traffic_last_migration_m
 - `MaxQueueSize` 是等待本地批量事务的内存请求上限，不是远端积压上限；
 - 普通日志默认 1 GiB/168h，Flow 默认 256 MiB/24h；
 - 网络/ClickHouse 失败保留队列，400/413 单条无效才进入 rejected；
-- 达到容量/期限进入 dropped gap，磁盘错误/1 秒超时进入 persistence gap；
+- 达到容量/期限进入 dropped gap；磁盘事务错误或队列未接收进入 persistence gap；已接收但 1 秒内未返回只增加 `persist_timeouts` 延迟指标；
 - 给出 `systemctl show v2node -p MemoryCurrent -p NRestarts`、`du -h /var/lib/v2node/access-audit-spool/*.db`、`journalctl -u v2node --since '-15 min' --no-pager` 和 localhost pprof 检查命令。
 
 `LESSONS_LEARNED.md` 新增一节，字段固定为“症状 / 链路 / 根因 / 修复 / 验证 / 下次先查 / 相关文件与命令 / 提交”；使用主机角色“高连接 Trojan 节点”和约数，不写 IP、主机名、token、完整用户数据。提交字段填写当前各实现 commit 的短 hash。

@@ -105,6 +105,7 @@ type FlowClient struct {
 
 	persistLogMu   sync.Mutex
 	persistLastLog time.Time
+	persistDelayAt time.Time
 	persistFailing bool
 }
 
@@ -161,6 +162,14 @@ func NewFlowClient(config FlowClientConfig) (*FlowClient, error) {
 			BatchSize:     config.BatchSize,
 			BatchWindow:   10 * time.Millisecond,
 			SubmitTimeout: config.PersistTimeout,
+			OnSuccess: func([]FlowEvent) {
+				client.recordPersistenceRecovery()
+				select {
+				case client.wakeCh <- struct{}{}:
+				default:
+				}
+			},
+			OnFailure: client.recordPersistenceFailures,
 		})
 	}
 	return client, nil
@@ -218,15 +227,14 @@ func (c *FlowClient) Report(event FlowEvent) error {
 		return err
 	}
 	if err := c.persister.Submit(event); err != nil {
-		encoded, _ := json.Marshal(event)
-		c.spool.RecordPersistenceFailure(event.EventTime, uint64(len(encoded)))
-		c.recordPersistenceLog(err)
+		if errors.Is(err, ErrPersistencePending) {
+			c.recordPersistenceDelay(err)
+			return nil
+		}
+		if errors.Is(err, ErrPersistenceTimeout) || errors.Is(err, ErrPersistenceClosed) {
+			c.recordPersistenceFailures([]FlowEvent{event}, err)
+		}
 		return err
-	}
-	c.recordPersistenceRecovery()
-	select {
-	case c.wakeCh <- struct{}{}:
-	default:
 	}
 	return nil
 }
@@ -281,6 +289,24 @@ func (c *FlowClient) recordPersistenceLog(err error) {
 		c.persistLastLog = now
 	}
 	c.persistFailing = true
+}
+
+func (c *FlowClient) recordPersistenceDelay(err error) {
+	now := c.config.Now()
+	c.persistLogMu.Lock()
+	defer c.persistLogMu.Unlock()
+	if c.persistDelayAt.IsZero() || now.Sub(c.persistDelayAt) >= time.Minute {
+		log.WithField("err", err).Warn("SNTP flow audit local persistence delayed")
+		c.persistDelayAt = now
+	}
+}
+
+func (c *FlowClient) recordPersistenceFailures(events []FlowEvent, err error) {
+	for _, event := range events {
+		encoded, _ := json.Marshal(event)
+		c.spool.RecordPersistenceFailure(event.EventTime, uint64(len(encoded)))
+	}
+	c.recordPersistenceLog(err)
 }
 
 func (c *FlowClient) recordPersistenceRecovery() {
