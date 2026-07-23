@@ -236,6 +236,9 @@ func (b *persistBatcher[T]) drain() {
 
 func (b *persistBatcher[T]) recordDepth() {
 	depth := uint64(len(b.requests))
+	if depth == 0 {
+		depth = 1
+	}
 	for {
 		high := b.highWater.Load()
 		if depth <= high || b.highWater.CompareAndSwap(high, depth) {

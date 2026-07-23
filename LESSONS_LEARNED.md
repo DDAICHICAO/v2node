@@ -144,3 +144,51 @@ git diff --check
 - 配置与状态：`conf/access_audit.go`、`api/v2board/status.go`、`node/user.go`。
 - 运维：v2board `docs/access-traffic-profile-diagnostics-runbook.md`。
 - 关键提交：`2cac267`、`4c140e7`、`fd03fb0`、`65b44ec`。
+
+## 2026-07-23：审计 spool 入队不得随历史积压做全量扫描
+
+### 症状
+
+一台高连接 Trojan 节点在连接数没有数量级变化时，v2node 匿名内存持续增长到数 GiB，goroutine 达到上万并最终触发 OOM。临时关闭 FlowTraffic 后，普通访问审计仍开启，内存和 goroutine 恢复到正常范围。
+
+### 受影响链路
+
+`flowTrafficSession.Finish` -> `ReportFlow` -> `FlowClient.Report` -> `BoltFlowSpool.Enqueue` -> bbolt 写事务；普通访问记录原链路为 `logSntpUserAccess` -> 易失内存 channel -> HTTP。
+
+### 根因
+
+旧 `BoltFlowSpool.Enqueue` 每写一条都在单个 bbolt 写事务中执行 `pruneExpired` 和 `pruneCapacity`，两者会遍历并解码整个 pending bucket。积压达到百余 MiB 后，单次入队退化为 O(N)，连续事件整体接近 O(N²)；大量连接结束 goroutine 堵在 `bbolt.DB.BeginRWTx`，连带保留连接上下文和缓冲区。普通访问 channel 在队列满或远端失败时还会丢弃唯一访问日志。
+
+### 修复
+
+- bbolt meta 持久化 pending/dropped/rejected/persistence failure 和迁移统计；稳态 `EnqueueBatch`、`Ack`、`Stats` 不再全库扫描。
+- 首次打开旧 `flow.db` 时只扫描一次重建增量统计，保留原 key、JSON、FIFO 和待上传事件。
+- 普通访问记录写入独立 `access.db`；两类事件各用一个有界单写者，最多 1000 条或 10 ms 合并成一个事务。
+- 远端错误保留待上传事件；400/413 只隔离坏的单条。容量/期限裁剪和本地持久化硬失败都产生明确 gap。
+- 本地 spool 打开或迁移失败不阻止代理服务启动；运行状态上报错误、积压、缺口、队列水位和迁移结果。
+
+### 验证
+
+~~~powershell
+$env:GOEXPERIMENT='jsonv2'
+go test ./common/accessaudit ./conf ./core/app/dispatcher ./node -count=1
+go vet ./common/accessaudit ./core/app/dispatcher ./node
+git diff --check
+~~~
+
+定向测试覆盖旧库仅迁移一次、增量计数、批量单写、远端失败重启补传、400/413 二分、启动磁盘失败保持代理可用以及状态映射。Windows 缺少 gcc 时不能把 `go test -race` 记为已通过，应在 Linux 验证环境补跑。
+
+### 下次优先检查
+
+1. Pprof 中 `go.etcd.io/bbolt.(*DB).BeginRWTx` 等待栈是否增长。
+2. 连接数相近时 goroutine、MemoryCurrent 和 Pss_Anon 是否连续线性增长。
+3. 两类队列的 pending、oldest、dropped、rejected、persistence failure 和写入队列高水位。
+4. `access.db` / `flow.db` 文件大小、磁盘余量、NRestarts、OOM 和 `reportUserTrafficTask` 超时。
+5. 若旧库迁移失败，先保留原文件并检查首个损坏 key；禁止新建空库覆盖。
+
+### 相关文件、命令与提交
+
+- 队列与批处理：`common/accessaudit/spool_core.go`、`spool.go`、`access_spool.go`、`persist_batcher.go`。
+- 客户端：`common/accessaudit/client.go`、`flow_client.go`。
+- 配置与状态：`conf/access_audit.go`、`api/v2board/status.go`、`node/user.go`。
+- 关键提交：`a9186bf`、`58197bf`、`0818e3a`、`ab18068`、`5bad530`。

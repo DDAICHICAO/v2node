@@ -8,6 +8,8 @@
 
 **Tech Stack:** Go 1.26.1、`go.etcd.io/bbolt`、标准库 `net/http` / `sync` / `time`、现有 SNTP HMAC 协议、Go 单元测试、systemd、localhost-only pprof。
 
+**Go command prerequisite:** 当前仓库直接使用 `encoding/json/v2`；在 PowerShell 执行本计划中的 `go test`、`go vet` 或 `go build` 前先设置 `$env:GOEXPERIMENT='jsonv2'`，命令结束后执行 `Remove-Item Env:GOEXPERIMENT`。缺少该开关时出现 `build constraints exclude all Go files` 属于环境错误，不是测试红灯。
+
 ---
 
 ## 文件与职责

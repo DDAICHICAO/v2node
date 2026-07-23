@@ -66,7 +66,17 @@
     "BatchSize": 1000,
     "MaxQueueSize": 10000,
     "FlushInterval": "1s",
-    "Timeout": "5s"
+    "Timeout": "5s",
+    "SpoolPath": "/var/lib/v2node/access-audit-spool/access.db",
+    "MaxSpoolBytes": 1073741824,
+    "MaxSpoolAge": "168h",
+    "FlowTraffic": {
+      "Enabled": false,
+      "CheckpointInterval": "5m",
+      "SpoolPath": "/var/lib/v2node/access-audit-spool/flow.db",
+      "MaxSpoolBytes": 268435456,
+      "MaxSpoolAge": "24h"
+    }
   }
 }
 ```
@@ -79,11 +89,32 @@
 | `Endpoint` | ingest-api HTTPS 接收地址 |
 | `Token` | HMAC-SHA256 签名密钥，必须与 ingest-api 的 `INGEST_TOKEN` 一致 |
 | `BatchSize` | 单批最多上报条数 |
-| `MaxQueueSize` | 本地内存队列上限；队列满时丢弃新日志，不阻塞用户连接 |
+| `MaxQueueSize` | 等待本地批量事务的内存请求上限；不是远端积压容量 |
 | `FlushInterval` | 定时刷新间隔 |
 | `Timeout` | 单次 HTTP 上报超时时间 |
+| `SpoolPath` | 普通访问记录持久队列，默认 `access.db` |
+| `MaxSpoolBytes` | 普通访问队列容量上限，默认 1 GiB |
+| `MaxSpoolAge` | 普通访问队列保留期，默认 168 小时 |
+| `FlowTraffic.*` | 双向流量事件开关、检查点与独立 `flow.db` 边界；默认 256 MiB/24 小时 |
 
-远端上报是异步队列：日志服务不可用时会输出 `SNTP access audit report failed` 警告，但不会阻塞代理连接。`SNTPAccess: false` 只关闭本地 `SNTP user access ...` 输出；如果 `AccessAudit.Enabled` 仍为 `true`，远端审计会继续上报。
+普通访问记录和 FlowTraffic 都先通过有界单写者批量事务写入各自 bbolt 文件，再由独立上传循环发送。网络、鉴权、限流、ClickHouse 5xx 或超时不会确认磁盘事件；进程重启后继续按 FIFO 补传。HTTP 400/413 会二分批次，只有确定无法接收的单条事件进入 rejected。
+
+达到容量或保留期时，从队首裁剪并累计 dropped 数量、字节和时间范围；本地目录/磁盘错误、写事务失败或等待超过 1 秒时继续放行代理流量，但累计 persistence failure 并限频输出错误，不会静默当作成功。`SNTPAccess: false` 只关闭本地 `SNTP user access ...` 输出；只要 `AccessAudit.Enabled` 为 `true`，远端审计仍工作。
+
+常用持久队列检查：
+
+~~~bash
+systemctl show v2node -p MemoryCurrent -p MemoryPeak -p NRestarts
+du -h /var/lib/v2node/access-audit-spool/access.db \
+      /var/lib/v2node/access-audit-spool/flow.db
+journalctl -u v2node --since "-15 min" --no-pager \
+  | grep -E "persistence|access audit|FlowTraffic|reportUserTrafficTask|panic|fatal|OOM"
+
+# PprofPort 已配置且只监听 127.0.0.1 时
+curl -fsS "http://127.0.0.1:6060/debug/pprof/goroutine?debug=1" | head -n 1
+curl -fsS "http://127.0.0.1:6060/debug/pprof/goroutine?debug=2" \
+  | grep -F -c "go.etcd.io/bbolt.(*DB).BeginRWTx"
+~~~
 
 ## 日志在哪里
 
