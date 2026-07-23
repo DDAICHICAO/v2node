@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type FlowConfig struct {
@@ -23,35 +25,47 @@ type FlowConfig struct {
 }
 
 type FlowClientConfig struct {
-	Enabled       bool
-	Endpoint      string
-	Token         string
-	BatchSize     int
-	FlushInterval time.Duration
-	Timeout       time.Duration
-	HTTPClient    *http.Client
-	Now           func() time.Time
-	Spool         FlowSpool
+	Enabled        bool
+	Endpoint       string
+	Token          string
+	BatchSize      int
+	MaxQueueSize   int
+	FlushInterval  time.Duration
+	Timeout        time.Duration
+	PersistTimeout time.Duration
+	HTTPClient     *http.Client
+	Now            func() time.Time
+	Spool          FlowSpool
 }
 
 type FlowRuntimeStatus struct {
-	ConfigReported    bool
-	Enabled           bool
-	LastSuccessAt     int64
-	LastErrorAt       int64
-	LastErrorCode     string
-	RetryCount        uint64
-	PendingEvents     uint64
-	PendingBytes      uint64
-	OldestEventAt     int64
-	DroppedEvents     uint64
-	DroppedBytes      uint64
-	DroppedEventFrom  int64
-	DroppedEventTo    int64
-	RejectedEvents    uint64
-	RejectedBytes     uint64
-	RejectedEventFrom int64
-	RejectedEventTo   int64
+	ConfigReported            bool
+	Enabled                   bool
+	LastSuccessAt             int64
+	LastErrorAt               int64
+	LastErrorCode             string
+	RetryCount                uint64
+	PendingEvents             uint64
+	PendingBytes              uint64
+	OldestEventAt             int64
+	DroppedEvents             uint64
+	DroppedBytes              uint64
+	DroppedEventFrom          int64
+	DroppedEventTo            int64
+	RejectedEvents            uint64
+	RejectedBytes             uint64
+	RejectedEventFrom         int64
+	RejectedEventTo           int64
+	PersistenceFailures       uint64
+	PersistenceFailureBytes   uint64
+	PersistenceFailureFrom    int64
+	PersistenceFailureTo      int64
+	PersistQueueDepth         uint64
+	PersistQueueHighWatermark uint64
+	PersistTimeouts           uint64
+	LastMigrationAt           int64
+	LastMigrationRecords      uint64
+	LastMigrationMillis       int64
 }
 
 type flowPayload struct {
@@ -77,6 +91,7 @@ func (e *flowSendError) Unwrap() error { return e.err }
 type FlowClient struct {
 	config    FlowClientConfig
 	spool     FlowSpool
+	persister *persistBatcher[FlowEvent]
 	closeCh   chan struct{}
 	doneCh    chan struct{}
 	wakeCh    chan struct{}
@@ -87,6 +102,10 @@ type FlowClient struct {
 	statusMu sync.RWMutex
 	status   FlowRuntimeStatus
 	retryAt  time.Time
+
+	persistLogMu   sync.Mutex
+	persistLastLog time.Time
+	persistFailing bool
 }
 
 func NewFlowClient(config FlowClientConfig) (*FlowClient, error) {
@@ -95,11 +114,17 @@ func NewFlowClient(config FlowClientConfig) (*FlowClient, error) {
 	if config.BatchSize <= 0 {
 		config.BatchSize = 1000
 	}
+	if config.MaxQueueSize <= 0 {
+		config.MaxQueueSize = 10000
+	}
 	if config.FlushInterval <= 0 {
 		config.FlushInterval = time.Second
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = 5 * time.Second
+	}
+	if config.PersistTimeout <= 0 {
+		config.PersistTimeout = time.Second
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -118,7 +143,7 @@ func NewFlowClient(config FlowClientConfig) (*FlowClient, error) {
 			return nil, errors.New("flow traffic spool is required")
 		}
 	}
-	return &FlowClient{
+	client := &FlowClient{
 		config:  config,
 		spool:   config.Spool,
 		closeCh: make(chan struct{}),
@@ -128,7 +153,17 @@ func NewFlowClient(config FlowClientConfig) (*FlowClient, error) {
 			ConfigReported: true,
 			Enabled:        config.Enabled,
 		},
-	}, nil
+	}
+	if config.Enabled {
+		client.persister = newPersistBatcher(persistBatcherConfig[FlowEvent]{
+			Spool:         config.Spool,
+			QueueSize:     config.MaxQueueSize,
+			BatchSize:     config.BatchSize,
+			BatchWindow:   10 * time.Millisecond,
+			SubmitTimeout: config.PersistTimeout,
+		})
+	}
+	return client, nil
 }
 
 func (c *FlowClient) Start() {
@@ -141,6 +176,7 @@ func (c *FlowClient) Start() {
 		return
 	}
 	c.started = true
+	c.persister.Start()
 	go c.loop()
 }
 
@@ -149,6 +185,16 @@ func (c *FlowClient) Close() {
 		return
 	}
 	c.closeOnce.Do(func() {
+		persistenceClosed := true
+		if c.persister != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := c.persister.Close(ctx)
+			cancel()
+			if err != nil {
+				persistenceClosed = false
+				log.WithField("err", err).Warn("SNTP flow audit persistence shutdown timed out")
+			}
+		}
 		c.startMu.Lock()
 		started := c.started
 		if started {
@@ -158,22 +204,26 @@ func (c *FlowClient) Close() {
 		if started {
 			<-c.doneCh
 		}
-		if c.spool != nil {
+		if c.spool != nil && persistenceClosed {
 			_ = c.spool.Close()
 		}
 	})
 }
 
 func (c *FlowClient) Report(event FlowEvent) error {
-	if c == nil || !c.config.Enabled || c.spool == nil {
+	if c == nil || !c.config.Enabled || c.spool == nil || c.persister == nil {
 		return errors.New("flow traffic reporting is disabled")
 	}
 	if err := event.Normalize(c.config.Now()); err != nil {
 		return err
 	}
-	if err := c.spool.Enqueue(event); err != nil {
+	if err := c.persister.Submit(event); err != nil {
+		encoded, _ := json.Marshal(event)
+		c.spool.RecordPersistenceFailure(event.EventTime, uint64(len(encoded)))
+		c.recordPersistenceLog(err)
 		return err
 	}
+	c.recordPersistenceRecovery()
 	select {
 	case c.wakeCh <- struct{}{}:
 	default:
@@ -206,7 +256,41 @@ func (c *FlowClient) Status() FlowRuntimeStatus {
 	status.RejectedBytes = stats.RejectedBytes
 	status.RejectedEventFrom = stats.RejectedEventFrom
 	status.RejectedEventTo = stats.RejectedEventTo
+	status.PersistenceFailures = stats.PersistenceFailures
+	status.PersistenceFailureBytes = stats.PersistenceFailureBytes
+	status.PersistenceFailureFrom = stats.PersistenceFailureFrom
+	status.PersistenceFailureTo = stats.PersistenceFailureTo
+	status.LastMigrationAt = stats.LastMigrationAt
+	status.LastMigrationRecords = stats.LastMigrationRecords
+	status.LastMigrationMillis = stats.LastMigrationMillis
+	if c.persister != nil {
+		persist := c.persister.Status()
+		status.PersistQueueDepth = persist.QueueDepth
+		status.PersistQueueHighWatermark = persist.HighWatermark
+		status.PersistTimeouts = persist.Timeouts
+	}
 	return status
+}
+
+func (c *FlowClient) recordPersistenceLog(err error) {
+	now := c.config.Now()
+	c.persistLogMu.Lock()
+	defer c.persistLogMu.Unlock()
+	if !c.persistFailing || now.Sub(c.persistLastLog) >= time.Minute {
+		log.WithField("err", err).Warn("SNTP flow audit local persistence failed")
+		c.persistLastLog = now
+	}
+	c.persistFailing = true
+}
+
+func (c *FlowClient) recordPersistenceRecovery() {
+	c.persistLogMu.Lock()
+	defer c.persistLogMu.Unlock()
+	if !c.persistFailing {
+		return
+	}
+	log.Info("SNTP flow audit local persistence recovered")
+	c.persistFailing = false
 }
 
 func (c *FlowClient) loop() {

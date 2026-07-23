@@ -20,16 +20,17 @@ import (
 )
 
 type Config struct {
-	Enabled       bool
-	Endpoint      string
-	Token         string
-	BatchSize     int
-	MaxQueueSize  int
-	FlushInterval time.Duration
-	Timeout       time.Duration
-	HTTPClient    *http.Client
-	Now           func() time.Time
-	FlowTraffic   FlowConfig
+	Enabled        bool
+	Endpoint       string
+	Token          string
+	BatchSize      int
+	MaxQueueSize   int
+	FlushInterval  time.Duration
+	Timeout        time.Duration
+	PersistTimeout time.Duration
+	HTTPClient     *http.Client
+	Now            func() time.Time
+	FlowTraffic    FlowConfig
 }
 
 type Event struct {
@@ -83,19 +84,13 @@ var (
 )
 
 func Configure(config Config) error {
-	defaultMu.Lock()
-	defer defaultMu.Unlock()
+	oldClient, oldFlowClient := detachDefaultClients()
+	closeClients(oldClient, oldFlowClient)
 
-	if defaultClient != nil {
-		defaultClient.Close()
-		defaultClient = nil
-	}
-	if defaultFlowClient != nil {
-		defaultFlowClient.Close()
-		defaultFlowClient = nil
-	}
+	defaultMu.Lock()
 	defaultFlowConfig = config.FlowTraffic
 	flowConfigReported = true
+	defaultMu.Unlock()
 	if !config.Enabled {
 		return nil
 	}
@@ -112,45 +107,62 @@ func Configure(config Config) error {
 			Now:      config.Now,
 		})
 		if err != nil {
+			client.Close()
 			return err
 		}
 		flowClient, err = NewFlowClient(FlowClientConfig{
-			Enabled:       true,
-			Endpoint:      config.Endpoint,
-			Token:         config.Token,
-			BatchSize:     config.BatchSize,
-			FlushInterval: config.FlushInterval,
-			Timeout:       config.Timeout,
-			HTTPClient:    config.HTTPClient,
-			Now:           config.Now,
-			Spool:         spool,
+			Enabled:        true,
+			Endpoint:       config.Endpoint,
+			Token:          config.Token,
+			BatchSize:      config.BatchSize,
+			MaxQueueSize:   config.MaxQueueSize,
+			FlushInterval:  config.FlushInterval,
+			Timeout:        config.Timeout,
+			PersistTimeout: config.PersistTimeout,
+			HTTPClient:     config.HTTPClient,
+			Now:            config.Now,
+			Spool:          spool,
 		})
 		if err != nil {
 			_ = spool.Close()
+			client.Close()
 			return err
 		}
 	}
-	defaultClient = client
-	defaultFlowClient = flowClient
 	client.Start()
 	if flowClient != nil {
 		flowClient.Start()
 	}
+	defaultMu.Lock()
+	defaultClient = client
+	defaultFlowClient = flowClient
+	defaultMu.Unlock()
 	return nil
 }
 
 func Shutdown() {
+	oldClient, oldFlowClient := detachDefaultClients()
+	closeClients(oldClient, oldFlowClient)
+	defaultMu.Lock()
+	defaultFlowConfig = FlowConfig{}
+	defaultMu.Unlock()
+}
+
+func detachDefaultClients() (*Client, *FlowClient) {
 	defaultMu.Lock()
 	defer defaultMu.Unlock()
-	if defaultClient != nil {
-		defaultClient.Close()
-		defaultClient = nil
+	client, flowClient := defaultClient, defaultFlowClient
+	defaultClient, defaultFlowClient = nil, nil
+	return client, flowClient
+}
+
+func closeClients(client *Client, flowClient *FlowClient) {
+	if client != nil {
+		client.Close()
 	}
-	if defaultFlowClient != nil {
-		defaultFlowClient.Close()
-		defaultFlowClient = nil
+	if flowClient != nil {
+		flowClient.Close()
 	}
-	defaultFlowConfig = FlowConfig{}
 }
 
 func Enqueue(event Event) bool {
@@ -393,6 +405,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = 5 * time.Second
+	}
+	if config.PersistTimeout <= 0 {
+		config.PersistTimeout = time.Second
 	}
 	if config.HTTPClient == nil {
 		config.HTTPClient = &http.Client{Timeout: config.Timeout}
