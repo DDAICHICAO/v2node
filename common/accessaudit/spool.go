@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-var ErrSpoolOpen = errors.New("access audit spool open failed")
+var (
+	ErrSpoolOpen      = errors.New("access audit spool open failed")
+	ErrSpoolMigration = errors.New("access audit spool migration failed")
+)
 
 const (
 	defaultFlowSpoolMaxBytes = int64(256 << 20)
@@ -84,7 +87,7 @@ func NewBoltFlowSpool(config SpoolConfig) (*BoltFlowSpool, error) {
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: flow: %v", ErrSpoolOpen, err)
+		return nil, fmt.Errorf("%w: flow: %w", ErrSpoolOpen, err)
 	}
 	return &BoltFlowSpool{core: core}, nil
 }

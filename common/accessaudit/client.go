@@ -620,10 +620,14 @@ func (c *Client) recordPersistenceRecovery() {
 
 func recordAccessStartupFailure(now time.Time, err error) {
 	log.WithField("err", err).Error("SNTP access audit spool unavailable; proxy traffic remains enabled")
+	code := "spool_open"
+	if errors.Is(err, ErrSpoolMigration) {
+		code = "migration"
+	}
 	defaultMu.Lock()
 	defer defaultMu.Unlock()
 	defaultAccessStatus.LastErrorAt = now.Unix()
-	defaultAccessStatus.LastErrorCode = "spool_open"
+	defaultAccessStatus.LastErrorCode = code
 	defaultAccessStatus.PersistenceFailures++
 	defaultAccessStatus.PersistenceFailureFrom = now.Unix()
 	defaultAccessStatus.PersistenceFailureTo = now.Unix()
@@ -631,10 +635,14 @@ func recordAccessStartupFailure(now time.Time, err error) {
 
 func recordFlowStartupFailure(now time.Time, err error) {
 	log.WithField("err", err).Error("SNTP flow audit spool unavailable; proxy traffic remains enabled")
+	code := "spool_open"
+	if errors.Is(err, ErrSpoolMigration) {
+		code = "migration"
+	}
 	defaultMu.Lock()
 	defer defaultMu.Unlock()
 	defaultFlowStatus.LastErrorAt = now.Unix()
-	defaultFlowStatus.LastErrorCode = "spool_open"
+	defaultFlowStatus.LastErrorCode = code
 	defaultFlowStatus.PersistenceFailures++
 	defaultFlowStatus.PersistenceFailureFrom = now.Unix()
 	defaultFlowStatus.PersistenceFailureTo = now.Unix()

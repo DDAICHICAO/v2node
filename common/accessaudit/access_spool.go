@@ -48,7 +48,7 @@ func NewBoltAccessSpool(config SpoolConfig) (*BoltAccessSpool, error) {
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: access: %v", ErrSpoolOpen, err)
+		return nil, fmt.Errorf("%w: access: %w", ErrSpoolOpen, err)
 	}
 	return &BoltAccessSpool{core: core}, nil
 }

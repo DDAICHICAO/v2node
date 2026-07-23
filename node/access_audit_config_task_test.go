@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -192,10 +194,15 @@ func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
 
 func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	now := time.Date(2026, 7, 23, 4, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
 	if err := accessaudit.Configure(accessaudit.Config{
-		Enabled: true, Endpoint: "http://127.0.0.1:1", Token: "secret",
+		Enabled: true, Endpoint: server.URL, Token: "secret",
 		BatchSize: 10, MaxQueueSize: 100, FlushInterval: time.Hour,
 		Timeout: 20 * time.Millisecond, Now: func() time.Time { return now },
+		HTTPClient: server.Client(),
 		SpoolPath:     filepath.Join(t.TempDir(), "access.db"),
 		MaxSpoolBytes: 1 << 20, MaxSpoolAge: time.Hour,
 		FlowTraffic: accessaudit.FlowConfig{

@@ -89,7 +89,10 @@ func openBoltSpool[T any](config SpoolConfig, codec spoolCodec[T]) (*boltSpool[T
 		if _, err := tx.CreateBucketIfNotExists(spoolMetaBucket); err != nil {
 			return err
 		}
-		return spool.migrate(tx)
+		if err := spool.migrate(tx); err != nil {
+			return fmt.Errorf("%w: %v", ErrSpoolMigration, err)
+		}
+		return nil
 	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize spool: %w", err)
