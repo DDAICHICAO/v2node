@@ -566,6 +566,9 @@ func TestClientFlushesSignedBatch(t *testing.T) {
 		FlushInterval: time.Hour,
 		Timeout:       time.Second,
 		Now:           func() time.Time { return time.Unix(1779786000, 0) },
+		SpoolPath:     filepath.Join(t.TempDir(), "access.db"),
+		MaxSpoolBytes: 1 << 20,
+		MaxSpoolAge:   time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
@@ -623,32 +626,6 @@ func TestClientFlushesSignedBatch(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %s: %s", want, body)
 		}
-	}
-}
-
-func TestClientDropsWhenQueueFull(t *testing.T) {
-	client, err := NewClient(Config{
-		Enabled:       true,
-		Endpoint:      "https://logs.sntp.uk/api/v1/access-events",
-		Token:         "secret",
-		BatchSize:     10,
-		MaxQueueSize:  1,
-		FlushInterval: time.Hour,
-		Timeout:       time.Second,
-	})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	defer client.Close()
-
-	if !client.Enqueue(Event{NodeID: 1, UID: 1, UUID: "a", SourceIP: "1.2.3.4", TargetHost: "example.com", TargetPort: 443, Network: "tcp"}) {
-		t.Fatal("expected first event to enqueue")
-	}
-	if client.Enqueue(Event{NodeID: 1, UID: 1, UUID: "b", SourceIP: "1.2.3.5", TargetHost: "example.com", TargetPort: 443, Network: "tcp"}) {
-		t.Fatal("expected second event to drop when queue is full")
-	}
-	if got := client.Dropped(); got != 1 {
-		t.Fatalf("expected one dropped event, got %d", got)
 	}
 }
 

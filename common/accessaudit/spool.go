@@ -2,10 +2,13 @@ package accessaudit
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 )
+
+var ErrSpoolOpen = errors.New("access audit spool open failed")
 
 const (
 	defaultFlowSpoolMaxBytes = int64(256 << 20)
@@ -81,7 +84,7 @@ func NewBoltFlowSpool(config SpoolConfig) (*BoltFlowSpool, error) {
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open flow spool: %w", err)
+		return nil, fmt.Errorf("%w: flow: %v", ErrSpoolOpen, err)
 	}
 	return &BoltFlowSpool{core: core}, nil
 }
