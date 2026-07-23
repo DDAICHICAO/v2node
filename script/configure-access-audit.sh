@@ -10,6 +10,9 @@ ACCESS_AUDIT_BATCH_SIZE="${ACCESS_AUDIT_BATCH_SIZE:-1000}"
 ACCESS_AUDIT_MAX_QUEUE_SIZE="${ACCESS_AUDIT_MAX_QUEUE_SIZE:-10000}"
 ACCESS_AUDIT_FLUSH_INTERVAL="${ACCESS_AUDIT_FLUSH_INTERVAL:-1s}"
 ACCESS_AUDIT_TIMEOUT="${ACCESS_AUDIT_TIMEOUT:-5s}"
+ACCESS_AUDIT_SPOOL_PATH="${ACCESS_AUDIT_SPOOL_PATH:-/var/lib/v2node/access-audit-spool/access.db}"
+ACCESS_AUDIT_MAX_SPOOL_BYTES="${ACCESS_AUDIT_MAX_SPOOL_BYTES:-1073741824}"
+ACCESS_AUDIT_MAX_SPOOL_AGE="${ACCESS_AUDIT_MAX_SPOOL_AGE:-168h}"
 ACCESS_FLOW_TRAFFIC_ENABLED="${ACCESS_FLOW_TRAFFIC_ENABLED:-false}"
 ACCESS_FLOW_CHECKPOINT_INTERVAL="${ACCESS_FLOW_CHECKPOINT_INTERVAL:-5m}"
 ACCESS_FLOW_SPOOL_PATH="${ACCESS_FLOW_SPOOL_PATH:-/var/lib/v2node/access-audit-spool/flow.db}"
@@ -35,6 +38,9 @@ Optional environment variables:
   ACCESS_AUDIT_MAX_QUEUE_SIZE=10000
   ACCESS_AUDIT_FLUSH_INTERVAL=1s
   ACCESS_AUDIT_TIMEOUT=5s
+  ACCESS_AUDIT_SPOOL_PATH=/var/lib/v2node/access-audit-spool/access.db
+  ACCESS_AUDIT_MAX_SPOOL_BYTES=1073741824
+  ACCESS_AUDIT_MAX_SPOOL_AGE=168h
   ACCESS_FLOW_TRAFFIC_ENABLED=false
   ACCESS_FLOW_CHECKPOINT_INTERVAL=5m
   ACCESS_FLOW_SPOOL_PATH=/var/lib/v2node/access-audit-spool/flow.db
@@ -108,6 +114,9 @@ export ACCESS_AUDIT_BATCH_SIZE
 export ACCESS_AUDIT_MAX_QUEUE_SIZE
 export ACCESS_AUDIT_FLUSH_INTERVAL
 export ACCESS_AUDIT_TIMEOUT
+export ACCESS_AUDIT_SPOOL_PATH
+export ACCESS_AUDIT_MAX_SPOOL_BYTES
+export ACCESS_AUDIT_MAX_SPOOL_AGE
 export ACCESS_FLOW_TRAFFIC_ENABLED
 export ACCESS_FLOW_CHECKPOINT_INTERVAL
 export ACCESS_FLOW_SPOOL_PATH
@@ -162,6 +171,9 @@ config["AccessAudit"] = {
     "MaxQueueSize": positive_int("ACCESS_AUDIT_MAX_QUEUE_SIZE", 10000),
     "FlushInterval": os.environ.get("ACCESS_AUDIT_FLUSH_INTERVAL", "1s").strip() or "1s",
     "Timeout": os.environ.get("ACCESS_AUDIT_TIMEOUT", "5s").strip() or "5s",
+    "SpoolPath": os.environ.get("ACCESS_AUDIT_SPOOL_PATH", "/var/lib/v2node/access-audit-spool/access.db").strip() or "/var/lib/v2node/access-audit-spool/access.db",
+    "MaxSpoolBytes": positive_int("ACCESS_AUDIT_MAX_SPOOL_BYTES", 1073741824),
+    "MaxSpoolAge": os.environ.get("ACCESS_AUDIT_MAX_SPOOL_AGE", "168h").strip() or "168h",
     "FlowTraffic": {
         "Enabled": parse_bool(os.environ.get("ACCESS_FLOW_TRAFFIC_ENABLED", "false")),
         "CheckpointInterval": os.environ.get("ACCESS_FLOW_CHECKPOINT_INTERVAL", "5m").strip() or "5m",

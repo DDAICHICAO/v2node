@@ -26,6 +26,9 @@ type AccessAuditTask struct {
 	MaxQueueSize  int              `json:"max_queue_size"`
 	FlushInterval string           `json:"flush_interval"`
 	Timeout       string           `json:"timeout"`
+	SpoolPath     string           `json:"spool_path"`
+	MaxSpoolBytes int64            `json:"max_spool_bytes"`
+	MaxSpoolAge   string           `json:"max_spool_age"`
 	SNTPAccess    *bool            `json:"sntp_access,omitempty"`
 	FlowTraffic   *FlowTrafficTask `json:"flow_traffic,omitempty"`
 }

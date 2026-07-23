@@ -13,6 +13,9 @@ const (
 	DefaultAccessAuditMaxQueueSize      = 10000
 	DefaultAccessAuditFlushInterval     = "1s"
 	DefaultAccessAuditTimeout           = "5s"
+	DefaultAccessAuditSpoolPath         = "/var/lib/v2node/access-audit-spool/access.db"
+	DefaultAccessAuditMaxSpoolBytes     = int64(1073741824)
+	DefaultAccessAuditMaxSpoolAge       = "168h"
 	DefaultAccessFlowCheckpointInterval = "5m"
 	DefaultAccessFlowSpoolPath          = "/var/lib/v2node/access-audit-spool/flow.db"
 	DefaultAccessFlowMaxSpoolBytes      = int64(268435456)
@@ -35,6 +38,9 @@ type AccessAuditConfig struct {
 	MaxQueueSize  int               `mapstructure:"MaxQueueSize"`
 	FlushInterval string            `mapstructure:"FlushInterval"`
 	Timeout       string            `mapstructure:"Timeout"`
+	SpoolPath     string            `mapstructure:"SpoolPath"`
+	MaxSpoolBytes int64             `mapstructure:"MaxSpoolBytes"`
+	MaxSpoolAge   string            `mapstructure:"MaxSpoolAge"`
 	FlowTraffic   FlowTrafficConfig `mapstructure:"FlowTraffic"`
 }
 
@@ -43,6 +49,8 @@ func (p *AccessAuditConfig) Normalize() error {
 	p.Token = strings.TrimSpace(p.Token)
 	p.FlushInterval = strings.TrimSpace(p.FlushInterval)
 	p.Timeout = strings.TrimSpace(p.Timeout)
+	p.SpoolPath = strings.TrimSpace(p.SpoolPath)
+	p.MaxSpoolAge = strings.TrimSpace(p.MaxSpoolAge)
 	p.FlowTraffic.CheckpointInterval = strings.TrimSpace(p.FlowTraffic.CheckpointInterval)
 	p.FlowTraffic.SpoolPath = strings.TrimSpace(p.FlowTraffic.SpoolPath)
 	p.FlowTraffic.MaxSpoolAge = strings.TrimSpace(p.FlowTraffic.MaxSpoolAge)
@@ -57,6 +65,15 @@ func (p *AccessAuditConfig) Normalize() error {
 	}
 	if p.Timeout == "" {
 		p.Timeout = DefaultAccessAuditTimeout
+	}
+	if p.SpoolPath == "" {
+		p.SpoolPath = DefaultAccessAuditSpoolPath
+	}
+	if p.MaxSpoolBytes <= 0 {
+		p.MaxSpoolBytes = DefaultAccessAuditMaxSpoolBytes
+	}
+	if p.MaxSpoolAge == "" {
+		p.MaxSpoolAge = DefaultAccessAuditMaxSpoolAge
 	}
 	if p.FlowTraffic.CheckpointInterval == "" {
 		p.FlowTraffic.CheckpointInterval = DefaultAccessFlowCheckpointInterval
@@ -85,6 +102,9 @@ func (p *AccessAuditConfig) Normalize() error {
 	if _, err := time.ParseDuration(p.Timeout); err != nil {
 		return fmt.Errorf("parse AccessAudit.Timeout: %w", err)
 	}
+	if _, err := time.ParseDuration(p.MaxSpoolAge); err != nil {
+		return fmt.Errorf("parse AccessAudit.MaxSpoolAge: %w", err)
+	}
 	if _, err := time.ParseDuration(p.FlowTraffic.CheckpointInterval); err != nil {
 		return fmt.Errorf("parse AccessAudit.FlowTraffic.CheckpointInterval: %w", err)
 	}
@@ -106,11 +126,15 @@ func (p AccessAuditConfig) RuntimeConfig() (accessaudit.Config, error) {
 	if err != nil {
 		return accessaudit.Config{}, fmt.Errorf("parse AccessAudit.Timeout: %w", err)
 	}
+	maxSpoolAge, err := time.ParseDuration(p.MaxSpoolAge)
+	if err != nil {
+		return accessaudit.Config{}, fmt.Errorf("parse AccessAudit.MaxSpoolAge: %w", err)
+	}
 	checkpointInterval, err := time.ParseDuration(p.FlowTraffic.CheckpointInterval)
 	if err != nil {
 		return accessaudit.Config{}, fmt.Errorf("parse AccessAudit.FlowTraffic.CheckpointInterval: %w", err)
 	}
-	maxSpoolAge, err := time.ParseDuration(p.FlowTraffic.MaxSpoolAge)
+	flowMaxSpoolAge, err := time.ParseDuration(p.FlowTraffic.MaxSpoolAge)
 	if err != nil {
 		return accessaudit.Config{}, fmt.Errorf("parse AccessAudit.FlowTraffic.MaxSpoolAge: %w", err)
 	}
@@ -122,12 +146,15 @@ func (p AccessAuditConfig) RuntimeConfig() (accessaudit.Config, error) {
 		MaxQueueSize:  p.MaxQueueSize,
 		FlushInterval: flushInterval,
 		Timeout:       timeout,
+		SpoolPath:     p.SpoolPath,
+		MaxSpoolBytes: p.MaxSpoolBytes,
+		MaxSpoolAge:   maxSpoolAge,
 		FlowTraffic: accessaudit.FlowConfig{
 			Enabled:            p.FlowTraffic.Enabled,
 			CheckpointInterval: checkpointInterval,
 			SpoolPath:          p.FlowTraffic.SpoolPath,
 			MaxSpoolBytes:      p.FlowTraffic.MaxSpoolBytes,
-			MaxSpoolAge:        maxSpoolAge,
+			MaxSpoolAge:        flowMaxSpoolAge,
 		},
 	}, nil
 }

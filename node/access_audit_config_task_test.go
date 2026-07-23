@@ -48,6 +48,9 @@ func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
 			MaxQueueSize:  10000,
 			FlushInterval: "1s",
 			Timeout:       "5s",
+			SpoolPath:     "/srv/v2node/access.db",
+			MaxSpoolBytes: 536870912,
+			MaxSpoolAge:   "72h",
 			SNTPAccess:    &sntpAccess,
 			FlowTraffic: &panel.FlowTrafficTask{
 				Enabled:            true,
@@ -84,6 +87,11 @@ func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
 	}
 	if audit["Enabled"] != true || audit["Endpoint"] != "https://logs.sntp.uk/api/v1/access-events" || audit["Token"] != "token" {
 		t.Fatalf("unexpected AccessAudit: %#v", audit)
+	}
+	if audit["SpoolPath"] != "/srv/v2node/access.db" ||
+		audit["MaxSpoolBytes"] != float64(536870912) ||
+		audit["MaxSpoolAge"] != "72h" {
+		t.Fatalf("unexpected access spool config: %#v", audit)
 	}
 	flowTraffic, ok := audit["FlowTraffic"].(map[string]any)
 	if !ok || flowTraffic["Enabled"] != true || flowTraffic["CheckpointInterval"] != "5m" || flowTraffic["MaxSpoolBytes"] != float64(268435456) {
@@ -156,6 +164,11 @@ func TestApplyAccessAuditConfigTaskDefaultsLocalSntpAccessOff(t *testing.T) {
 	flowTraffic, ok := audit["FlowTraffic"].(map[string]any)
 	if !ok || flowTraffic["Enabled"] != false || flowTraffic["CheckpointInterval"] != "5m" || flowTraffic["MaxSpoolAge"] != "24h" {
 		t.Fatalf("unexpected default FlowTraffic config: %#v", audit["FlowTraffic"])
+	}
+	if audit["SpoolPath"] != "/var/lib/v2node/access-audit-spool/access.db" ||
+		audit["MaxSpoolBytes"] != float64(1073741824) ||
+		audit["MaxSpoolAge"] != "168h" {
+		t.Fatalf("unexpected default access spool config: %#v", audit)
 	}
 }
 
