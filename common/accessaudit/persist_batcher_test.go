@@ -69,14 +69,17 @@ func TestPersistBatcherTimesOutWithoutUnboundedWorkers(t *testing.T) {
 		BatchWindow: time.Millisecond, SubmitTimeout: 30 * time.Millisecond,
 	})
 	batcher.Start()
-	if err := batcher.Submit(1); !errors.Is(err, ErrPersistenceTimeout) {
+	if err := batcher.Submit(1); !errors.Is(err, ErrPersistencePending) {
 		t.Fatalf("first submit error=%v", err)
 	}
-	if err := batcher.Submit(2); !errors.Is(err, ErrPersistenceTimeout) {
+	if err := batcher.Submit(2); !errors.Is(err, ErrPersistencePending) {
 		t.Fatalf("second submit error=%v", err)
 	}
+	if err := batcher.Submit(3); !errors.Is(err, ErrPersistenceTimeout) {
+		t.Fatalf("third submit error=%v", err)
+	}
 	status := batcher.Status()
-	if status.HighWatermark > 1 || status.Timeouts != 2 {
+	if status.HighWatermark > 1 || status.Timeouts != 3 {
 		t.Fatalf("unexpected status: %#v", status)
 	}
 	close(block)
@@ -84,5 +87,50 @@ func TestPersistBatcherTimesOutWithoutUnboundedWorkers(t *testing.T) {
 	defer cancel()
 	if err := batcher.Close(ctx); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestPersistBatcherReportsTransactionFailureOnceForWholeBatch(t *testing.T) {
+	diskErr := errors.New("disk read-only")
+	spool := &fakeBatchSpool[int]{err: diskErr}
+	var mu sync.Mutex
+	callbackCalls := 0
+	var failedEvents []int
+	batcher := newPersistBatcher(persistBatcherConfig[int]{
+		Spool: spool, QueueSize: 10, BatchSize: 10,
+		BatchWindow: time.Millisecond, SubmitTimeout: time.Second,
+		OnFailure: func(events []int, err error) {
+			if !errors.Is(err, diskErr) {
+				t.Errorf("callback error=%v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			callbackCalls++
+			failedEvents = append(failedEvents, events...)
+		},
+	})
+	results := make([]chan error, 3)
+	for value := 1; value <= 3; value++ {
+		results[value-1] = make(chan error, 1)
+		batcher.requests <- persistRequest[int]{event: value, result: results[value-1]}
+	}
+	batcher.Start()
+	defer func() {
+		if err := batcher.Close(context.Background()); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}()
+	for _, result := range results {
+		if err := <-result; !errors.Is(err, diskErr) {
+			t.Fatalf("submit error=%v", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if callbackCalls != 1 || len(failedEvents) != 3 {
+		t.Fatalf("callback calls=%d failed events=%v", callbackCalls, failedEvents)
+	}
+	if status := batcher.Status(); status.Failures != 3 {
+		t.Fatalf("unexpected status: %#v", status)
 	}
 }

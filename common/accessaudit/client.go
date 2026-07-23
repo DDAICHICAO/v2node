@@ -132,6 +132,7 @@ type Client struct {
 
 	persistLogMu   sync.Mutex
 	persistLastLog time.Time
+	persistDelayAt time.Time
 	persistFailing bool
 }
 
@@ -343,6 +344,14 @@ func NewClient(config Config) (*Client, error) {
 		BatchSize:     config.BatchSize,
 		BatchWindow:   10 * time.Millisecond,
 		SubmitTimeout: config.PersistTimeout,
+		OnSuccess: func([]Event) {
+			client.recordPersistenceRecovery()
+			select {
+			case client.wakeCh <- struct{}{}:
+			default:
+			}
+		},
+		OnFailure: client.recordPersistenceFailures,
 	})
 	return client, nil
 }
@@ -404,15 +413,14 @@ func (c *Client) Enqueue(event Event) bool {
 		return false
 	}
 	if err := c.persister.Submit(event); err != nil {
-		encoded, _ := json.Marshal(event)
-		c.spool.RecordPersistenceFailure(event.EventTime, uint64(len(encoded)))
-		c.recordPersistenceLog(err)
+		if errors.Is(err, ErrPersistencePending) {
+			c.recordPersistenceDelay(err)
+			return true
+		}
+		if errors.Is(err, ErrPersistenceTimeout) || errors.Is(err, ErrPersistenceClosed) {
+			c.recordPersistenceFailures([]Event{event}, err)
+		}
 		return false
-	}
-	c.recordPersistenceRecovery()
-	select {
-	case c.wakeCh <- struct{}{}:
-	default:
 	}
 	return true
 }
@@ -606,6 +614,24 @@ func (c *Client) recordPersistenceLog(err error) {
 		c.persistLastLog = now
 	}
 	c.persistFailing = true
+}
+
+func (c *Client) recordPersistenceDelay(err error) {
+	now := c.config.Now()
+	c.persistLogMu.Lock()
+	defer c.persistLogMu.Unlock()
+	if c.persistDelayAt.IsZero() || now.Sub(c.persistDelayAt) >= time.Minute {
+		log.WithField("err", err).Warn("SNTP access audit local persistence delayed")
+		c.persistDelayAt = now
+	}
+}
+
+func (c *Client) recordPersistenceFailures(events []Event, err error) {
+	for _, event := range events {
+		encoded, _ := json.Marshal(event)
+		c.spool.RecordPersistenceFailure(event.EventTime, uint64(len(encoded)))
+	}
+	c.recordPersistenceLog(err)
 }
 
 func (c *Client) recordPersistenceRecovery() {

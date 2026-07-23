@@ -10,6 +10,7 @@ import (
 
 var (
 	ErrPersistenceTimeout = errors.New("access audit persistence timeout")
+	ErrPersistencePending = errors.New("access audit persistence result pending")
 	ErrPersistenceClosed  = errors.New("access audit persistence is closed")
 )
 
@@ -28,6 +29,8 @@ type persistBatcherConfig[T any] struct {
 	BatchSize     int
 	BatchWindow   time.Duration
 	SubmitTimeout time.Duration
+	OnSuccess     func([]T)
+	OnFailure     func([]T, error)
 }
 
 type PersistBatcherStatus struct {
@@ -117,7 +120,7 @@ func (b *persistBatcher[T]) Submit(event T) error {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		b.timeouts.Add(1)
-		return ErrPersistenceTimeout
+		return ErrPersistencePending
 	}
 	timer.Reset(remaining)
 	defer timer.Stop()
@@ -126,7 +129,7 @@ func (b *persistBatcher[T]) Submit(event T) error {
 		return err
 	case <-timer.C:
 		b.timeouts.Add(1)
-		return ErrPersistenceTimeout
+		return ErrPersistencePending
 	}
 }
 
@@ -217,6 +220,11 @@ func (b *persistBatcher[T]) persistBatch(batch []persistRequest[T]) {
 	err := b.config.Spool.EnqueueBatch(events)
 	if err != nil {
 		b.failures.Add(uint64(len(batch)))
+		if b.config.OnFailure != nil {
+			b.config.OnFailure(events, err)
+		}
+	} else if b.config.OnSuccess != nil {
+		b.config.OnSuccess(events)
 	}
 	for _, request := range batch {
 		request.result <- err
