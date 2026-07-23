@@ -47,6 +47,9 @@ ACCESS_AUDIT_BATCH_SIZE_ARG="${ACCESS_AUDIT_BATCH_SIZE:-1000}"
 ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG="${ACCESS_AUDIT_MAX_QUEUE_SIZE:-10000}"
 ACCESS_AUDIT_FLUSH_INTERVAL_ARG="${ACCESS_AUDIT_FLUSH_INTERVAL:-1s}"
 ACCESS_AUDIT_TIMEOUT_ARG="${ACCESS_AUDIT_TIMEOUT:-5s}"
+ACCESS_AUDIT_SPOOL_PATH_ARG="${ACCESS_AUDIT_SPOOL_PATH:-/var/lib/v2node/access-audit-spool/access.db}"
+ACCESS_AUDIT_MAX_SPOOL_BYTES_ARG="${ACCESS_AUDIT_MAX_SPOOL_BYTES:-1073741824}"
+ACCESS_AUDIT_MAX_SPOOL_AGE_ARG="${ACCESS_AUDIT_MAX_SPOOL_AGE:-168h}"
 ACCESS_FLOW_TRAFFIC_ENABLED_ARG="${ACCESS_FLOW_TRAFFIC_ENABLED:-false}"
 ACCESS_FLOW_CHECKPOINT_INTERVAL_ARG="${ACCESS_FLOW_CHECKPOINT_INTERVAL:-5m}"
 ACCESS_FLOW_SPOOL_PATH_ARG="${ACCESS_FLOW_SPOOL_PATH:-/var/lib/v2node/access-audit-spool/flow.db}"
@@ -330,6 +333,9 @@ generate_v2node_config() {
         local access_audit_max_queue_size
         local access_audit_flush_interval
         local access_audit_timeout
+        local access_audit_spool_path
+        local access_audit_max_spool_bytes
+        local access_audit_max_spool_age
         local access_flow_traffic_enabled
         local access_flow_checkpoint_interval
         local access_flow_spool_path
@@ -343,6 +349,9 @@ generate_v2node_config() {
         access_audit_max_queue_size=$(positive_int_or_default "$ACCESS_AUDIT_MAX_QUEUE_SIZE_ARG" "10000")
         access_audit_flush_interval="${ACCESS_AUDIT_FLUSH_INTERVAL_ARG:-1s}"
         access_audit_timeout="${ACCESS_AUDIT_TIMEOUT_ARG:-5s}"
+        access_audit_spool_path="${ACCESS_AUDIT_SPOOL_PATH_ARG:-/var/lib/v2node/access-audit-spool/access.db}"
+        access_audit_max_spool_bytes=$(positive_int_or_default "$ACCESS_AUDIT_MAX_SPOOL_BYTES_ARG" "1073741824")
+        access_audit_max_spool_age="${ACCESS_AUDIT_MAX_SPOOL_AGE_ARG:-168h}"
         access_flow_traffic_enabled=$(normalize_bool "$ACCESS_FLOW_TRAFFIC_ENABLED_ARG" "false")
         access_flow_checkpoint_interval="${ACCESS_FLOW_CHECKPOINT_INTERVAL_ARG:-5m}"
         access_flow_spool_path="${ACCESS_FLOW_SPOOL_PATH_ARG:-/var/lib/v2node/access-audit-spool/flow.db}"
@@ -370,6 +379,9 @@ generate_v2node_config() {
         "MaxQueueSize": ${access_audit_max_queue_size},
         "FlushInterval": "${access_audit_flush_interval}",
         "Timeout": "${access_audit_timeout}",
+        "SpoolPath": "${access_audit_spool_path}",
+        "MaxSpoolBytes": ${access_audit_max_spool_bytes},
+        "MaxSpoolAge": "${access_audit_max_spool_age}",
         "FlowTraffic": {
             "Enabled": ${access_flow_traffic_enabled},
             "CheckpointInterval": "${access_flow_checkpoint_interval}",

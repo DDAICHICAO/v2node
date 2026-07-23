@@ -201,6 +201,32 @@ func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeSta
 	status.AccessAuditEnabled = audit.Enabled
 	status.AccessAuditEndpoint = strings.TrimSpace(audit.Endpoint)
 	status.AccessAuditTokenConfigured = strings.TrimSpace(audit.Token) != ""
+	access := accessaudit.CurrentRuntimeStatus()
+	status.AccessAuditLastSuccessAt = access.LastSuccessAt
+	status.AccessAuditLastErrorAt = access.LastErrorAt
+	status.AccessAuditLastErrorCode = access.LastErrorCode
+	status.AccessAuditRetryCount = access.RetryCount
+	status.AccessAuditPendingEvents = access.PendingEvents
+	status.AccessAuditPendingBytes = access.PendingBytes
+	status.AccessAuditOldestEventAt = access.OldestEventAt
+	status.AccessAuditDroppedEvents = access.DroppedEvents
+	status.AccessAuditDroppedBytes = access.DroppedBytes
+	status.AccessAuditDroppedEventFrom = access.DroppedEventFrom
+	status.AccessAuditDroppedEventTo = access.DroppedEventTo
+	status.AccessAuditRejectedEvents = access.RejectedEvents
+	status.AccessAuditRejectedBytes = access.RejectedBytes
+	status.AccessAuditRejectedEventFrom = access.RejectedEventFrom
+	status.AccessAuditRejectedEventTo = access.RejectedEventTo
+	status.AccessAuditPersistenceFailures = access.PersistenceFailures
+	status.AccessAuditPersistenceFailureBytes = access.PersistenceFailureBytes
+	status.AccessAuditPersistenceFailureFrom = access.PersistenceFailureFrom
+	status.AccessAuditPersistenceFailureTo = access.PersistenceFailureTo
+	status.AccessAuditPersistQueueDepth = access.PersistQueueDepth
+	status.AccessAuditPersistQueueHighWatermark = access.PersistQueueHighWatermark
+	status.AccessAuditPersistTimeouts = access.PersistTimeouts
+	status.AccessAuditLastMigrationAt = access.LastMigrationAt
+	status.AccessAuditLastMigrationRecords = access.LastMigrationRecords
+	status.AccessAuditLastMigrationMillis = access.LastMigrationMillis
 	flow := accessaudit.CurrentFlowRuntimeStatus()
 	status.FlowTrafficConfigReported = true
 	status.FlowTrafficEnabled = audit.FlowTraffic.Enabled
@@ -219,6 +245,16 @@ func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeSta
 	status.FlowTrafficRejectedBytes = flow.RejectedBytes
 	status.FlowTrafficRejectedEventFrom = flow.RejectedEventFrom
 	status.FlowTrafficRejectedEventTo = flow.RejectedEventTo
+	status.FlowTrafficPersistenceFailures = flow.PersistenceFailures
+	status.FlowTrafficPersistenceFailureBytes = flow.PersistenceFailureBytes
+	status.FlowTrafficPersistenceFailureFrom = flow.PersistenceFailureFrom
+	status.FlowTrafficPersistenceFailureTo = flow.PersistenceFailureTo
+	status.FlowTrafficPersistQueueDepth = flow.PersistQueueDepth
+	status.FlowTrafficPersistQueueHighWatermark = flow.PersistQueueHighWatermark
+	status.FlowTrafficPersistTimeouts = flow.PersistTimeouts
+	status.FlowTrafficLastMigrationAt = flow.LastMigrationAt
+	status.FlowTrafficLastMigrationRecords = flow.LastMigrationRecords
+	status.FlowTrafficLastMigrationMillis = flow.LastMigrationMillis
 }
 
 func (c *Controller) appendTLSRuntimeStatus(status *panel.NodeRuntimeStatus) {

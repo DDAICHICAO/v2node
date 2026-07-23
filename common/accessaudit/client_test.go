@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -176,6 +178,128 @@ func TestFlowTrafficClientBisectsInvalidBatchAndRejectsOnlyBadSingleton(t *testi
 	if client.Status().LastErrorCode != "invalid_event" {
 		t.Fatalf("expected sanitized invalid event status, got %#v", client.Status())
 	}
+}
+
+func TestFlowClientBatchesConcurrentReportsWithoutWriterWaiters(t *testing.T) {
+	now := time.Date(2026, 7, 23, 2, 0, 0, 0, time.UTC)
+	spool := openFlowSpoolForTest(t, now)
+	client, err := NewFlowClient(FlowClientConfig{
+		Enabled: true, Endpoint: "http://127.0.0.1:1", Token: "secret",
+		BatchSize: 100, MaxQueueSize: 2000, PersistTimeout: time.Second,
+		FlushInterval: time.Hour, Timeout: 20 * time.Millisecond,
+		Now: func() time.Time { return now }, Spool: spool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Start()
+	defer client.Close()
+	const events = 1000
+	errs := make(chan error, events)
+	var wg sync.WaitGroup
+	for sequence := 1; sequence <= events; sequence++ {
+		wg.Add(1)
+		go func(sequence int) {
+			defer wg.Done()
+			errs <- client.Report(flowEventForTest(uint32(sequence), now))
+		}(sequence)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("report: %v", err)
+		}
+	}
+	status := client.Status()
+	if status.PendingEvents != events || status.PersistQueueHighWatermark > 2000 {
+		t.Fatalf("unexpected status: %#v", status)
+	}
+}
+
+func TestFlowClientExposesPersistenceFailureGap(t *testing.T) {
+	now := time.Date(2026, 7, 23, 2, 0, 0, 0, time.UTC)
+	spool := &failingFlowSpool{err: errors.New("disk read-only")}
+	client, err := NewFlowClient(FlowClientConfig{
+		Enabled: true, Endpoint: "http://127.0.0.1:1", Token: "secret",
+		BatchSize: 1, MaxQueueSize: 1, PersistTimeout: time.Second,
+		Now: func() time.Time { return now }, Spool: spool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Start()
+	defer client.Close()
+	if err := client.Report(flowEventForTest(1, now)); err == nil {
+		t.Fatal("expected persistence error")
+	}
+	status := client.Status()
+	if status.PersistenceFailures != 1 || status.PersistenceFailureFrom != now.Unix() {
+		t.Fatalf("missing explicit gap: %#v", status)
+	}
+}
+
+func TestDetachDefaultClientsClearsPointersBeforeShutdownWait(t *testing.T) {
+	access := &Client{}
+	flow := &FlowClient{}
+	defaultMu.Lock()
+	defaultClient = access
+	defaultFlowClient = flow
+	defaultMu.Unlock()
+
+	gotAccess, gotFlow := detachDefaultClients()
+	if gotAccess != access || gotFlow != flow {
+		t.Fatalf("unexpected detached clients: access=%p flow=%p", gotAccess, gotFlow)
+	}
+	defaultMu.RLock()
+	defer defaultMu.RUnlock()
+	if defaultClient != nil || defaultFlowClient != nil {
+		t.Fatal("default pointers must be cleared before potentially blocking close")
+	}
+}
+
+type failingFlowSpool struct {
+	mu    sync.Mutex
+	err   error
+	stats SpoolStats
+}
+
+func (s *failingFlowSpool) Enqueue(event FlowEvent) error {
+	return s.EnqueueBatch([]FlowEvent{event})
+}
+
+func (s *failingFlowSpool) EnqueueBatch([]FlowEvent) error {
+	return s.err
+}
+
+func (s *failingFlowSpool) Peek(int) ([]SpoolItem, error) {
+	return nil, nil
+}
+
+func (s *failingFlowSpool) Ack([]uint64) error {
+	return nil
+}
+
+func (s *failingFlowSpool) Reject([]uint64) error {
+	return nil
+}
+
+func (s *failingFlowSpool) Stats() (SpoolStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stats, nil
+}
+
+func (s *failingFlowSpool) RecordPersistenceFailure(eventAt time.Time, estimatedBytes uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.PersistenceFailures++
+	s.stats.PersistenceFailureBytes += estimatedBytes
+	updateTimeRange(&s.stats.PersistenceFailureFrom, &s.stats.PersistenceFailureTo, eventAt.Unix())
+}
+
+func (s *failingFlowSpool) Close() error {
+	return nil
 }
 
 func openFlowSpoolForTest(t *testing.T, now time.Time) *BoltFlowSpool {
@@ -442,6 +566,9 @@ func TestClientFlushesSignedBatch(t *testing.T) {
 		FlushInterval: time.Hour,
 		Timeout:       time.Second,
 		Now:           func() time.Time { return time.Unix(1779786000, 0) },
+		SpoolPath:     filepath.Join(t.TempDir(), "access.db"),
+		MaxSpoolBytes: 1 << 20,
+		MaxSpoolAge:   time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
@@ -499,32 +626,6 @@ func TestClientFlushesSignedBatch(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %s: %s", want, body)
 		}
-	}
-}
-
-func TestClientDropsWhenQueueFull(t *testing.T) {
-	client, err := NewClient(Config{
-		Enabled:       true,
-		Endpoint:      "https://logs.sntp.uk/api/v1/access-events",
-		Token:         "secret",
-		BatchSize:     10,
-		MaxQueueSize:  1,
-		FlushInterval: time.Hour,
-		Timeout:       time.Second,
-	})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	defer client.Close()
-
-	if !client.Enqueue(Event{NodeID: 1, UID: 1, UUID: "a", SourceIP: "1.2.3.4", TargetHost: "example.com", TargetPort: 443, Network: "tcp"}) {
-		t.Fatal("expected first event to enqueue")
-	}
-	if client.Enqueue(Event{NodeID: 1, UID: 1, UUID: "b", SourceIP: "1.2.3.5", TargetHost: "example.com", TargetPort: 443, Network: "tcp"}) {
-		t.Fatal("expected second event to drop when queue is full")
-	}
-	if got := client.Dropped(); got != 1 {
-		t.Fatalf("expected one dropped event, got %d", got)
 	}
 }
 

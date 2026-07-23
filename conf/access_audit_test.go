@@ -25,6 +25,15 @@ func TestAccessAuditNormalizeDefaultsWhenDisabled(t *testing.T) {
 	if cfg.Timeout != DefaultAccessAuditTimeout {
 		t.Fatalf("expected default timeout, got %q", cfg.Timeout)
 	}
+	if cfg.SpoolPath != DefaultAccessAuditSpoolPath {
+		t.Fatalf("expected default access spool path, got %q", cfg.SpoolPath)
+	}
+	if cfg.MaxSpoolBytes != DefaultAccessAuditMaxSpoolBytes {
+		t.Fatalf("expected default access spool bytes, got %d", cfg.MaxSpoolBytes)
+	}
+	if cfg.MaxSpoolAge != DefaultAccessAuditMaxSpoolAge {
+		t.Fatalf("expected default access spool age, got %q", cfg.MaxSpoolAge)
+	}
 	if cfg.FlowTraffic.CheckpointInterval != DefaultAccessFlowCheckpointInterval {
 		t.Fatalf("expected default checkpoint interval, got %q", cfg.FlowTraffic.CheckpointInterval)
 	}
@@ -67,6 +76,9 @@ func TestAccessAuditRuntimeConfigParsesDurations(t *testing.T) {
 		MaxQueueSize:  500,
 		FlushInterval: "2s",
 		Timeout:       "3s",
+		SpoolPath:     "C:/temp/sntp-access.db",
+		MaxSpoolBytes: 8192,
+		MaxSpoolAge:   "12h",
 		FlowTraffic: FlowTrafficConfig{
 			Enabled:            true,
 			CheckpointInterval: "2m",
@@ -93,6 +105,11 @@ func TestAccessAuditRuntimeConfigParsesDurations(t *testing.T) {
 	}
 	if runtimeCfg.Timeout != 3*time.Second {
 		t.Fatalf("expected 3s timeout, got %s", runtimeCfg.Timeout)
+	}
+	if runtimeCfg.SpoolPath != "C:/temp/sntp-access.db" ||
+		runtimeCfg.MaxSpoolBytes != 8192 ||
+		runtimeCfg.MaxSpoolAge != 12*time.Hour {
+		t.Fatalf("unexpected access spool config: %#v", runtimeCfg)
 	}
 	if !runtimeCfg.FlowTraffic.Enabled || runtimeCfg.FlowTraffic.CheckpointInterval != 2*time.Minute {
 		t.Fatalf("unexpected flow runtime config: %#v", runtimeCfg.FlowTraffic)

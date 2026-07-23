@@ -6,11 +6,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/accessaudit"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
 )
@@ -48,6 +52,9 @@ func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
 			MaxQueueSize:  10000,
 			FlushInterval: "1s",
 			Timeout:       "5s",
+			SpoolPath:     "/srv/v2node/access.db",
+			MaxSpoolBytes: 536870912,
+			MaxSpoolAge:   "72h",
 			SNTPAccess:    &sntpAccess,
 			FlowTraffic: &panel.FlowTrafficTask{
 				Enabled:            true,
@@ -84,6 +91,11 @@ func TestApplyAccessAuditConfigTaskMergesConfig(t *testing.T) {
 	}
 	if audit["Enabled"] != true || audit["Endpoint"] != "https://logs.sntp.uk/api/v1/access-events" || audit["Token"] != "token" {
 		t.Fatalf("unexpected AccessAudit: %#v", audit)
+	}
+	if audit["SpoolPath"] != "/srv/v2node/access.db" ||
+		audit["MaxSpoolBytes"] != float64(536870912) ||
+		audit["MaxSpoolAge"] != "72h" {
+		t.Fatalf("unexpected access spool config: %#v", audit)
 	}
 	flowTraffic, ok := audit["FlowTraffic"].(map[string]any)
 	if !ok || flowTraffic["Enabled"] != true || flowTraffic["CheckpointInterval"] != "5m" || flowTraffic["MaxSpoolBytes"] != float64(268435456) {
@@ -157,6 +169,11 @@ func TestApplyAccessAuditConfigTaskDefaultsLocalSntpAccessOff(t *testing.T) {
 	if !ok || flowTraffic["Enabled"] != false || flowTraffic["CheckpointInterval"] != "5m" || flowTraffic["MaxSpoolAge"] != "24h" {
 		t.Fatalf("unexpected default FlowTraffic config: %#v", audit["FlowTraffic"])
 	}
+	if audit["SpoolPath"] != "/var/lib/v2node/access-audit-spool/access.db" ||
+		audit["MaxSpoolBytes"] != float64(1073741824) ||
+		audit["MaxSpoolAge"] != "168h" {
+		t.Fatalf("unexpected default access spool config: %#v", audit)
+	}
 }
 
 func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
@@ -176,6 +193,42 @@ func TestApplyAccessAuditConfigTaskRequiresEndpointWhenEnabled(t *testing.T) {
 }
 
 func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
+	now := time.Date(2026, 7, 23, 4, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	if err := accessaudit.Configure(accessaudit.Config{
+		Enabled: true, Endpoint: server.URL, Token: "secret",
+		BatchSize: 10, MaxQueueSize: 100, FlushInterval: time.Hour,
+		Timeout: 20 * time.Millisecond, Now: func() time.Time { return now },
+		HTTPClient: server.Client(),
+		SpoolPath:     filepath.Join(t.TempDir(), "access.db"),
+		MaxSpoolBytes: 1 << 20, MaxSpoolAge: time.Hour,
+		FlowTraffic: accessaudit.FlowConfig{
+			Enabled: true, CheckpointInterval: time.Minute,
+			SpoolPath:     filepath.Join(t.TempDir(), "flow.db"),
+			MaxSpoolBytes: 1 << 20, MaxSpoolAge: time.Hour,
+		},
+	}); err != nil {
+		t.Fatalf("configure access audit: %v", err)
+	}
+	defer accessaudit.Shutdown()
+	if !accessaudit.Enqueue(accessaudit.Event{
+		EventTime: now, NodeID: 121, UID: 1, UUID: "device",
+		SourceIP: "192.0.2.1", TargetHost: "example.com", TargetPort: 443, Network: "tcp",
+	}) {
+		t.Fatal("persist access event")
+	}
+	flow := accessaudit.FlowEvent{
+		SessionID: "session", Sequence: 1, SampleType: accessaudit.FlowSampleCheckpoint,
+		EventTime: now, IntervalStartedAt: now.Add(-time.Minute),
+		NodeID: 121, UID: 1, TargetHost: "example.com", TargetPort: 443, Network: "tcp",
+	}
+	if err := accessaudit.ReportFlow(flow); err != nil {
+		t.Fatalf("persist flow event: %v", err)
+	}
+
 	controller := &Controller{
 		conf: &conf.NodeConfig{
 			APIHost: "https://panel.example",
@@ -212,6 +265,17 @@ func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	}
 	if !status.FlowTrafficConfigReported || !status.FlowTrafficEnabled {
 		t.Fatalf("expected flow traffic status to be reported: %#v", status)
+	}
+	if status.AccessAuditPendingEvents != 1 || status.AccessAuditPendingBytes == 0 ||
+		status.AccessAuditPersistQueueHighWatermark == 0 {
+		t.Fatalf("missing access audit runtime status: %#v", status)
+	}
+	if status.FlowTrafficPendingEvents != 1 || status.FlowTrafficPendingBytes == 0 ||
+		status.FlowTrafficPersistQueueHighWatermark == 0 {
+		t.Fatalf("missing flow runtime status: %#v", status)
+	}
+	if status.AccessAuditPersistenceFailures != 0 || status.FlowTrafficPersistenceFailures != 0 {
+		t.Fatalf("unexpected persistence gap: %#v", status)
 	}
 	if status.MachineInstanceID == "" {
 		t.Fatal("expected machine instance id to be reported")

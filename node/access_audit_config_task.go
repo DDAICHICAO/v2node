@@ -126,6 +126,9 @@ func applyAccessAuditConfigTask(task panel.UpdateTask, configPath string) error 
 		"MaxQueueSize":  normalized.MaxQueueSize,
 		"FlushInterval": normalized.FlushInterval,
 		"Timeout":       normalized.Timeout,
+		"SpoolPath":     normalized.SpoolPath,
+		"MaxSpoolBytes": normalized.MaxSpoolBytes,
+		"MaxSpoolAge":   normalized.MaxSpoolAge,
 		"FlowTraffic": map[string]any{
 			"Enabled":            normalized.FlowTraffic.Enabled,
 			"CheckpointInterval": normalized.FlowTraffic.CheckpointInterval,
@@ -175,6 +178,8 @@ func normalizeAccessAuditTask(task panel.AccessAuditTask) (panel.AccessAuditTask
 	task.Token = strings.TrimSpace(task.Token)
 	task.FlushInterval = strings.TrimSpace(task.FlushInterval)
 	task.Timeout = strings.TrimSpace(task.Timeout)
+	task.SpoolPath = strings.TrimSpace(task.SpoolPath)
+	task.MaxSpoolAge = strings.TrimSpace(task.MaxSpoolAge)
 	if task.FlowTraffic == nil {
 		task.FlowTraffic = &panel.FlowTrafficTask{}
 	}
@@ -206,6 +211,15 @@ func normalizeAccessAuditTask(task panel.AccessAuditTask) (panel.AccessAuditTask
 	if task.Timeout == "" {
 		task.Timeout = "5s"
 	}
+	if task.SpoolPath == "" {
+		task.SpoolPath = "/var/lib/v2node/access-audit-spool/access.db"
+	}
+	if task.MaxSpoolBytes <= 0 {
+		task.MaxSpoolBytes = 1073741824
+	}
+	if task.MaxSpoolAge == "" {
+		task.MaxSpoolAge = "168h"
+	}
 	if task.FlowTraffic.CheckpointInterval == "" {
 		task.FlowTraffic.CheckpointInterval = "5m"
 	}
@@ -223,6 +237,9 @@ func normalizeAccessAuditTask(task panel.AccessAuditTask) (panel.AccessAuditTask
 	}
 	if _, err := time.ParseDuration(task.Timeout); err != nil {
 		return task, fmt.Errorf("parse access_audit.timeout: %w", err)
+	}
+	if _, err := time.ParseDuration(task.MaxSpoolAge); err != nil {
+		return task, fmt.Errorf("parse access_audit.max_spool_age: %w", err)
 	}
 	if _, err := time.ParseDuration(task.FlowTraffic.CheckpointInterval); err != nil {
 		return task, fmt.Errorf("parse access_audit.flow_traffic.checkpoint_interval: %w", err)
