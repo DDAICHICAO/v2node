@@ -14,6 +14,7 @@ type fakeBootstrapPanel struct {
 	users       []panel.UserInfo
 	alive       map[int]int
 	deviceAlive map[int]int
+	fanout      panel.UUIDIPFanoutGlobalState
 	err         error
 	seq         int64
 }
@@ -32,6 +33,10 @@ func (f *fakeBootstrapPanel) GetUserAlive(context.Context) (map[int]int, error) 
 
 func (f *fakeBootstrapPanel) GetUserDeviceAlive(context.Context) (map[int]int, error) {
 	return f.deviceAlive, f.err
+}
+
+func (f *fakeBootstrapPanel) GetUserDeviceAliveState(context.Context) (*panel.DeviceAliveMap, error) {
+	return &panel.DeviceAliveMap{AliveDevices: f.deviceAlive, UUIDIPFanout: f.fanout}, f.err
 }
 
 func (f *fakeBootstrapPanel) SetUserSyncSeq(seq int64) {

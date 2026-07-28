@@ -70,6 +70,60 @@ func TestGetFullUserListSkipsIfNoneMatch(t *testing.T) {
 	}
 }
 
+func TestFanoutContractsDecodeAndReport(t *testing.T) {
+	var reported bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v2/server/config":
+			_, _ = w.Write([]byte(`{"protocol":"vless","base_config":{"push_interval":60,"pull_interval":60,"uuid_ip_fanout_guard":{"enabled":true,"mode":"reject","window_seconds":600,"max_unique_ips":10,"event_cooldown_seconds":600,"whitelist_cidrs":["198.51.100.0/24"]}}}`))
+		case "/api/v1/server/UniProxy/user":
+			_, _ = w.Write([]byte(`{"users":[{"id":7,"uuid":"device-a","fanout_exempt":true}]}`))
+		case "/api/v1/server/UniProxy/deviceAliveList":
+			_, _ = w.Write([]byte(`{"alive_devices":{"7":1},"uuid_ip_fanout":{"revision":12,"mode":"reject","states":[{"user_id":7,"uuid":"device-a","allowed_ip_hashes":["abc"],"decision_expires_at":2000,"window_seconds":600,"threshold":10}]}}`))
+		case "/api/v1/server/UniProxy/uuidIpFanoutEvents":
+			reported = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL), APIHost: server.URL, NodeId: 1}
+	node, err := c.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.Common.BaseConfig.UUIDIPFanoutGuard == nil || node.Common.BaseConfig.UUIDIPFanoutGuard.Mode != "reject" {
+		t.Fatalf("fanout config=%+v", node.Common.BaseConfig.UUIDIPFanoutGuard)
+	}
+	users, err := c.GetUserList(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || !users[0].FanoutExempt {
+		t.Fatalf("users=%+v", users)
+	}
+	state, err := c.GetUserDeviceAliveState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.AliveDevices[7] != 1 || state.UUIDIPFanout.Revision != 12 || len(state.UUIDIPFanout.States) != 1 {
+		t.Fatalf("device alive state=%+v", state)
+	}
+	if err := c.ReportUUIDIPFanoutEvents(context.Background(), []UUIDIPFanoutEvent{{
+		UserID: 7, UUID: "device-a", IP: "192.0.2.11", Scope: "local", Action: "reject",
+		UniqueIPCount: 11, Threshold: 10, WindowSeconds: 600,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if !reported {
+		t.Fatal("fanout events were not reported")
+	}
+}
+
 func TestAliveStateRequestsReturnPanelErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "panel unavailable", http.StatusServiceUnavailable)
@@ -109,6 +163,11 @@ func TestUserReportRequestsReturnPanelErrors(t *testing.T) {
 		}},
 		{name: "online devices", run: func() error {
 			return c.ReportNodeOnlineDevices(context.Background(), &onlineDevices)
+		}},
+		{name: "UUID IP fanout events", run: func() error {
+			return c.ReportUUIDIPFanoutEvents(context.Background(), []UUIDIPFanoutEvent{{
+				UserID: 1, UUID: "device", IP: "127.0.0.1", Scope: "local", Action: "audit",
+			}})
 		}},
 	}
 	for _, tc := range tests {

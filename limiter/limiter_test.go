@@ -1,11 +1,41 @@
 package limiter
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/format"
 )
+
+func TestCheckLimitAppliesUUIDIPFanoutBeforeOnlineState(t *testing.T) {
+	const tag = "uuid-ip-fanout-integration"
+	const uuid = "device-a"
+	l := newTestLimiter(tag, []panel.UserInfo{{
+		Id:   7,
+		Uuid: uuid,
+	}}, nil, nil, false)
+	l.UpdateUUIDIPFanoutConfig(UUIDIPFanoutConfig{
+		Enabled:      true,
+		Mode:         "reject",
+		Window:       10 * time.Minute,
+		MaxUniqueIPs: 2,
+	})
+
+	taguuid := format.UserTag(tag, uuid)
+	l.CheckLimit(taguuid, "192.0.2.1", true)
+	l.CheckLimit(taguuid, "192.0.2.2", true)
+	_, reject, info := l.CheckLimit(taguuid, "192.0.2.3", true)
+	if !reject || info.Reason != LimitRejectReasonUUIDIPFanoutExceeded || info.FanoutScope != "local" {
+		t.Fatalf("fanout reject=%v info=%+v", reject, info)
+	}
+	if online, ok := l.UserOnlineIP.Load(taguuid); !ok {
+		t.Fatal("expected accepted IPs to remain online")
+	} else if _, rejectedStored := online.(*sync.Map).Load("192.0.2.3"); rejectedStored {
+		t.Fatal("rejected fanout IP was written to online state")
+	}
+}
 
 func newTestLimiter(tag string, users []panel.UserInfo, alive map[int]int, deviceAlive map[int]int, useDeviceLimitByUUID bool) *Limiter {
 	Init()

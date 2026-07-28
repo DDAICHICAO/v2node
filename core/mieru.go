@@ -337,6 +337,10 @@ func (s *MieruServer) handleConn(conn net.Conn, req *mierumodel.Request) {
 				"cached_device_overlap":  rejectInfo.CachedDeviceOverlap,
 				"effective_device_count": rejectInfo.EffectiveDeviceCount,
 				"device_limit_by_uuid":   rejectInfo.UseDeviceLimitByUUID,
+				"fanout_scope":           rejectInfo.FanoutScope,
+				"fanout_unique_ip_count": rejectInfo.FanoutUniqueIPCount,
+				"fanout_threshold":       rejectInfo.FanoutThreshold,
+				"fanout_window_seconds":  rejectInfo.FanoutWindowSeconds,
 			}).Warn("Mieru user rejected by limiter")
 			_ = writeMieruSocksResponse(conn, mieruconstant.Socks5ReplyNotAllowedByRuleSet)
 			_ = conn.Close()

@@ -22,6 +22,7 @@ type Controller struct {
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
 	deviceAliveMap          map[int]int
+	uuidIPFanoutGlobal      panel.UUIDIPFanoutGlobalState
 	lastAliveRefresh        time.Time
 	netSampler              *netstat.Sampler
 	conf                    *conf.NodeConfig
@@ -62,6 +63,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	copy(c.userList, c.bootstrap.Users)
 	c.aliveMap = cloneIntMap(c.bootstrap.Alive)
 	c.deviceAliveMap = cloneIntMap(c.bootstrap.DeviceAlive)
+	c.uuidIPFanoutGlobal = cloneUUIDIPFanoutGlobalState(c.bootstrap.UUIDIPFanout)
 	if c.aliveMap == nil || c.deviceAliveMap == nil {
 		return errors.New("bootstrap user state is incomplete")
 	}
@@ -69,6 +71,8 @@ func (c *Controller) Start(x *core.V2Core) error {
 
 	// add limiter
 	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap, c.deviceAliveMap, c.supportsDeviceLimitByUUID())
+	l.UpdateUUIDIPFanoutConfig(uuidIPFanoutLimiterConfig(c.info.Common.BaseConfig.UUIDIPFanoutGuard))
+	l.UpdateUUIDIPFanoutGlobal(uuidIPFanoutLimiterGlobal(c.uuidIPFanoutGlobal), time.Now())
 	c.limiter = l
 	if node.Security == panel.Tls {
 		err := c.requestCert()
@@ -118,15 +122,16 @@ func (c *Controller) persistOfflineState(info *panel.NodeInfo) error {
 		return errors.New("offline state store is nil")
 	}
 	state := &offlineState{
-		Version:     offlineStateVersion,
-		APIHost:     normalizeAPIHost(c.conf.APIHost),
-		NodeID:      c.conf.NodeID,
-		SavedAt:     time.Now().Unix(),
-		NodeInfo:    info,
-		Users:       append([]panel.UserInfo{}, c.userList...),
-		Alive:       cloneIntMap(c.aliveMap),
-		DeviceAlive: cloneIntMap(c.deviceAliveMap),
-		UserSyncSeq: c.apiClient.UserSyncSeq(),
+		Version:      offlineStateVersion,
+		APIHost:      normalizeAPIHost(c.conf.APIHost),
+		NodeID:       c.conf.NodeID,
+		SavedAt:      time.Now().Unix(),
+		NodeInfo:     info,
+		Users:        append([]panel.UserInfo{}, c.userList...),
+		Alive:        cloneIntMap(c.aliveMap),
+		DeviceAlive:  cloneIntMap(c.deviceAliveMap),
+		UUIDIPFanout: cloneUUIDIPFanoutGlobalState(c.uuidIPFanoutGlobal),
+		UserSyncSeq:  c.apiClient.UserSyncSeq(),
 	}
 	return c.store.Save(*c.conf, state)
 }
@@ -150,6 +155,52 @@ func (c *Controller) supportsDeviceTrafficReport() bool {
 		c.info.Common != nil &&
 		c.info.Common.BaseConfig != nil &&
 		c.info.Common.BaseConfig.DeviceTrafficReport
+}
+
+func uuidIPFanoutLimiterConfig(config *panel.UUIDIPFanoutConfig) limiter.UUIDIPFanoutConfig {
+	if config == nil {
+		return limiter.UUIDIPFanoutConfig{}
+	}
+	return limiter.UUIDIPFanoutConfig{
+		Enabled:        config.Enabled,
+		Mode:           config.Mode,
+		Window:         time.Duration(config.WindowSeconds) * time.Second,
+		MaxUniqueIPs:   config.MaxUniqueIPs,
+		EventCooldown:  time.Duration(config.EventCooldownSeconds) * time.Second,
+		WhitelistCIDRs: append([]string(nil), config.WhitelistCIDRs...),
+	}
+}
+
+func uuidIPFanoutLimiterGlobal(state panel.UUIDIPFanoutGlobalState) limiter.UUIDIPFanoutGlobalState {
+	result := limiter.UUIDIPFanoutGlobalState{
+		Revision: state.Revision,
+		Mode:     state.Mode,
+		States:   make([]limiter.UUIDIPFanoutGlobalDecision, 0, len(state.States)),
+	}
+	for _, decision := range state.States {
+		result.States = append(result.States, limiter.UUIDIPFanoutGlobalDecision{
+			UserID:            decision.UserID,
+			UUID:              decision.UUID,
+			AllowedIPHashes:   append([]string(nil), decision.AllowedIPHashes...),
+			DecisionExpiresAt: decision.DecisionExpiresAt,
+			WindowSeconds:     decision.WindowSeconds,
+			Threshold:         decision.Threshold,
+		})
+	}
+	return result
+}
+
+func cloneUUIDIPFanoutGlobalState(state panel.UUIDIPFanoutGlobalState) panel.UUIDIPFanoutGlobalState {
+	result := panel.UUIDIPFanoutGlobalState{
+		Revision: state.Revision,
+		Mode:     state.Mode,
+		States:   make([]panel.UUIDIPFanoutGlobalDecision, 0, len(state.States)),
+	}
+	for _, decision := range state.States {
+		decision.AllowedIPHashes = append([]string(nil), decision.AllowedIPHashes...)
+		result.States = append(result.States, decision)
+	}
+	return result
 }
 
 // Close implement the Close() function of the service interface

@@ -32,6 +32,7 @@ type Limiter struct {
 	AliveList              map[int]int // Key: Uid, value: alive_ip
 	DeviceAliveList        map[int]int // Key: Uid, value: alive device UUID count
 	UseDeviceLimitByUUID   bool
+	UUIDIPFanout           *UUIDIPFanoutTracker
 }
 
 type UserLimitInfo struct {
@@ -42,15 +43,17 @@ type UserLimitInfo struct {
 	ExpireTime        int64
 	OverLimit         bool
 	BlockedIPs        map[string]struct{}
+	FanoutExempt      bool
 }
 
 type LimitRejectReason string
 
 const (
-	LimitRejectReasonNone                LimitRejectReason = ""
-	LimitRejectReasonUserNotFound        LimitRejectReason = "user_not_found"
-	LimitRejectReasonBlockedIP           LimitRejectReason = "blocked_ip"
-	LimitRejectReasonDeviceLimitExceeded LimitRejectReason = "device_limit_exceeded"
+	LimitRejectReasonNone                 LimitRejectReason = ""
+	LimitRejectReasonUserNotFound         LimitRejectReason = "user_not_found"
+	LimitRejectReasonBlockedIP            LimitRejectReason = "blocked_ip"
+	LimitRejectReasonDeviceLimitExceeded  LimitRejectReason = "device_limit_exceeded"
+	LimitRejectReasonUUIDIPFanoutExceeded LimitRejectReason = "uuid_ip_fanout_exceeded"
 )
 
 type LimitRejectInfo struct {
@@ -63,6 +66,10 @@ type LimitRejectInfo struct {
 	CachedDeviceOverlap  int
 	EffectiveDeviceCount int
 	UseDeviceLimitByUUID bool
+	FanoutScope          string
+	FanoutUniqueIPCount  int
+	FanoutThreshold      int
+	FanoutWindowSeconds  int
 }
 
 func (r LimitRejectReason) String() string {
@@ -84,6 +91,7 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 		OldUserOnline:          new(sync.Map),
 		OldUserOnlineDevice:    new(sync.Map),
 		OldUserOnlineDeviceIPs: new(sync.Map),
+		UUIDIPFanout:           NewUUIDIPFanoutTracker(UUIDIPFanoutConfig{}),
 	}
 	uuidmap := make(map[string]int)
 	for i := range users {
@@ -97,6 +105,7 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 			userLimit.DeviceLimit = users[i].DeviceLimit
 		}
 		userLimit.BlockedIPs = makeBlockedIPSet(users[i].BlockedIPs)
+		userLimit.FanoutExempt = users[i].FanoutExempt
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
 	}
@@ -130,6 +139,7 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		l.OldUserOnlineDevice.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.OldUserOnlineDeviceIPs.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.SpeedLimiter.Delete(format.UserTag(tag, deleted[i].Uuid))
+		l.UUIDIPFanout.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.stateMu.Lock()
 		delete(l.UUIDtoUID, deleted[i].Uuid)
 		l.stateMu.Unlock()
@@ -203,10 +213,12 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	userLimit := 0
 	deviceLimit := 0
 	var uid int
+	var fanoutExempt bool
 	if v, ok := l.UserLimitInfo.Load(taguuid); ok {
 		u := v.(*UserLimitInfo)
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
+		fanoutExempt = u.FanoutExempt
 		if _, blocked := u.BlockedIPs[ip]; blocked {
 			return nil, true, LimitRejectInfo{
 				Reason:               LimitRejectReasonBlockedIP,
@@ -233,6 +245,19 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 		return nil, true, LimitRejectInfo{
 			Reason:               LimitRejectReasonUserNotFound,
 			IP:                   ip,
+			UseDeviceLimitByUUID: useDeviceLimitByUUID,
+		}
+	}
+	fanoutDecision := l.UUIDIPFanout.Check(taguuid, uid, ip, time.Now(), fanoutExempt)
+	if fanoutDecision.Reject {
+		return nil, true, LimitRejectInfo{
+			Reason:               LimitRejectReasonUUIDIPFanoutExceeded,
+			UID:                  uid,
+			IP:                   ip,
+			FanoutScope:          fanoutDecision.Scope,
+			FanoutUniqueIPCount:  fanoutDecision.UniqueIPCount,
+			FanoutThreshold:      fanoutDecision.Threshold,
+			FanoutWindowSeconds:  fanoutDecision.WindowSeconds,
 			UseDeviceLimitByUUID: useDeviceLimitByUUID,
 		}
 	}
@@ -363,6 +388,38 @@ func (l *Limiter) MarkOnline(taguuid string, ip string) bool {
 		}
 	}
 	return true
+}
+
+func (l *Limiter) UpdateUUIDIPFanoutConfig(config UUIDIPFanoutConfig) {
+	if l == nil {
+		return
+	}
+	if l.UUIDIPFanout == nil {
+		l.UUIDIPFanout = NewUUIDIPFanoutTracker(config)
+		return
+	}
+	l.UUIDIPFanout.UpdateConfig(config)
+}
+
+func (l *Limiter) UpdateUUIDIPFanoutGlobal(state UUIDIPFanoutGlobalState, now time.Time) bool {
+	if l == nil || l.UUIDIPFanout == nil {
+		return false
+	}
+	return l.UUIDIPFanout.UpdateGlobal(state, now)
+}
+
+func (l *Limiter) DrainUUIDIPFanoutEvents(limit int) []UUIDIPFanoutEvent {
+	if l == nil || l.UUIDIPFanout == nil {
+		return nil
+	}
+	return l.UUIDIPFanout.DrainEvents(limit)
+}
+
+func (l *Limiter) RequeueUUIDIPFanoutEvents(events []UUIDIPFanoutEvent) {
+	if l == nil || l.UUIDIPFanout == nil {
+		return
+	}
+	l.UUIDIPFanout.RequeueEvents(events)
 }
 
 func (l *Limiter) RefreshOnlineUIDsFromLastSnapshot(uids []int) int {
@@ -498,8 +555,9 @@ func makeBlockedIPSet(ips []string) map[string]struct{} {
 
 func userLimitInfoFromUser(user panel.UserInfo) *UserLimitInfo {
 	info := &UserLimitInfo{
-		UID:        user.Id,
-		BlockedIPs: makeBlockedIPSet(user.BlockedIPs),
+		UID:          user.Id,
+		BlockedIPs:   makeBlockedIPSet(user.BlockedIPs),
+		FanoutExempt: user.FanoutExempt,
 	}
 	if user.SpeedLimit != 0 {
 		info.SpeedLimit = user.SpeedLimit

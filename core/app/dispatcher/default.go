@@ -164,6 +164,17 @@ func (*DefaultDispatcher) Type() interface{} {
 }
 
 func formatLimitRejectMessage(userEmail string, sourceIP string, info limiter.LimitRejectInfo) string {
+	if info.Reason == limiter.LimitRejectReasonUUIDIPFanoutExceeded {
+		return fmt.Sprintf("SNTP user rejected by limiter: source_ip=%s reason=%s uid=%d fanout_scope=%s unique_ip_count=%d threshold=%d window_seconds=%d",
+			sourceIP,
+			info.Reason,
+			info.UID,
+			info.FanoutScope,
+			info.FanoutUniqueIPCount,
+			info.FanoutThreshold,
+			info.FanoutWindowSeconds,
+		)
+	}
 	return fmt.Sprintf("SNTP user rejected by limiter: user=%s source_ip=%s reason=%s uid=%d device_limit=%d alive_count=%d pending_device_count=%d cached_device_overlap=%d effective_device_count=%d device_limit_by_uuid=%t",
 		userEmail,
 		sourceIP,

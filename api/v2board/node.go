@@ -71,16 +71,26 @@ type Route struct {
 }
 
 type BaseConfig struct {
-	PushInterval               any    `json:"push_interval"`
-	PullInterval               any    `json:"pull_interval"`
-	DeviceOnlineMinTraffic     int    `json:"device_online_min_traffic"`
-	NodeReportMinTraffic       int    `json:"node_report_min_traffic"`
-	DeviceTrafficReport        bool   `json:"device_traffic_report"`
-	DeviceAliveReport          bool   `json:"device_alive_report"`
-	DeviceLimitByUUID          bool   `json:"device_limit_by_uuid"`
-	DeviceLimitEnforcementMode string `json:"device_limit_enforcement_mode"`
+	PushInterval               any                 `json:"push_interval"`
+	PullInterval               any                 `json:"pull_interval"`
+	DeviceOnlineMinTraffic     int                 `json:"device_online_min_traffic"`
+	NodeReportMinTraffic       int                 `json:"node_report_min_traffic"`
+	DeviceTrafficReport        bool                `json:"device_traffic_report"`
+	DeviceAliveReport          bool                `json:"device_alive_report"`
+	DeviceLimitByUUID          bool                `json:"device_limit_by_uuid"`
+	DeviceLimitEnforcementMode string              `json:"device_limit_enforcement_mode"`
+	UUIDIPFanoutGuard          *UUIDIPFanoutConfig `json:"uuid_ip_fanout_guard"`
 	// Optional seconds between SNTP Eclipse online refresh marks.
 	SntpEclipseOnlineRefresh any `json:"sntp_eclipse_online_refresh"`
+}
+
+type UUIDIPFanoutConfig struct {
+	Enabled              bool     `json:"enabled"`
+	Mode                 string   `json:"mode"`
+	WindowSeconds        int      `json:"window_seconds"`
+	MaxUniqueIPs         int      `json:"max_unique_ips"`
+	EventCooldownSeconds int      `json:"event_cooldown_seconds"`
+	WhitelistCIDRs       []string `json:"whitelist_cidrs"`
 }
 
 type TlsSettings struct {

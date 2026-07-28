@@ -17,15 +17,16 @@ import (
 const offlineStateVersion = 1
 
 type offlineState struct {
-	Version     int              `json:"version"`
-	APIHost     string           `json:"api_host"`
-	NodeID      int              `json:"node_id"`
-	SavedAt     int64            `json:"saved_at"`
-	NodeInfo    *panel.NodeInfo  `json:"node_info"`
-	Users       []panel.UserInfo `json:"users"`
-	Alive       map[int]int      `json:"alive"`
-	DeviceAlive map[int]int      `json:"device_alive"`
-	UserSyncSeq int64            `json:"user_sync_seq"`
+	Version      int                           `json:"version"`
+	APIHost      string                        `json:"api_host"`
+	NodeID       int                           `json:"node_id"`
+	SavedAt      int64                         `json:"saved_at"`
+	NodeInfo     *panel.NodeInfo               `json:"node_info"`
+	Users        []panel.UserInfo              `json:"users"`
+	Alive        map[int]int                   `json:"alive"`
+	DeviceAlive  map[int]int                   `json:"device_alive"`
+	UUIDIPFanout panel.UUIDIPFanoutGlobalState `json:"uuid_ip_fanout"`
+	UserSyncSeq  int64                         `json:"user_sync_seq"`
 }
 
 type offlineStateStore struct {

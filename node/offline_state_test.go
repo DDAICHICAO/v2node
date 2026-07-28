@@ -45,6 +45,13 @@ func TestOfflineStateStoreRoundTripAllowsEmptyUsers(t *testing.T) {
 	cfg := conf.NodeConfig{APIHost: "https://panel.example/", NodeID: 1}
 	store := newOfflineStateStore(t.TempDir())
 	want := testOfflineState(cfg)
+	want.UUIDIPFanout = panel.UUIDIPFanoutGlobalState{
+		Revision: 12,
+		Mode:     "reject",
+		States: []panel.UUIDIPFanoutGlobalDecision{{
+			UserID: 7, UUID: "device-a", AllowedIPHashes: []string{"abc"}, DecisionExpiresAt: 2_000_000_000,
+		}},
+	}
 	if err := store.Save(cfg, want); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +59,8 @@ func TestOfflineStateStoreRoundTripAllowsEmptyUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.UserSyncSeq != 42 || got.NodeInfo.Id != 1 || got.Users == nil || len(got.Users) != 0 {
+	if got.UserSyncSeq != 42 || got.NodeInfo.Id != 1 || got.Users == nil || len(got.Users) != 0 ||
+		got.UUIDIPFanout.Revision != 12 || len(got.UUIDIPFanout.States) != 1 {
 		t.Fatalf("unexpected snapshot: %+v", got)
 	}
 	info, err := os.Stat(store.pathFor(cfg))

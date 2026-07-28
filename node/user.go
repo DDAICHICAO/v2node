@@ -136,6 +136,8 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) error {
 		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
 	}
 
+	c.reportUUIDIPFanoutEvents(ctx)
+
 	if err := c.reportNodeRuntimeStatus(ctx); err != nil {
 		reportErr = errors.Join(reportErr, err)
 	}
@@ -145,6 +147,38 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) error {
 	}
 	c.recordPanelSuccess("report")
 	return nil
+}
+
+func (c *Controller) reportUUIDIPFanoutEvents(ctx context.Context) {
+	if c == nil || c.limiter == nil || c.apiClient == nil {
+		return
+	}
+	events := c.limiter.DrainUUIDIPFanoutEvents(500)
+	if len(events) == 0 {
+		return
+	}
+	payload := make([]panel.UUIDIPFanoutEvent, 0, len(events))
+	for _, event := range events {
+		payload = append(payload, panel.UUIDIPFanoutEvent{
+			UserID:        event.UserID,
+			UUID:          event.UUID,
+			IP:            event.IP,
+			Scope:         event.Scope,
+			Action:        event.Action,
+			UniqueIPCount: event.UniqueIPCount,
+			Threshold:     event.Threshold,
+			WindowSeconds: event.WindowSeconds,
+			Truncated:     event.Truncated,
+		})
+	}
+	if err := c.apiClient.ReportUUIDIPFanoutEvents(ctx, payload); err != nil {
+		c.limiter.RequeueUUIDIPFanoutEvents(events)
+		log.WithFields(log.Fields{
+			"tag":   c.tag,
+			"count": len(events),
+			"err":   err,
+		}).Warn("Report UUID IP fanout events failed")
+	}
 }
 
 func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) error {

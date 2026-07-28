@@ -333,6 +333,10 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 				"cached_device_overlap":  rejectInfo.CachedDeviceOverlap,
 				"effective_device_count": rejectInfo.EffectiveDeviceCount,
 				"device_limit_by_uuid":   rejectInfo.UseDeviceLimitByUUID,
+				"fanout_scope":           rejectInfo.FanoutScope,
+				"fanout_unique_ip_count": rejectInfo.FanoutUniqueIPCount,
+				"fanout_threshold":       rejectInfo.FanoutThreshold,
+				"fanout_window_seconds":  rejectInfo.FanoutWindowSeconds,
 			}).Warn("SNTP Eclipse user rejected by limiter")
 			_ = s.writeServerReply(conn, handshake, false)
 			_ = conn.Close()

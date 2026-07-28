@@ -14,18 +14,19 @@ type bootstrapPanel interface {
 	GetNodeInfo(context.Context) (*panel.NodeInfo, error)
 	GetUserList(context.Context) ([]panel.UserInfo, error)
 	GetUserAlive(context.Context) (map[int]int, error)
-	GetUserDeviceAlive(context.Context) (map[int]int, error)
+	GetUserDeviceAliveState(context.Context) (*panel.DeviceAliveMap, error)
 	SetUserSyncSeq(int64)
 	UserSyncSeq() int64
 }
 
 func loadBootstrapState(ctx context.Context, client bootstrapPanel, cfg conf.NodeConfig, cached *offlineState) (*offlineState, bool, error) {
 	state := &offlineState{
-		Version:     offlineStateVersion,
-		APIHost:     normalizeAPIHost(cfg.APIHost),
-		NodeID:      cfg.NodeID,
-		SavedAt:     time.Now().Unix(),
-		DeviceAlive: map[int]int{},
+		Version:      offlineStateVersion,
+		APIHost:      normalizeAPIHost(cfg.APIHost),
+		NodeID:       cfg.NodeID,
+		SavedAt:      time.Now().Unix(),
+		DeviceAlive:  map[int]int{},
+		UUIDIPFanout: panel.UUIDIPFanoutGlobalState{States: []panel.UUIDIPFanoutGlobalDecision{}},
 	}
 	usedSnapshot := false
 
@@ -63,16 +64,20 @@ func loadBootstrapState(ctx context.Context, client bootstrapPanel, cfg conf.Nod
 	}
 	state.Alive = cloneIntMap(alive)
 
-	if info.Common != nil && info.Common.BaseConfig != nil && info.Common.BaseConfig.DeviceLimitByUUID {
-		deviceAlive, err := client.GetUserDeviceAlive(ctx)
-		if err != nil || deviceAlive == nil {
+	if info.Common != nil && info.Common.BaseConfig != nil &&
+		(info.Common.BaseConfig.DeviceLimitByUUID || info.Common.BaseConfig.DeviceAliveReport) {
+		deviceState, err := client.GetUserDeviceAliveState(ctx)
+		if err != nil || deviceState == nil {
 			if cached == nil || cached.DeviceAlive == nil {
 				return nil, false, fmt.Errorf("get device alive state and no offline snapshot: %w", nonNilError(err))
 			}
-			deviceAlive = cached.DeviceAlive
+			state.DeviceAlive = cloneIntMap(cached.DeviceAlive)
+			state.UUIDIPFanout = cloneUUIDIPFanoutGlobalState(cached.UUIDIPFanout)
 			usedSnapshot = true
+		} else {
+			state.DeviceAlive = cloneIntMap(deviceState.AliveDevices)
+			state.UUIDIPFanout = cloneUUIDIPFanoutGlobalState(deviceState.UUIDIPFanout)
 		}
-		state.DeviceAlive = cloneIntMap(deviceAlive)
 	}
 	state.UserSyncSeq = client.UserSyncSeq()
 	if usedSnapshot {

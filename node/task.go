@@ -247,19 +247,27 @@ func (c *Controller) refreshAliveState(ctx context.Context) error {
 
 	useDeviceLimitByUUID := c.supportsDeviceLimitByUUID()
 	newDeviceAlive := make(map[int]int)
-	if useDeviceLimitByUUID {
-		newDeviceAlive, err = c.apiClient.GetUserDeviceAlive(ctx)
-		if err != nil {
+	var newUUIDIPFanout panel.UUIDIPFanoutGlobalState
+	hasDeviceState := useDeviceLimitByUUID || c.supportsDeviceAliveReport()
+	if hasDeviceState {
+		deviceState, deviceErr := c.apiClient.GetUserDeviceAliveState(ctx)
+		if deviceErr != nil {
+			err = deviceErr
 			return fmt.Errorf("get device alive list: %w", err)
 		}
-		if newDeviceAlive == nil {
+		if deviceState == nil || deviceState.AliveDevices == nil {
 			return errors.New("get device alive list: panel returned no data")
 		}
+		newDeviceAlive = deviceState.AliveDevices
+		newUUIDIPFanout = deviceState.UUIDIPFanout
 	}
 	c.aliveMap = cloneIntMap(newA)
 	c.deviceAliveMap = cloneIntMap(newDeviceAlive)
 	if c.limiter != nil {
 		c.limiter.UpdateAliveState(newA, newDeviceAlive, useDeviceLimitByUUID)
+		if hasDeviceState && c.limiter.UpdateUUIDIPFanoutGlobal(uuidIPFanoutLimiterGlobal(newUUIDIPFanout), time.Now()) {
+			c.uuidIPFanoutGlobal = cloneUUIDIPFanoutGlobalState(newUUIDIPFanout)
+		}
 	}
 	return nil
 }

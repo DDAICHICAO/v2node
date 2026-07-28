@@ -30,12 +30,13 @@ type OnlineDeviceReportItem struct {
 }
 
 type UserInfo struct {
-	Id          int      `json:"id" msgpack:"id"`
-	Uuid        string   `json:"uuid" msgpack:"uuid"`
-	SpeedLimit  int      `json:"speed_limit" msgpack:"speed_limit"`
-	DeviceLimit int      `json:"device_limit" msgpack:"device_limit"`
-	ExpiredAt   int64    `json:"expired_at" msgpack:"expired_at"`
-	BlockedIPs  []string `json:"blocked_ips" msgpack:"blocked_ips"`
+	Id           int      `json:"id" msgpack:"id"`
+	Uuid         string   `json:"uuid" msgpack:"uuid"`
+	SpeedLimit   int      `json:"speed_limit" msgpack:"speed_limit"`
+	DeviceLimit  int      `json:"device_limit" msgpack:"device_limit"`
+	ExpiredAt    int64    `json:"expired_at" msgpack:"expired_at"`
+	BlockedIPs   []string `json:"blocked_ips" msgpack:"blocked_ips"`
+	FanoutExempt bool     `json:"fanout_exempt" msgpack:"fanout_exempt"`
 }
 
 type UserListBody struct {
@@ -73,7 +74,35 @@ type AliveMap struct {
 }
 
 type DeviceAliveMap struct {
-	AliveDevices map[int]int `json:"alive_devices"`
+	AliveDevices map[int]int             `json:"alive_devices"`
+	UUIDIPFanout UUIDIPFanoutGlobalState `json:"uuid_ip_fanout"`
+}
+
+type UUIDIPFanoutGlobalState struct {
+	Revision int64                        `json:"revision"`
+	Mode     string                       `json:"mode"`
+	States   []UUIDIPFanoutGlobalDecision `json:"states"`
+}
+
+type UUIDIPFanoutGlobalDecision struct {
+	UserID            int      `json:"user_id"`
+	UUID              string   `json:"uuid"`
+	AllowedIPHashes   []string `json:"allowed_ip_hashes"`
+	DecisionExpiresAt int64    `json:"decision_expires_at"`
+	WindowSeconds     int      `json:"window_seconds"`
+	Threshold         int      `json:"threshold"`
+}
+
+type UUIDIPFanoutEvent struct {
+	UserID        int    `json:"user_id"`
+	UUID          string `json:"uuid"`
+	IP            string `json:"ip"`
+	Scope         string `json:"scope"`
+	Action        string `json:"action"`
+	UniqueIPCount int    `json:"unique_ip_count"`
+	Threshold     int    `json:"threshold"`
+	WindowSeconds int    `json:"window_seconds"`
+	Truncated     bool   `json:"truncated"`
 }
 
 // GetUserList will pull user from v2board
@@ -241,6 +270,14 @@ func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
 }
 
 func (c *Client) GetUserDeviceAlive(ctx context.Context) (map[int]int, error) {
+	state, err := c.GetUserDeviceAliveState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return state.AliveDevices, nil
+}
+
+func (c *Client) GetUserDeviceAliveState(ctx context.Context) (*DeviceAliveMap, error) {
 	deviceAlive := &DeviceAliveMap{}
 	const path = "/api/v1/server/UniProxy/deviceAliveList"
 	r, err := c.client.R().
@@ -263,8 +300,33 @@ func (c *Client) GetUserDeviceAlive(ctx context.Context) (map[int]int, error) {
 	if deviceAlive.AliveDevices == nil {
 		deviceAlive.AliveDevices = make(map[int]int)
 	}
+	if deviceAlive.UUIDIPFanout.States == nil {
+		deviceAlive.UUIDIPFanout.States = []UUIDIPFanoutGlobalDecision{}
+	}
 
-	return deviceAlive.AliveDevices, nil
+	return deviceAlive, nil
+}
+
+func (c *Client) ReportUUIDIPFanoutEvents(ctx context.Context, events []UUIDIPFanoutEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	const path = "/api/v1/server/UniProxy/uuidIpFanoutEvents"
+	r, err := c.client.R().
+		SetContext(ctx).
+		SetBody(map[string][]UUIDIPFanoutEvent{"events": events}).
+		ForceContentType("application/json").
+		Post(path)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return fmt.Errorf("received nil UUID IP fanout event response")
+	}
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("report UUID IP fanout events http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
+	}
+	return nil
 }
 
 type UserTraffic struct {
