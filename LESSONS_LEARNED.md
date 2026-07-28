@@ -209,3 +209,25 @@ git diff --check
 - 客户端：`common/accessaudit/client.go`、`flow_client.go`。
 - 配置与状态：`conf/access_audit.go`、`api/v2board/status.go`、`node/user.go`。
 - 关键提交：`a9186bf`、`58197bf`、`0818e3a`、`ab18068`、`5bad530`。
+
+## 2026-07-28：同一 UUID 的 IP 扩散限制必须在连接入站前判定
+
+### 症状与影响链
+
+复制同一客户端配置后，不同机器会携带相同认证 UUID。原设备限制只按 UUID 去重，因此大量不同来源 IP 仍可通过。受影响链为：面板 `uuid_ip_fanout_guard` 配置与 `fanout_exempt` 用户字段 -> v2node 用户同步 -> `Limiter.CheckLimit` -> 在线状态 -> 本地事件队列 -> 面板 `uuidIpFanoutEvents`，以及 `deviceAliveList` 返回的跨节点决定。
+
+### 根因与修复
+
+- 原限流器没有“同一 UID + UUID 在滚动窗口内的唯一 IP 数”状态。
+- 新增并发安全 tracker，并在写入 `UserOnlineIP` 之前检查；阈值 10 表示前 10 个不同 IP 允许，第 11 个新 IP 才审计或拒绝，已在窗口内的 IP 不受影响。
+- 本地 `reject` 只拒绝超额新 IP，不保存被拒绝 IP；`audit` 有 256 个 IP 的有界证据窗口，事件队列最多 2000 条。
+- 面板全局决定使用归一化 IP 的 SHA-256 允许集合和单调 revision；旧 revision、已到期决定、非 reject 模式都不会生效。
+- 用户/UUID 白名单由面板折算为 `fanout_exempt`，CIDR 白名单由节点本地解析；上报失败只回队有界事件，不阻断代理连接。
+- 管理员从面板清除状态时，全局决定会在下一次 `deviceAliveList` 同步后移除，但节点本地窗口按自身滚动 TTL 自然到期，不会主动踢现有连接。
+
+### 验证与下次检查
+
+- 验证命令：`$env:GOEXPERIMENT='jsonv2'; go test ./api/v2board ./limiter ./core/app/dispatcher ./core`。`node` 包测试逻辑输出 `ok`，但当前 Windows 环境清理临时 `node.test.exe` 时可能报 Access denied；`-race` 需要启用 CGO，应在 Linux 构建环境补跑。
+- 下次先查：节点配置是否收到 enabled/mode/window/threshold/cooldown/CIDR；用户是否收到 `fanout_exempt`；`CheckLimit` 是否在在线状态写入前返回 `uuid_ip_fanout_exceeded`；事件失败后队列是否保持有界；全局 revision 是否前进且离线快照没有回退。
+- 相关文件：`limiter/uuid_ip_fanout.go`、`limiter/limiter.go`、`api/v2board/node.go`、`api/v2board/user.go`、`node/controller.go`、`node/task.go`、`node/user.go`、`node/offline_state.go`、`core/app/dispatcher/default.go`。
+- 相关提交：`d65377b`、`97fbb69`。
