@@ -137,6 +137,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) error {
 	}
 
 	c.reportUUIDIPFanoutEvents(ctx)
+	c.reportDeviceLimitEvents(ctx)
 
 	if err := c.reportNodeRuntimeStatus(ctx); err != nil {
 		reportErr = errors.Join(reportErr, err)
@@ -178,6 +179,45 @@ func (c *Controller) reportUUIDIPFanoutEvents(ctx context.Context) {
 			"count": len(events),
 			"err":   err,
 		}).Warn("Report UUID IP fanout events failed")
+	}
+}
+
+func (c *Controller) reportDeviceLimitEvents(ctx context.Context) {
+	if c == nil || c.limiter == nil || c.apiClient == nil {
+		return
+	}
+	events := c.limiter.DrainDeviceLimitEvents(500)
+	if len(events) == 0 {
+		return
+	}
+	payload := make([]panel.DeviceLimitEvent, 0, len(events))
+	for _, event := range events {
+		payload = append(payload, panel.DeviceLimitEvent{
+			EventID:              event.EventID,
+			UserID:               event.UserID,
+			UUID:                 event.UUID,
+			Mode:                 event.Mode,
+			DeviceLimit:          event.DeviceLimit,
+			AliveCount:           event.AliveCount,
+			PendingDeviceCount:   event.PendingDeviceCount,
+			CachedDeviceOverlap:  event.CachedDeviceOverlap,
+			EffectiveDeviceCount: event.EffectiveDeviceCount,
+			MaxObservedCount:     event.MaxObservedCount,
+			HitCount:             event.HitCount,
+			FirstSeenAt:          event.FirstSeenAt,
+			LastSeenAt:           event.LastSeenAt,
+		})
+	}
+	if err := c.apiClient.ReportDeviceLimitEvents(ctx, payload); err != nil {
+		if !panel.IsValidationError(err) {
+			c.limiter.RequeueDeviceLimitEvents(events)
+		}
+		log.WithFields(log.Fields{
+			"tag":        c.tag,
+			"count":      len(events),
+			"validation": panel.IsValidationError(err),
+			"err":        err,
+		}).Warn("Report device limit events failed")
 	}
 }
 

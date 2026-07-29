@@ -29,6 +29,7 @@ var deviceLimitCapabilities = []string{
 	"stream_unlock_test",
 	"user_delta_sync",
 	"uuid_ip_fanout_guard",
+	"device_limit_event_report",
 }
 
 type Client struct {

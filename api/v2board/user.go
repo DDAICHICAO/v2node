@@ -105,6 +105,40 @@ type UUIDIPFanoutEvent struct {
 	Truncated     bool   `json:"truncated"`
 }
 
+type DeviceLimitEvent struct {
+	EventID              string `json:"event_id"`
+	UserID               int    `json:"user_id"`
+	UUID                 string `json:"uuid,omitempty"`
+	Mode                 string `json:"mode"`
+	DeviceLimit          int    `json:"device_limit"`
+	AliveCount           int    `json:"alive_count"`
+	PendingDeviceCount   int    `json:"pending_device_count"`
+	CachedDeviceOverlap  int    `json:"cached_device_overlap"`
+	EffectiveDeviceCount int    `json:"effective_device_count"`
+	MaxObservedCount     int    `json:"max_observed_count"`
+	HitCount             int    `json:"hit_count"`
+	FirstSeenAt          int64  `json:"first_seen_at"`
+	LastSeenAt           int64  `json:"last_seen_at"`
+}
+
+type ValidationError struct {
+	Operation  string
+	StatusCode int
+	Message    string
+}
+
+func (e *ValidationError) Error() string {
+	if e == nil {
+		return "panel validation failed"
+	}
+	return fmt.Sprintf("%s validation failed with http status %d: %s", e.Operation, e.StatusCode, e.Message)
+}
+
+func IsValidationError(err error) bool {
+	var target *ValidationError
+	return errors.As(err, &target)
+}
+
 // GetUserList will pull user from v2board
 func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	return c.getUserList(ctx, false)
@@ -325,6 +359,35 @@ func (c *Client) ReportUUIDIPFanoutEvents(ctx context.Context, events []UUIDIPFa
 	}
 	if r.StatusCode() >= 400 {
 		return fmt.Errorf("report UUID IP fanout events http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
+	}
+	return nil
+}
+
+func (c *Client) ReportDeviceLimitEvents(ctx context.Context, events []DeviceLimitEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	const path = "/api/v1/server/UniProxy/deviceLimitEvents"
+	r, err := c.client.R().
+		SetContext(ctx).
+		SetBody(map[string][]DeviceLimitEvent{"events": events}).
+		ForceContentType("application/json").
+		Post(path)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return fmt.Errorf("received nil device limit event response")
+	}
+	if r.StatusCode() == 422 {
+		return &ValidationError{
+			Operation:  "report device limit events",
+			StatusCode: r.StatusCode(),
+			Message:    bodySnippet(r.Body()),
+		}
+	}
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("report device limit events http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
 	}
 	return nil
 }

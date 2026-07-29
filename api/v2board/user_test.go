@@ -1,13 +1,77 @@
 package panel
 
 import (
+	"bytes"
 	"context"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-resty/resty/v2"
 )
+
+func TestDeviceLimitEventReportUsesPrivatePayloadAndClassifiesValidation(t *testing.T) {
+	var payload []byte
+	status := http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/server/UniProxy/deviceLimitEvents" {
+			http.NotFound(w, r)
+			return
+		}
+		payload = append([]byte(nil), mustReadAll(t, r)...)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"data":true}`))
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL)}
+	event := DeviceLimitEvent{
+		EventID: strings.Repeat("a", 64), UserID: 7, UUID: "device-a",
+		Mode: "uuid", DeviceLimit: 1, AliveCount: 1,
+		PendingDeviceCount: 2, CachedDeviceOverlap: 1,
+		EffectiveDeviceCount: 2, MaxObservedCount: 3,
+		HitCount: 4, FirstSeenAt: 1000, LastSeenAt: 1060,
+	}
+	if err := c.ReportDeviceLimitEvents(context.Background(), []DeviceLimitEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(payload, []byte(`"event_id"`)) ||
+		!bytes.Contains(payload, []byte(`"events"`)) {
+		t.Fatalf("payload=%s", payload)
+	}
+	if bytes.Contains(payload, []byte(`"ip"`)) || bytes.Contains(payload, []byte("192.0.2.")) {
+		t.Fatalf("payload leaks source IP: %s", payload)
+	}
+
+	status = http.StatusUnprocessableEntity
+	err := c.ReportDeviceLimitEvents(context.Background(), []DeviceLimitEvent{event})
+	if err == nil || !IsValidationError(err) {
+		t.Fatalf("expected validation error, got %v", err)
+	}
+}
+
+func TestDeviceLimitEventPayloadHasNoSourceIPField(t *testing.T) {
+	payload, err := json.Marshal(DeviceLimitEvent{EventID: strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte(`"ip"`)) {
+		t.Fatalf("payload leaks source IP field: %s", payload)
+	}
+}
+
+func mustReadAll(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	defer r.Body.Close()
+	var body bytes.Buffer
+	if _, err := body.ReadFrom(r.Body); err != nil {
+		t.Fatal(err)
+	}
+	return body.Bytes()
+}
 
 func TestUserSyncSeqKeepsHighestSequence(t *testing.T) {
 	c := &Client{}
