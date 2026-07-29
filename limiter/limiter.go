@@ -33,6 +33,7 @@ type Limiter struct {
 	DeviceAliveList        map[int]int // Key: Uid, value: alive device UUID count
 	UseDeviceLimitByUUID   bool
 	UUIDIPFanout           *UUIDIPFanoutTracker
+	DeviceLimitEvents      *DeviceLimitEventQueue
 }
 
 type UserLimitInfo struct {
@@ -92,6 +93,7 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 		OldUserOnlineDevice:    new(sync.Map),
 		OldUserOnlineDeviceIPs: new(sync.Map),
 		UUIDIPFanout:           NewUUIDIPFanoutTracker(UUIDIPFanoutConfig{}),
+		DeviceLimitEvents:      NewDeviceLimitEventQueue(defaultDeviceLimitEventCooldown, defaultDeviceLimitEventMaxItems),
 	}
 	uuidmap := make(map[string]int)
 	for i := range users {
@@ -280,7 +282,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 				effectiveDeviceCount := aliveCount + pendingDeviceCount - cachedDeviceOverlap
 				if deviceLimit < effectiveDeviceCount {
 					l.UserOnlineIP.Delete(taguuid)
-					return nil, true, LimitRejectInfo{
+					info := LimitRejectInfo{
 						Reason:               LimitRejectReasonDeviceLimitExceeded,
 						UID:                  uid,
 						IP:                   ip,
@@ -291,6 +293,8 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 						EffectiveDeviceCount: effectiveDeviceCount,
 						UseDeviceLimitByUUID: useDeviceLimitByUUID,
 					}
+					l.enqueueDeviceLimitEvent(taguuid, info, time.Now())
+					return nil, true, info
 				}
 			}
 		} else {
@@ -306,7 +310,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 					} else if deviceLimit > 0 {
 						if deviceLimit <= aliveCount {
 							oldipMap.Delete(ip)
-							return nil, true, LimitRejectInfo{
+							info := LimitRejectInfo{
 								Reason:               LimitRejectReasonDeviceLimitExceeded,
 								UID:                  uid,
 								IP:                   ip,
@@ -314,6 +318,8 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 								AliveCount:           aliveCount,
 								UseDeviceLimitByUUID: useDeviceLimitByUUID,
 							}
+							l.enqueueDeviceLimitEvent(taguuid, info, time.Now())
+							return nil, true, info
 						}
 					}
 				}
@@ -325,7 +331,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 				if deviceLimit > 0 {
 					if deviceLimit <= aliveCount {
 						l.UserOnlineIP.Delete(taguuid)
-						return nil, true, LimitRejectInfo{
+						info := LimitRejectInfo{
 							Reason:               LimitRejectReasonDeviceLimitExceeded,
 							UID:                  uid,
 							IP:                   ip,
@@ -333,6 +339,8 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 							AliveCount:           aliveCount,
 							UseDeviceLimitByUUID: useDeviceLimitByUUID,
 						}
+						l.enqueueDeviceLimitEvent(taguuid, info, time.Now())
+						return nil, true, info
 					}
 				}
 			}
@@ -608,6 +616,44 @@ func extractUUIDFromTagUUID(taguuid string) string {
 		return taguuid
 	}
 	return taguuid[idx+1:]
+}
+
+func (l *Limiter) enqueueDeviceLimitEvent(taguuid string, info LimitRejectInfo, now time.Time) {
+	if l == nil || l.DeviceLimitEvents == nil ||
+		info.Reason != LimitRejectReasonDeviceLimitExceeded {
+		return
+	}
+	mode := "ip_legacy"
+	uuid := ""
+	if info.UseDeviceLimitByUUID {
+		mode = "uuid"
+		uuid = extractUUIDFromTagUUID(taguuid)
+	}
+	l.DeviceLimitEvents.Enqueue(DeviceLimitEvent{
+		UserID:               info.UID,
+		UUID:                 uuid,
+		Mode:                 mode,
+		DeviceLimit:          info.DeviceLimit,
+		AliveCount:           info.AliveCount,
+		PendingDeviceCount:   info.PendingDeviceCount,
+		CachedDeviceOverlap:  info.CachedDeviceOverlap,
+		EffectiveDeviceCount: maxInt(info.EffectiveDeviceCount, info.AliveCount+1),
+		OccurredAt:           now.Unix(),
+	}, now)
+}
+
+func (l *Limiter) DrainDeviceLimitEvents(maxItems int) []DeviceLimitEvent {
+	if l == nil || l.DeviceLimitEvents == nil {
+		return nil
+	}
+	return l.DeviceLimitEvents.Drain(maxItems)
+}
+
+func (l *Limiter) RequeueDeviceLimitEvents(events []DeviceLimitEvent) {
+	if l == nil || l.DeviceLimitEvents == nil {
+		return
+	}
+	l.DeviceLimitEvents.Requeue(events)
 }
 
 func (l *Limiter) countPendingDeviceUuids(uid int) int {
