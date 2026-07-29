@@ -56,6 +56,26 @@ func TestDeviceLimitEventQueueRequeuesAtFrontWithoutDuplicatingNewerHits(t *test
 	}
 }
 
+func TestDeviceLimitEventQueueSeparatesNodeScopes(t *testing.T) {
+	queue := NewDeviceLimitEventQueue(10*time.Minute, 4)
+	now := time.Unix(1000, 0)
+	for _, scope := range []string{"node-a", "node-b"} {
+		queue.Enqueue(DeviceLimitEvent{
+			GroupScope: scope,
+			UserID:     7, UUID: "device-a", Mode: "uuid",
+			DeviceLimit: 1, EffectiveDeviceCount: 2,
+		}, now)
+	}
+
+	events := queue.Drain(500)
+	if len(events) != 2 {
+		t.Fatalf("events=%+v", events)
+	}
+	if events[0].EventID == events[1].EventID {
+		t.Fatalf("node scopes reused event id %q", events[0].EventID)
+	}
+}
+
 func TestCheckLimitEnqueuesOnlyDeviceLimitRejections(t *testing.T) {
 	const tag = "device-limit-event-integration"
 	l := newTestLimiter(tag, []panel.UserInfo{

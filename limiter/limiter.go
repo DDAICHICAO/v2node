@@ -618,6 +618,14 @@ func extractUUIDFromTagUUID(taguuid string) string {
 	return taguuid[idx+1:]
 }
 
+func extractDeviceLimitEventGroupScope(taguuid string) string {
+	idx := strings.LastIndex(taguuid, "|")
+	if idx <= 0 {
+		return taguuid
+	}
+	return taguuid[:idx]
+}
+
 func (l *Limiter) enqueueDeviceLimitEvent(taguuid string, info LimitRejectInfo, now time.Time) {
 	if l == nil || l.DeviceLimitEvents == nil ||
 		info.Reason != LimitRejectReasonDeviceLimitExceeded {
@@ -631,6 +639,7 @@ func (l *Limiter) enqueueDeviceLimitEvent(taguuid string, info LimitRejectInfo, 
 	}
 	l.DeviceLimitEvents.Enqueue(DeviceLimitEvent{
 		UserID:               info.UID,
+		GroupScope:           extractDeviceLimitEventGroupScope(taguuid),
 		UUID:                 uuid,
 		Mode:                 mode,
 		DeviceLimit:          info.DeviceLimit,

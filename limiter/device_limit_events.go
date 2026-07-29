@@ -17,6 +17,7 @@ const (
 
 type DeviceLimitEvent struct {
 	EventID              string
+	GroupScope           string
 	UserID               int
 	UUID                 string
 	Mode                 string
@@ -218,7 +219,14 @@ func observedDeviceCount(event DeviceLimitEvent) int {
 }
 
 func deviceLimitEventGroupKey(event DeviceLimitEvent) string {
-	return fmt.Sprintf("%d|%s|%s|%d", event.UserID, event.UUID, event.Mode, event.DeviceLimit)
+	return fmt.Sprintf(
+		"%s|%d|%s|%s|%d",
+		event.GroupScope,
+		event.UserID,
+		event.UUID,
+		event.Mode,
+		event.DeviceLimit,
+	)
 }
 
 func deviceLimitEventID(groupKey string, firstSeenAt int64) string {
