@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -250,7 +251,14 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 			UseDeviceLimitByUUID: useDeviceLimitByUUID,
 		}
 	}
-	fanoutDecision := l.UUIDIPFanout.Check(taguuid, uid, ip, time.Now(), fanoutExempt)
+	fanoutDecision := l.UUIDIPFanout.CheckWithReservation(
+		context.Background(),
+		taguuid,
+		uid,
+		ip,
+		time.Now(),
+		fanoutExempt,
+	)
 	if fanoutDecision.Reject {
 		return nil, true, LimitRejectInfo{
 			Reason:               LimitRejectReasonUUIDIPFanoutExceeded,
@@ -414,6 +422,12 @@ func (l *Limiter) UpdateUUIDIPFanoutGlobal(state UUIDIPFanoutGlobalState, now ti
 		return false
 	}
 	return l.UUIDIPFanout.UpdateGlobal(state, now)
+}
+
+func (l *Limiter) SetUUIDIPFanoutReservationFunc(reserve UUIDIPFanoutReservationFunc) {
+	if l != nil && l.UUIDIPFanout != nil {
+		l.UUIDIPFanout.SetReservationFunc(reserve)
+	}
 }
 
 func (l *Limiter) DrainUUIDIPFanoutEvents(limit int) []UUIDIPFanoutEvent {

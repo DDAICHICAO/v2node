@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -16,12 +19,15 @@ const (
 )
 
 type UUIDIPFanoutConfig struct {
-	Enabled        bool
-	Mode           string
-	Window         time.Duration
-	MaxUniqueIPs   int
-	EventCooldown  time.Duration
-	WhitelistCIDRs []string
+	Enabled            bool
+	Mode               string
+	Window             time.Duration
+	MaxUniqueIPs       int
+	EventCooldown      time.Duration
+	WhitelistCIDRs     []string
+	Strategy           string
+	ReservationEnabled bool
+	ReservationTimeout time.Duration
 }
 
 type UUIDIPFanoutGlobalState struct {
@@ -61,9 +67,32 @@ type UUIDIPFanoutCheckResult struct {
 	Truncated      bool
 }
 
+type UUIDIPFanoutInspectionKind uint8
+
+const (
+	UUIDIPFanoutBypass UUIDIPFanoutInspectionKind = iota
+	UUIDIPFanoutExisting
+	UUIDIPFanoutLocalAllow
+	UUIDIPFanoutLocalReject
+	UUIDIPFanoutNeedsReservation
+)
+
+type UUIDIPFanoutInspection struct {
+	Kind          UUIDIPFanoutInspectionKind
+	TagUUID       string
+	UserID        int
+	UUID          string
+	IP            string
+	Scope         string
+	UniqueIPCount int
+	Threshold     int
+	WindowSeconds int
+}
+
 type uuidIPObservation struct {
-	firstSeen time.Time
-	lastSeen  time.Time
+	firstSeen  time.Time
+	lastSeen   time.Time
+	unverified bool
 }
 
 type uuidIPFanoutGlobalEntry struct {
@@ -85,6 +114,8 @@ type UUIDIPFanoutTracker struct {
 	lastEventAt       map[string]time.Time
 	events            []UUIDIPFanoutEvent
 	lastCleanup       time.Time
+	reservation       uuidIPFanoutReservationState
+	flight            singleflight.Group
 }
 
 func NewUUIDIPFanoutTracker(config UUIDIPFanoutConfig) *UUIDIPFanoutTracker {
@@ -102,10 +133,9 @@ func (t *UUIDIPFanoutTracker) UpdateConfig(config UUIDIPFanoutConfig) {
 		return
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	next := normalizeUUIDIPFanoutConfig(config)
-	if !sameUUIDIPFanoutConfig(t.config, next) {
+	changed := !sameUUIDIPFanoutConfig(t.config, next)
+	if changed {
 		t.windows = make(map[string]map[string]uuidIPObservation)
 		t.lastEventAt = make(map[string]time.Time)
 		if !next.Enabled || next.Mode != "reject" {
@@ -114,28 +144,71 @@ func (t *UUIDIPFanoutTracker) UpdateConfig(config UUIDIPFanoutConfig) {
 		}
 	}
 	t.updateConfigLocked(next)
+	t.mu.Unlock()
+
+	if changed {
+		t.reservation.mu.Lock()
+		t.reservation.failures = 0
+		t.reservation.openUntil = time.Time{}
+		t.reservation.halfOpenActive = false
+		t.reservation.mu.Unlock()
+	}
 }
 
 func (t *UUIDIPFanoutTracker) Check(taguuid string, userID int, rawIP string, now time.Time, exempt bool) UUIDIPFanoutCheckResult {
+	return t.CheckWithReservation(context.Background(), taguuid, userID, rawIP, now, exempt)
+}
+
+func (t *UUIDIPFanoutTracker) Inspect(
+	taguuid string,
+	userID int,
+	rawIP string,
+	now time.Time,
+	exempt bool,
+) UUIDIPFanoutInspection {
+	return t.inspect(taguuid, userID, rawIP, now, exempt, false)
+}
+
+func (t *UUIDIPFanoutTracker) inspect(
+	taguuid string,
+	userID int,
+	rawIP string,
+	now time.Time,
+	exempt bool,
+	forceSnapshot bool,
+) UUIDIPFanoutInspection {
+	inspection := UUIDIPFanoutInspection{Kind: UUIDIPFanoutBypass}
 	if t == nil {
-		return UUIDIPFanoutCheckResult{}
+		return inspection
 	}
 	ip := normalizeFanoutIP(rawIP)
 	if ip == "" || taguuid == "" || userID <= 0 {
-		return UUIDIPFanoutCheckResult{}
+		return inspection
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	config := t.config
 	if !config.Enabled || exempt || t.isTrustedLocked(ip) {
-		return UUIDIPFanoutCheckResult{}
+		return inspection
 	}
 	t.cleanupLocked(now)
 
 	uuid := extractUUIDFromTagUUID(taguuid)
-	if config.Mode == "reject" && t.globalMode == "reject" {
-		if decision, ok := t.global[uuidIPFanoutGlobalKey(userID, uuid)]; ok {
+	windowSeconds := int(config.Window / time.Second)
+	inspection = UUIDIPFanoutInspection{
+		TagUUID:       taguuid,
+		UserID:        userID,
+		UUID:          uuid,
+		IP:            ip,
+		Scope:         "local",
+		Threshold:     config.MaxUniqueIPs,
+		WindowSeconds: windowSeconds,
+	}
+	useSnapshot := forceSnapshot || config.Strategy != "reservation" || !config.ReservationEnabled
+	if useSnapshot && config.Mode == "reject" && t.globalMode == "reject" {
+		key := uuidIPFanoutGlobalKey(userID, uuid)
+		if decision, ok := t.global[key]; ok {
 			if decision.expiresAt > now.Unix() {
 				if _, allowed := decision.allowed[hashNormalizedIP(ip)]; !allowed {
 					threshold := decision.threshold
@@ -144,18 +217,17 @@ func (t *UUIDIPFanoutTracker) Check(taguuid string, userID int, rawIP string, no
 					}
 					window := decision.window
 					if window <= 0 {
-						window = int(config.Window / time.Second)
+						window = windowSeconds
 					}
-					return UUIDIPFanoutCheckResult{
-						Reject:        true,
-						Scope:         "global",
-						UniqueIPCount: threshold + 1,
-						Threshold:     threshold,
-						WindowSeconds: window,
-					}
+					inspection.Kind = UUIDIPFanoutLocalReject
+					inspection.Scope = "global"
+					inspection.UniqueIPCount = threshold + 1
+					inspection.Threshold = threshold
+					inspection.WindowSeconds = window
+					return inspection
 				}
 			} else {
-				delete(t.global, uuidIPFanoutGlobalKey(userID, uuid))
+				delete(t.global, key)
 			}
 		}
 	}
@@ -165,25 +237,55 @@ func (t *UUIDIPFanoutTracker) Check(taguuid string, userID int, rawIP string, no
 		window = make(map[string]uuidIPObservation)
 		t.windows[taguuid] = window
 	}
-	cutoff := now.Add(-config.Window)
-	for observedIP, observation := range window {
-		if observation.lastSeen.Before(cutoff) {
-			delete(window, observedIP)
-		}
-	}
+	pruneUUIDIPFanoutWindow(window, now.Add(-config.Window))
 	if observation, ok := window[ip]; ok {
 		observation.lastSeen = now
 		window[ip] = observation
-		return UUIDIPFanoutCheckResult{
-			Scope:          "local",
-			UniqueIPCount:  len(window),
-			Threshold:      config.MaxUniqueIPs,
-			WindowSeconds:  int(config.Window / time.Second),
-			EventGenerated: false,
-		}
+		inspection.Kind = UUIDIPFanoutExisting
+		inspection.UniqueIPCount = len(window)
+		return inspection
 	}
-	if len(window) < config.MaxUniqueIPs {
-		window[ip] = uuidIPObservation{firstSeen: now, lastSeen: now}
+
+	inspection.UniqueIPCount = len(window) + 1
+	if config.Mode == "reject" && len(window) >= config.MaxUniqueIPs {
+		inspection.Kind = UUIDIPFanoutLocalReject
+		return inspection
+	}
+	if config.Mode == "reject" && !useSnapshot {
+		inspection.Kind = UUIDIPFanoutNeedsReservation
+		return inspection
+	}
+	inspection.Kind = UUIDIPFanoutLocalAllow
+	return inspection
+}
+
+func (t *UUIDIPFanoutTracker) CommitAllowed(
+	inspection UUIDIPFanoutInspection,
+	now time.Time,
+	unverified bool,
+) UUIDIPFanoutCheckResult {
+	if t == nil || inspection.Kind == UUIDIPFanoutBypass {
+		return UUIDIPFanoutCheckResult{}
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	config := t.config
+	if !config.Enabled || inspection.TagUUID == "" || inspection.IP == "" {
+		return UUIDIPFanoutCheckResult{}
+	}
+
+	t.cleanupLocked(now)
+	window := t.windows[inspection.TagUUID]
+	if window == nil {
+		window = make(map[string]uuidIPObservation)
+		t.windows[inspection.TagUUID] = window
+	}
+	pruneUUIDIPFanoutWindow(window, now.Add(-config.Window))
+	if observation, ok := window[inspection.IP]; ok {
+		observation.lastSeen = now
+		observation.unverified = observation.unverified && unverified
+		window[inspection.IP] = observation
 		return UUIDIPFanoutCheckResult{
 			Scope:         "local",
 			UniqueIPCount: len(window),
@@ -193,34 +295,66 @@ func (t *UUIDIPFanoutTracker) Check(taguuid string, userID int, rawIP string, no
 	}
 
 	result := UUIDIPFanoutCheckResult{
-		Reject:        config.Mode == "reject",
 		Scope:         "local",
 		UniqueIPCount: len(window) + 1,
 		Threshold:     config.MaxUniqueIPs,
 		WindowSeconds: int(config.Window / time.Second),
 	}
-	if config.Mode == "audit" {
-		if len(window) >= uuidIPFanoutMaxAuditIPs {
-			delete(window, oldestUUIDIPFanoutIP(window))
-			result.Truncated = true
-		}
-		window[ip] = uuidIPObservation{firstSeen: now, lastSeen: now}
-		result.UniqueIPCount = len(window)
-		if result.Truncated {
-			result.UniqueIPCount++
-		}
+	if config.Mode == "reject" && len(window) >= config.MaxUniqueIPs {
+		result.Reject = true
+		result.EventGenerated = t.enqueueEventLocked(inspection.TagUUID, UUIDIPFanoutEvent{
+			UserID:        inspection.UserID,
+			UUID:          inspection.UUID,
+			IP:            inspection.IP,
+			Scope:         "local",
+			Action:        "reject",
+			UniqueIPCount: result.UniqueIPCount,
+			Threshold:     result.Threshold,
+			WindowSeconds: result.WindowSeconds,
+		}, now)
+		return result
 	}
-	result.EventGenerated = t.enqueueEventLocked(taguuid, UUIDIPFanoutEvent{
-		UserID:        userID,
-		UUID:          uuid,
-		IP:            ip,
-		Scope:         "local",
-		Action:        config.Mode,
-		UniqueIPCount: result.UniqueIPCount,
-		Threshold:     config.MaxUniqueIPs,
-		WindowSeconds: int(config.Window / time.Second),
-		Truncated:     result.Truncated,
-	}, now)
+
+	if config.Mode == "audit" && len(window) >= uuidIPFanoutMaxAuditIPs {
+		delete(window, oldestUUIDIPFanoutIP(window))
+		result.Truncated = true
+	}
+	window[inspection.IP] = uuidIPObservation{
+		firstSeen:  now,
+		lastSeen:   now,
+		unverified: unverified,
+	}
+	result.UniqueIPCount = len(window)
+	if result.Truncated {
+		result.UniqueIPCount++
+	}
+
+	if unverified {
+		result.Scope = UUIDIPFanoutOutcomeFailOpen
+		result.EventGenerated = t.enqueueEventLocked(inspection.TagUUID, UUIDIPFanoutEvent{
+			UserID:        inspection.UserID,
+			UUID:          inspection.UUID,
+			IP:            inspection.IP,
+			Scope:         "reservation_fail_open",
+			Action:        "audit",
+			UniqueIPCount: result.UniqueIPCount,
+			Threshold:     result.Threshold,
+			WindowSeconds: result.WindowSeconds,
+			Truncated:     result.Truncated,
+		}, now)
+	} else if config.Mode == "audit" && result.UniqueIPCount > config.MaxUniqueIPs {
+		result.EventGenerated = t.enqueueEventLocked(inspection.TagUUID, UUIDIPFanoutEvent{
+			UserID:        inspection.UserID,
+			UUID:          inspection.UUID,
+			IP:            inspection.IP,
+			Scope:         "local",
+			Action:        "audit",
+			UniqueIPCount: result.UniqueIPCount,
+			Threshold:     result.Threshold,
+			WindowSeconds: result.WindowSeconds,
+			Truncated:     result.Truncated,
+		}, now)
+	}
 	return result
 }
 
@@ -375,6 +509,10 @@ func normalizeUUIDIPFanoutConfig(config UUIDIPFanoutConfig) UUIDIPFanoutConfig {
 	if config.Mode != "reject" {
 		config.Mode = "audit"
 	}
+	config.Strategy = strings.ToLower(strings.TrimSpace(config.Strategy))
+	if config.Strategy != "reservation" {
+		config.Strategy = "snapshot"
+	}
 	if config.Window < time.Minute {
 		config.Window = 10 * time.Minute
 	}
@@ -408,6 +546,17 @@ func normalizeUUIDIPFanoutConfig(config UUIDIPFanoutConfig) UUIDIPFanoutConfig {
 	}
 	sort.Strings(normalized)
 	config.WhitelistCIDRs = normalized
+	switch {
+	case config.ReservationTimeout <= 0:
+		config.ReservationTimeout = 800 * time.Millisecond
+	case config.ReservationTimeout < 200*time.Millisecond:
+		config.ReservationTimeout = 200 * time.Millisecond
+	case config.ReservationTimeout > 2*time.Second:
+		config.ReservationTimeout = 2 * time.Second
+	}
+	if !config.Enabled || config.Mode != "reject" || config.Strategy != "reservation" {
+		config.ReservationEnabled = false
+	}
 	return config
 }
 
@@ -417,6 +566,9 @@ func sameUUIDIPFanoutConfig(left, right UUIDIPFanoutConfig) bool {
 		left.Window == right.Window &&
 		left.MaxUniqueIPs == right.MaxUniqueIPs &&
 		left.EventCooldown == right.EventCooldown &&
+		left.Strategy == right.Strategy &&
+		left.ReservationEnabled == right.ReservationEnabled &&
+		left.ReservationTimeout == right.ReservationTimeout &&
 		strings.Join(left.WhitelistCIDRs, "\x00") == strings.Join(right.WhitelistCIDRs, "\x00")
 }
 
@@ -492,4 +644,12 @@ func oldestUUIDIPFanoutIP(window map[string]uuidIPObservation) string {
 		}
 	}
 	return oldestIP
+}
+
+func pruneUUIDIPFanoutWindow(window map[string]uuidIPObservation, cutoff time.Time) {
+	for observedIP, observation := range window {
+		if observation.lastSeen.Before(cutoff) {
+			delete(window, observedIP)
+		}
+	}
 }
