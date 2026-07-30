@@ -29,6 +29,7 @@ var deviceLimitCapabilities = []string{
 	"stream_unlock_test",
 	"user_delta_sync",
 	"uuid_ip_fanout_guard",
+	"uuid_ip_fanout_reservation_v1",
 	"device_limit_event_report",
 }
 
@@ -43,6 +44,7 @@ type Client struct {
 	userSyncMu              sync.RWMutex
 	userSyncSeq             int64
 	responseBodyHash        string
+	instanceID              string
 	UserList                *UserListBody
 	AliveMap                *AliveMap
 }
@@ -78,7 +80,8 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	if currentVersion := selfversion.Current(); currentVersion != "" {
 		queryParams["current_version"] = currentVersion
 	}
-	queryParams["instance_id"] = instance.ResolveID(c.APIHost, c.NodeID)
+	resolvedInstanceID := instance.ResolveID(c.APIHost, c.NodeID)
+	queryParams["instance_id"] = resolvedInstanceID
 	queryParams["capabilities"] = strings.Join(deviceLimitCapabilities, ",")
 	configuredMachineIP := publicip.Normalize(c.MachineIP)
 	if configuredMachineIP != "" {
@@ -102,7 +105,15 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		AppTransportTokenSecret: c.AppTransportTokenSecret,
 		APIHost:                 c.APIHost,
 		NodeId:                  c.NodeID,
+		instanceID:              resolvedInstanceID,
 		UserList:                &UserListBody{},
 		AliveMap:                &AliveMap{},
 	}, nil
+}
+
+func (c *Client) InstanceID() string {
+	if c == nil {
+		return ""
+	}
+	return c.instanceID
 }

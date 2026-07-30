@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,94 @@ import (
 
 	"github.com/go-resty/resty/v2"
 )
+
+func TestFanoutReservationHTTPClassification(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantKind FanoutReservationKind
+		wantErr  error
+	}{
+		{name: "allow", status: http.StatusOK, body: `{"data":{"decision":"allow"}}`, wantKind: FanoutReservationAllow},
+		{name: "reject", status: http.StatusOK, body: `{"data":{"decision":"reject"}}`, wantKind: FanoutReservationReject},
+		{name: "bad_request", status: http.StatusBadRequest, body: `{"error":"bad request"}`, wantErr: ErrFanoutReservationProtocol},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, wantErr: ErrFanoutReservationProtocol},
+		{name: "forbidden", status: http.StatusForbidden, body: `{"error":"forbidden"}`, wantErr: ErrFanoutReservationProtocol},
+		{name: "not_found", status: http.StatusNotFound, body: `{"error":"not found"}`, wantErr: ErrFanoutReservationFallback},
+		{name: "conflict", status: http.StatusConflict, body: `{"error":"disabled"}`, wantErr: ErrFanoutReservationFallback},
+		{name: "unprocessable", status: http.StatusUnprocessableEntity, body: `{"error":"ownership mismatch"}`, wantErr: ErrFanoutReservationProtocol},
+		{name: "rate_limited", status: http.StatusTooManyRequests, body: `{"error":"busy"}`, wantErr: ErrFanoutReservationTemporary},
+		{name: "server_error", status: http.StatusServiceUnavailable, body: `{"error":"unavailable"}`, wantErr: ErrFanoutReservationTemporary},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v2/server/uuid-ip-fanout/reserve" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			client := &Client{client: resty.New().SetBaseURL(server.URL)}
+			got, err := client.ReserveUUIDIPFanout(context.Background(), FanoutReservationRequest{
+				UserID: 7, UUID: "device-a", IP: "192.0.2.1",
+			})
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err=%v", err)
+				}
+				if status := FanoutReservationStatus(err); status != tc.status {
+					t.Fatalf("status=%d", status)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == nil || got.Kind != tc.wantKind {
+				t.Fatalf("kind=%v", got)
+			}
+		})
+	}
+}
+
+func TestFanoutReservationTransportFailureIsTemporary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := server.URL
+	server.Close()
+
+	client := &Client{client: resty.New().SetBaseURL(url)}
+	_, err := client.ReserveUUIDIPFanout(context.Background(), FanoutReservationRequest{
+		UserID: 7, UUID: "device-a", IP: "192.0.2.1",
+	})
+	if !errors.Is(err, ErrFanoutReservationTemporary) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestFanoutReservationCapabilityAndInstanceIdentity(t *testing.T) {
+	var advertised bool
+	for _, capability := range deviceLimitCapabilities {
+		if capability == "uuid_ip_fanout_reservation_v1" {
+			advertised = true
+			break
+		}
+	}
+	if !advertised {
+		t.Fatal("fanout reservation capability was not advertised")
+	}
+
+	client := &Client{instanceID: "node-instance"}
+	if got := client.InstanceID(); got != "node-instance" {
+		t.Fatalf("instance id=%q", got)
+	}
+}
 
 func TestDeviceLimitEventReportUsesPrivatePayloadAndClassifiesValidation(t *testing.T) {
 	var payload []byte
@@ -91,6 +180,11 @@ func TestUserSyncSeqKeepsHighestSequence(t *testing.T) {
 	if got := c.UserSyncSeq(); got != 11 {
 		t.Fatalf("expected stale header to be ignored, got %d", got)
 	}
+
+	c.MarkUserSyncFullRequired()
+	if got := c.UserSyncSeq(); got != 0 {
+		t.Fatalf("expected full sync marker to reset sequence, got %d", got)
+	}
 }
 
 func TestGetFullUserListSkipsIfNoneMatch(t *testing.T) {
@@ -140,7 +234,7 @@ func TestFanoutContractsDecodeAndReport(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v2/server/config":
-			_, _ = w.Write([]byte(`{"protocol":"vless","base_config":{"push_interval":60,"pull_interval":60,"uuid_ip_fanout_guard":{"enabled":true,"mode":"reject","window_seconds":600,"max_unique_ips":10,"event_cooldown_seconds":600,"whitelist_cidrs":["198.51.100.0/24"]}}}`))
+			_, _ = w.Write([]byte(`{"protocol":"vless","base_config":{"push_interval":60,"pull_interval":60,"uuid_ip_fanout_guard":{"enabled":true,"mode":"reject","window_seconds":600,"max_unique_ips":10,"event_cooldown_seconds":600,"whitelist_cidrs":["198.51.100.0/24"],"strategy":"reservation","reservation":{"enabled":true,"timeout_ms":800,"failure_mode":"open"}}}}`))
 		case "/api/v1/server/UniProxy/user":
 			_, _ = w.Write([]byte(`{"users":[{"id":7,"uuid":"device-a","fanout_exempt":true}]}`))
 		case "/api/v1/server/UniProxy/deviceAliveList":
@@ -162,6 +256,11 @@ func TestFanoutContractsDecodeAndReport(t *testing.T) {
 	}
 	if node.Common.BaseConfig.UUIDIPFanoutGuard == nil || node.Common.BaseConfig.UUIDIPFanoutGuard.Mode != "reject" {
 		t.Fatalf("fanout config=%+v", node.Common.BaseConfig.UUIDIPFanoutGuard)
+	}
+	if node.Common.BaseConfig.UUIDIPFanoutGuard.Strategy != "reservation" ||
+		node.Common.BaseConfig.UUIDIPFanoutGuard.Reservation == nil ||
+		node.Common.BaseConfig.UUIDIPFanoutGuard.Reservation.TimeoutMS != 800 {
+		t.Fatalf("reservation config=%+v", node.Common.BaseConfig.UUIDIPFanoutGuard)
 	}
 	users, err := c.GetUserList(context.Background())
 	if err != nil {

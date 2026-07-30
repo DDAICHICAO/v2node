@@ -85,12 +85,20 @@ type BaseConfig struct {
 }
 
 type UUIDIPFanoutConfig struct {
-	Enabled              bool     `json:"enabled"`
-	Mode                 string   `json:"mode"`
-	WindowSeconds        int      `json:"window_seconds"`
-	MaxUniqueIPs         int      `json:"max_unique_ips"`
-	EventCooldownSeconds int      `json:"event_cooldown_seconds"`
-	WhitelistCIDRs       []string `json:"whitelist_cidrs"`
+	Enabled              bool                           `json:"enabled"`
+	Mode                 string                         `json:"mode"`
+	WindowSeconds        int                            `json:"window_seconds"`
+	MaxUniqueIPs         int                            `json:"max_unique_ips"`
+	EventCooldownSeconds int                            `json:"event_cooldown_seconds"`
+	WhitelistCIDRs       []string                       `json:"whitelist_cidrs"`
+	Strategy             string                         `json:"strategy"`
+	Reservation          *UUIDIPFanoutReservationConfig `json:"reservation"`
+}
+
+type UUIDIPFanoutReservationConfig struct {
+	Enabled     bool   `json:"enabled"`
+	TimeoutMS   int    `json:"timeout_ms"`
+	FailureMode string `json:"failure_mode"`
 }
 
 type TlsSettings struct {

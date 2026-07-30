@@ -263,6 +263,12 @@ func (c *Client) UserSyncSeq() int64 {
 	return c.userSyncSeq
 }
 
+func (c *Client) MarkUserSyncFullRequired() {
+	c.userSyncMu.Lock()
+	defer c.userSyncMu.Unlock()
+	c.userSyncSeq = 0
+}
+
 func (c *Client) updateUserSyncSeqFromHeader(value string) {
 	value = strings.TrimSpace(value)
 	if value == "" {
