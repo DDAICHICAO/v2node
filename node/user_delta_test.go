@@ -16,7 +16,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if os.Getenv("V2NODE_TEST_VERSION_HELPER") == "1" && len(os.Args) > 1 && os.Args[1] == "version" {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println("v2node test")
 		os.Exit(0)
 	}
