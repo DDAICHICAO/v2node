@@ -1,8 +1,14 @@
 package node
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -74,6 +80,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	l.UpdateUUIDIPFanoutConfig(uuidIPFanoutLimiterConfig(c.info.Common.BaseConfig.UUIDIPFanoutGuard))
 	l.UpdateUUIDIPFanoutGlobal(uuidIPFanoutLimiterGlobal(c.uuidIPFanoutGlobal), time.Now())
 	c.limiter = l
+	c.installUUIDIPFanoutReservation(l)
 	if node.Security == panel.Tls {
 		err := c.requestCert()
 		if err != nil {
@@ -161,14 +168,100 @@ func uuidIPFanoutLimiterConfig(config *panel.UUIDIPFanoutConfig) limiter.UUIDIPF
 	if config == nil {
 		return limiter.UUIDIPFanoutConfig{}
 	}
-	return limiter.UUIDIPFanoutConfig{
+	result := limiter.UUIDIPFanoutConfig{
 		Enabled:        config.Enabled,
 		Mode:           config.Mode,
 		Window:         time.Duration(config.WindowSeconds) * time.Second,
 		MaxUniqueIPs:   config.MaxUniqueIPs,
 		EventCooldown:  time.Duration(config.EventCooldownSeconds) * time.Second,
 		WhitelistCIDRs: append([]string(nil), config.WhitelistCIDRs...),
+		Strategy:       strings.ToLower(strings.TrimSpace(config.Strategy)),
 	}
+	if config.Reservation != nil {
+		result.ReservationEnabled = config.Reservation.Enabled
+		result.ReservationTimeout = time.Duration(config.Reservation.TimeoutMS) * time.Millisecond
+	}
+	return result
+}
+
+func (c *Controller) installUUIDIPFanoutReservation(l *limiter.Limiter) {
+	if c == nil || c.apiClient == nil || l == nil {
+		return
+	}
+	l.SetUUIDIPFanoutReservationFunc(func(
+		ctx context.Context,
+		candidate limiter.UUIDIPFanoutInspection,
+	) limiter.UUIDIPFanoutReservationOutcome {
+		now := time.Now()
+		data, err := c.apiClient.ReserveUUIDIPFanout(ctx, panel.FanoutReservationRequest{
+			UserID:     candidate.UserID,
+			UUID:       candidate.UUID,
+			IP:         candidate.IP,
+			RequestID:  fanoutReservationRequestID(c.apiClient.InstanceID(), candidate, now),
+			ObservedAt: now.Unix(),
+		})
+		if panel.FanoutReservationStatus(err) == http.StatusUnprocessableEntity {
+			c.apiClient.MarkUserSyncFullRequired()
+		}
+		return mapFanoutReservationOutcome(data, err)
+	})
+}
+
+func fanoutReservationRequestID(
+	instanceID string,
+	candidate limiter.UUIDIPFanoutInspection,
+	now time.Time,
+) string {
+	windowSeconds := candidate.WindowSeconds
+	if windowSeconds < 60 {
+		windowSeconds = 60
+	}
+	uuidHash := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(candidate.UUID))))
+	ipHash := sha256.Sum256([]byte(strings.TrimSpace(candidate.IP)))
+	components := []string{
+		strings.TrimSpace(instanceID),
+		strconv.Itoa(candidate.UserID),
+		hex.EncodeToString(uuidHash[:]),
+		hex.EncodeToString(ipHash[:]),
+		strconv.FormatInt(now.Unix()/int64(windowSeconds), 10),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(components, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+func mapFanoutReservationOutcome(
+	data *panel.FanoutReservationData,
+	err error,
+) limiter.UUIDIPFanoutReservationOutcome {
+	if err != nil {
+		switch {
+		case errors.Is(err, panel.ErrFanoutReservationFallback):
+			return limiter.UUIDIPFanoutReservationOutcome{Kind: limiter.UUIDIPFanoutOutcomeFallback}
+		case errors.Is(err, panel.ErrFanoutReservationProtocol):
+			return limiter.UUIDIPFanoutReservationOutcome{Kind: limiter.UUIDIPFanoutOutcomeProtocol}
+		default:
+			return limiter.UUIDIPFanoutReservationOutcome{Kind: limiter.UUIDIPFanoutOutcomeFailOpen}
+		}
+	}
+	if data == nil {
+		return limiter.UUIDIPFanoutReservationOutcome{Kind: limiter.UUIDIPFanoutOutcomeProtocol}
+	}
+
+	outcome := limiter.UUIDIPFanoutReservationOutcome{
+		Scope:         data.Scope,
+		UniqueIPCount: data.UniqueIPCount,
+		Threshold:     data.Threshold,
+		WindowSeconds: data.WindowSeconds,
+	}
+	switch data.Kind {
+	case panel.FanoutReservationAllow:
+		outcome.Kind = limiter.UUIDIPFanoutOutcomeAllow
+	case panel.FanoutReservationReject:
+		outcome.Kind = limiter.UUIDIPFanoutOutcomeReject
+	default:
+		outcome.Kind = limiter.UUIDIPFanoutOutcomeProtocol
+	}
+	return outcome
 }
 
 func uuidIPFanoutLimiterGlobal(state panel.UUIDIPFanoutGlobalState) limiter.UUIDIPFanoutGlobalState {

@@ -110,6 +110,19 @@ func TestApplyUserDeltaEventsNoEventsKeepsList(t *testing.T) {
 	assertUserListEqual(t, got, oldUsers)
 }
 
+func TestCompareUserListDetectsFanoutExemptChange(t *testing.T) {
+	oldUsers := []panel.UserInfo{{Id: 7, Uuid: "device-a", FanoutExempt: false}}
+	newUsers := []panel.UserInfo{{Id: 7, Uuid: "device-a", FanoutExempt: true}}
+
+	deleted, added, modified := compareUserList(oldUsers, newUsers)
+	if len(deleted) != 0 || len(added) != 0 || len(modified) != 1 {
+		t.Fatalf("deleted=%+v added=%+v modified=%+v", deleted, added, modified)
+	}
+	if !modified[0].FanoutExempt {
+		t.Fatalf("modified user did not carry fanout exemption: %+v", modified[0])
+	}
+}
+
 func TestRemoveExpiredUsers(t *testing.T) {
 	oldUsers := []panel.UserInfo{
 		{Id: 1, Uuid: "expired", ExpiredAt: 100},
