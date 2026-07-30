@@ -231,3 +231,13 @@ git diff --check
 - 下次先查：节点配置是否收到 enabled/mode/window/threshold/cooldown/CIDR；用户是否收到 `fanout_exempt`；`CheckLimit` 是否在在线状态写入前返回 `uuid_ip_fanout_exceeded`；事件失败后队列是否保持有界；全局 revision 是否前进且离线快照没有回退。
 - 相关文件：`limiter/uuid_ip_fanout.go`、`limiter/limiter.go`、`api/v2board/node.go`、`api/v2board/user.go`、`node/controller.go`、`node/task.go`、`node/user.go`、`node/offline_state.go`、`core/app/dispatcher/default.go`。
 - 相关提交：`d65377b`、`97fbb69`。
+
+## 2026-07-30：Windows 测试版本探测不能递归执行测试二进制
+
+- 症状：执行 `go test ./api/v2board ./limiter ./node` 时三个包的断言均显示 `ok`，但 `node` 包会持续派生 `node.test.exe`，最终因临时测试文件仍被占用而报 `Access is denied`，并造成短时本机进程与 CPU 压力。
+- 影响链：节点测试 -> `node.localVersion()` -> `common/version.FromCommand()` -> 以 `version` 参数执行当前 `.test.exe` -> `TestMain` -> 再次运行测试。
+- 根因：`TestMain` 只有同时存在 `V2NODE_TEST_VERSION_HELPER=1` 时才处理 `version` 参数；未设置该环境变量的测试路径会把版本探测子进程当完整测试再次执行。
+- 修复：测试二进制只要收到首个 `version` 参数就输出测试版本并退出。该改动仅影响测试护栏，不改变正式 v2node 的版本探测与节点运行行为。
+- 验证：设置 `GOEXPERIMENT=jsonv2` 后运行 `go test -count=1 ./api/v2board ./limiter ./node`，三个包全部通过，退出码为 0，且 `node.test` 残留进程数为 0。
+- 下次先查：Windows 上若 Go 测试断言显示 `ok` 但退出清理失败，先检查 `node.test.exe` 数量与 `TestMain` 的命令参数分支，不要先归因于 Go 临时目录或杀毒软件。
+- 相关文件与提交：`node/user_delta_test.go`、`node/update.go`、`common/version/version.go`；预约功能合入 `dev` 的节点提交为 `a1e14de`，测试护栏提交为 `6e637cb`。以上为本地分支状态，尚未推送或发布。
