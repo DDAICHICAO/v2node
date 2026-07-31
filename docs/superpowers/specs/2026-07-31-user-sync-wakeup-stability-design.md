@@ -42,14 +42,15 @@
 - `fallback`：仅在 WebSocket 不可用时短轮询。
 - `closed`：运行时退出。
 
-同步函数返回的普通错误和 `UserSyncRetryError` 都属于追赶错误。`UserSyncRetryError` 使用其 `After`（最少 500ms，并保留稳定 jitter）；其他错误使用配置的 fallback 间隔。ACK 通道缺失或 ACK 写失败属于连接错误，立即交给外层关闭并重连。
+同步函数返回的普通错误和 `UserSyncRetryError` 都属于追赶错误。`UserSyncRetryError` 使用其 `After`（最少 500ms，并保留稳定 jitter）；其他错误使用配置的 fallback 间隔。单次 HTTP 请求自己的 `context.Canceled` 或 `context.DeadlineExceeded` 也属于追赶错误，只有传入 `serveConnection()` 的父上下文实际结束时才退出运行时。ACK 通道缺失或 ACK 写失败属于连接错误，立即交给外层关闭并重连。
 
 ## 测试
 
 1. 构造同一条假连接：第一次同步失败，等待期间收到 ping 并成功 pong，第二次同步成功后 ACK 最高 revision；断言两次同步之间连接没有关闭。
 2. 构造 ACK 写失败：断言读循环退出，让外层走连接恢复，而不是在坏连接上无限重试。
 3. 构造 500ms Retry-After：等待期间再发送更高 revision 的 dirty，断言 revision 被合并且第二次同步不会提前发生。
-4. 保留既有测试，确认失败同步不 ACK、合并最高 revision、稳定 jitter、全量同步熔断等行为不变。
+4. 构造第一次同步返回 `context.DeadlineExceeded`、第二次成功：断言父上下文仍有效时连接不关闭，重试后进入 push。
+5. 保留既有测试，确认失败同步不 ACK、合并最高 revision、稳定 jitter、全量同步熔断等行为不变。
 
 ## 发布边界
 

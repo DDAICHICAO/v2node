@@ -261,8 +261,8 @@ func (r *userSyncRuntime) serveConnection(
 				err = r.activatePush(ctx)
 			}
 			if err != nil {
-				if isContextError(err) {
-					return reachedPush, err
+				if ctx.Err() != nil {
+					return reachedPush, ctx.Err()
 				}
 				var transportErr *userSyncWakeupTransportError
 				if errors.As(err, &transportErr) {

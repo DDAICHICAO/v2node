@@ -483,6 +483,76 @@ func TestUserSyncRuntimeKeepsConnectionWhileCatchUpRetries(t *testing.T) {
 	}
 }
 
+func TestUserSyncRuntimeKeepsConnectionAfterRequestDeadline(t *testing.T) {
+	conn := newFakeUserSyncWakeupConnection()
+	firstAttempt := make(chan struct{})
+	secondAttempt := make(chan struct{})
+	var syncCalls atomic.Int32
+	runtime := &userSyncRuntime{
+		config: &panel.UserSyncWakeupConfig{
+			Enabled:          true,
+			HeartbeatSeconds: 10,
+			FallbackPollMS:   20,
+			MergeMS:          1,
+		},
+		mode: userSyncModeFallback,
+		syncFn: func(context.Context) (int64, error) {
+			switch syncCalls.Add(1) {
+			case 1:
+				close(firstAttempt)
+				return 0, context.DeadlineExceeded
+			default:
+				close(secondAttempt)
+				return 99, nil
+			}
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := serveUserSyncRuntimeForTest(ctx, runtime, conn)
+
+	select {
+	case <-firstAttempt:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("first catch-up attempt did not run")
+	}
+	select {
+	case result := <-done:
+		cancel()
+		t.Fatalf("connection exited after request deadline: %v", result.err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	select {
+	case <-secondAttempt:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("catch-up was not retried after request deadline")
+	}
+	select {
+	case result := <-done:
+		cancel()
+		t.Fatalf("connection exited after successful retry: %v", result.err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	if got := conn.closeCalls.Load(); got != 0 {
+		cancel()
+		<-done
+		t.Fatalf("connection closed %d times before retry succeeded", got)
+	}
+
+	cancel()
+	result := <-done
+	if !result.reachedPush {
+		t.Fatal("successful retry did not report push state")
+	}
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("serve connection error=%v", result.err)
+	}
+}
+
 func TestUserSyncRuntimeReconnectsAfterAckWriteFailure(t *testing.T) {
 	conn := newFakeUserSyncWakeupConnection()
 	conn.appliedErr = errors.New("ack write failed")

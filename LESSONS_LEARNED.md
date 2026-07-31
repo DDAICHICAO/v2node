@@ -292,3 +292,11 @@ git diff --check
 - WebSocket 协议：`api/v2board/wakeup.go`
 - 回归测试：`node/user_delta_test.go`
 - 设计与计划：`docs/superpowers/specs/2026-07-31-user-sync-wakeup-stability-design.md`、`docs/superpowers/plans/2026-07-31-user-sync-wakeup-stability.md`
+
+### v5.0.0.60 灰度补充：单次 HTTP deadline 不是运行时退出
+
+- 症状：原 3 个灰度节点升级到 `v5.0.0.60` 后，小用户范围节点能够稳定进入 push；全量用户响应约 19.5 秒的节点仍按约 15 秒周期反复断开和重连。
+- 根因：面板请求超过 v2node 默认 15 秒 HTTP timeout 时，Resty 返回 `context.DeadlineExceeded`。`serveConnection()` 用 `isContextError(err)` 同时判断父运行时退出和单次请求超时，因而把可重试的请求 deadline 错判为必须关闭 WebSocket。
+- 修复：追赶失败后只在传入的父 `ctx.Err()` 非空时退出运行时；父上下文仍有效时，单次请求的 `context.Canceled` / `context.DeadlineExceeded` 与其他同步错误一样保留当前连接并按 fallback 间隔重试。读取、pong、ACK 等真实传输错误仍立即交给外层重连。
+- 验证：新增回归先稳定失败于 `connection exited after request deadline`，修复后与普通追赶失败、ACK 写失败测试共同通过；`GOEXPERIMENT=jsonv2 go test ./...`、`go vet ./...` 和 `git diff --check` 通过。
+- 下次先查：若只有大权限范围节点反复重连，先比较 `/UniProxy/user?force_full=1` 的服务端耗时与 v2node `DefaultNodeTimeout`，并区分“请求 deadline”与“父运行时已取消”；不要仅凭错误类型包含 `context deadline exceeded` 就断开 WebSocket。
