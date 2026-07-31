@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -34,6 +35,7 @@ type Controller struct {
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
 	nodeInfoMonitorPeriodic *task.Task
+	aliveStatePeriodic      *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
 	store                   *offlineStateStore
@@ -41,6 +43,11 @@ type Controller struct {
 	startedOffline          bool
 	offlineTracker          offlineTracker
 	pendingNodeInfo         *panel.NodeInfo
+	userSyncMu              sync.Mutex
+	stateMu                 sync.Mutex
+	userSyncCancel          context.CancelFunc
+	userSyncDone            chan struct{}
+	userSyncRuntime         *userSyncRuntime
 }
 
 // NewController return a Node controller with default parameters.
@@ -125,7 +132,9 @@ func (c *Controller) Start(x *core.V2Core) error {
 }
 
 func (c *Controller) persistOfflineState(info *panel.NodeInfo) error {
-	return c.persistOfflineStateAt(
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.persistOfflineStateAtLocked(
 		info,
 		c.userList,
 		c.apiClient.UserSyncSeq(),
@@ -133,6 +142,16 @@ func (c *Controller) persistOfflineState(info *panel.NodeInfo) error {
 }
 
 func (c *Controller) persistOfflineStateAt(
+	info *panel.NodeInfo,
+	users []panel.UserInfo,
+	seq int64,
+) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.persistOfflineStateAtLocked(info, users, seq)
+}
+
+func (c *Controller) persistOfflineStateAtLocked(
 	info *panel.NodeInfo,
 	users []panel.UserInfo,
 	seq int64,
@@ -310,9 +329,11 @@ func cloneUUIDIPFanoutGlobalState(state panel.UUIDIPFanoutGlobalState) panel.UUI
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
-	limiter.DeleteLimiter(c.tag)
 	if c.nodeInfoMonitorPeriodic != nil {
 		c.nodeInfoMonitorPeriodic.Close()
+	}
+	if c.aliveStatePeriodic != nil {
+		c.aliveStatePeriodic.Close()
 	}
 	if c.userReportPeriodic != nil {
 		c.userReportPeriodic.Close()
@@ -320,6 +341,8 @@ func (c *Controller) Close() error {
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
+	c.closeUserSyncRuntime()
+	limiter.DeleteLimiter(c.tag)
 	err := c.server.DelNode(c.tag)
 	if err != nil {
 		return fmt.Errorf("del node error: %s", err)

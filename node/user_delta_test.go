@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/conf"
@@ -236,6 +238,113 @@ func TestCommitUserStatePersistFailureRestoresPreviousState(t *testing.T) {
 	assertUserListEqual(t, current, previous)
 	if seq != 10 {
 		t.Fatalf("sequence advanced to %d", seq)
+	}
+}
+
+func TestUserSyncRuntimeMergesWakeupsAndAcknowledgesHighestRevision(t *testing.T) {
+	syncCalls := 0
+	var applied []panel.UserSyncAppliedMessage
+	runtime := &userSyncRuntime{
+		syncFn: func(context.Context) (int64, error) {
+			syncCalls++
+			return 99, nil
+		},
+		ackFn: func(_ context.Context, message panel.UserSyncAppliedMessage) error {
+			applied = append(applied, message)
+			return nil
+		},
+	}
+	runtime.enqueueRevision(40)
+	runtime.enqueueRevision(42)
+	if err := runtime.flushPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if syncCalls != 1 {
+		t.Fatalf("sync calls=%d, want 1", syncCalls)
+	}
+	if len(applied) != 1 || applied[0].Revision != 42 || applied[0].SyncSeq != 99 {
+		t.Fatalf("acks=%v", applied)
+	}
+}
+
+func TestUserSyncRuntimeDoesNotAckFailedSync(t *testing.T) {
+	acked := false
+	runtime := &userSyncRuntime{
+		syncFn: func(context.Context) (int64, error) {
+			return 0, errors.New("panel down")
+		},
+		ackFn: func(context.Context, panel.UserSyncAppliedMessage) error {
+			acked = true
+			return nil
+		},
+	}
+	runtime.enqueueRevision(42)
+	if err := runtime.flushPending(context.Background()); err == nil {
+		t.Fatal("failed sync accepted")
+	}
+	if acked {
+		t.Fatal("failed sync was acknowledged")
+	}
+}
+
+func TestUserSyncRuntimeFallsBackWithStableJitter(t *testing.T) {
+	first := stableUserSyncJitter("instance-1")
+	second := stableUserSyncJitter("instance-1")
+	if first != second || first < 0 || first >= 500*time.Millisecond {
+		t.Fatalf("unstable jitter: %v %v", first, second)
+	}
+}
+
+func TestUserSyncRuntimeCatchesUpBeforePushMode(t *testing.T) {
+	runtime := &userSyncRuntime{
+		mode: userSyncModeFallback,
+		syncFn: func(context.Context) (int64, error) {
+			return 0, errors.New("catch-up failed")
+		},
+	}
+	if err := runtime.activatePush(context.Background()); err == nil {
+		t.Fatal("failed catch-up accepted")
+	}
+	if runtime.mode == userSyncModePush {
+		t.Fatal("push mode activated before catch-up")
+	}
+}
+
+func TestUserSyncRuntimeLegacyPanelUsesPullInterval(t *testing.T) {
+	runtime := &userSyncRuntime{legacyInterval: 60 * time.Second}
+	if got := runtime.pollInterval(nil); got != 60*time.Second {
+		t.Fatalf("legacy interval=%v", got)
+	}
+}
+
+func TestNodeInfoMonitorDoesNotSynchronizeUsers(t *testing.T) {
+	source, err := os.ReadFile("task.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(source), "func (c *Controller) nodeInfoMonitor")
+	if start < 0 {
+		t.Fatal("nodeInfoMonitor start not found")
+	}
+	end := strings.Index(string(source)[start:], "func (c *Controller) queueReload")
+	if end < 0 {
+		t.Fatal("nodeInfoMonitor end not found")
+	}
+	body := string(source)[start : start+end]
+	if strings.Contains(body, "syncUserState(") {
+		t.Fatal("config task still synchronizes users")
+	}
+}
+
+func TestAliveStateRefreshRunsIndependentlyFromUserDelta(t *testing.T) {
+	source, err := os.ReadFile("task.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	if !strings.Contains(text, `Name:            "refreshAliveStateTask"`) ||
+		!strings.Contains(text, "Execute:         c.refreshAliveStateTask") {
+		t.Fatal("independent alive task missing")
 	}
 }
 

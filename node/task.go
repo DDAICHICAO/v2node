@@ -13,11 +13,19 @@ import (
 )
 
 func (c *Controller) startTasks(node *panel.NodeInfo) {
+	c.startUserSyncRuntime(node)
 	// fetch node info task
 	c.nodeInfoMonitorPeriodic = &task.Task{
 		Name:            "nodeInfoMonitor",
 		Interval:        node.PullInterval,
 		Execute:         c.nodeInfoMonitor,
+		ReloadCh:        c.server.ReloadCh,
+		ReloadOnTimeout: false,
+	}
+	c.aliveStatePeriodic = &task.Task{
+		Name:            "refreshAliveStateTask",
+		Interval:        c.aliveStateRefreshInterval(),
+		Execute:         c.refreshAliveStateTask,
 		ReloadCh:        c.server.ReloadCh,
 		ReloadOnTimeout: false,
 	}
@@ -32,6 +40,8 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	log.WithField("tag", c.tag).Info("Start monitor node status")
 	// delay to start nodeInfoMonitor
 	_ = c.nodeInfoMonitorPeriodic.Start(false)
+	log.WithField("tag", c.tag).Info("Start alive state refresh")
+	_ = c.aliveStatePeriodic.Start(false)
 	log.WithField("tag", c.tag).Info("Start report node status")
 	_ = c.userReportPeriodic.Start(false)
 	if node.Security == panel.Tls {
@@ -65,13 +75,14 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 			return err
 		}
 		c.pendingNodeInfo = nil
+		c.recordPanelSuccess("config")
 		return nil
 	}
 
 	// get node info
 	newN, err := c.apiClient.GetNodeInfo(ctx)
 	if err != nil {
-		c.recordPanelFailure("sync", "get node info", err)
+		c.recordPanelFailure("config", "get node info", err)
 		return fmt.Errorf("get node info: %w", err)
 	}
 	if newN != nil {
@@ -90,23 +101,13 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 			return err
 		}
 		c.pendingNodeInfo = nil
+		c.recordPanelSuccess("config")
 		return nil
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 	c.checkUpdateTask(ctx)
 	c.checkStreamUnlockTask(ctx)
-
-	if _, err := c.syncUserState(ctx); err != nil {
-		c.recordPanelFailure("sync", "sync user state", err)
-		return err
-	}
-	c.recordPanelSuccess("sync")
-	if err := c.persistOfflineState(c.info); err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Persist synchronized offline snapshot failed")
-	}
+	c.recordPanelSuccess("config")
 	return nil
 }
 
@@ -191,6 +192,8 @@ func (c *Controller) commitUserState(
 	next []panel.UserInfo,
 	nextSeq int64,
 ) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	previous := append([]panel.UserInfo(nil), c.userList...)
 	return commitUserStateWith(
 		previous,
@@ -198,7 +201,7 @@ func (c *Controller) commitUserState(
 		nextSeq,
 		c.applyUserList,
 		func(users []panel.UserInfo, seq int64) error {
-			return c.persistOfflineStateAt(c.info, users, seq)
+			return c.persistOfflineStateAtLocked(c.info, users, seq)
 		},
 		c.apiClient.SetUserSyncSeq,
 	)
@@ -208,6 +211,8 @@ func (c *Controller) commitFetchedUserState(
 	next []panel.UserInfo,
 	snapshot *panel.UserListSnapshot,
 ) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	previous := append([]panel.UserInfo(nil), c.userList...)
 	return commitUserStateWith(
 		previous,
@@ -215,7 +220,7 @@ func (c *Controller) commitFetchedUserState(
 		snapshot.SyncSeq,
 		c.applyUserList,
 		func(users []panel.UserInfo, seq int64) error {
-			return c.persistOfflineStateAt(c.info, users, seq)
+			return c.persistOfflineStateAtLocked(c.info, users, seq)
 		},
 		func(int64) {
 			c.apiClient.CommitUserListSnapshot(snapshot)
@@ -223,7 +228,19 @@ func (c *Controller) commitFetchedUserState(
 	)
 }
 
-func (c *Controller) syncUserState(ctx context.Context) (int64, error) {
+func (c *Controller) syncUserState(
+	ctx context.Context,
+) (committedSeq int64, syncErr error) {
+	c.userSyncMu.Lock()
+	defer c.userSyncMu.Unlock()
+	defer func() {
+		if syncErr == nil {
+			c.recordPanelSuccess("sync")
+		} else if !isContextError(syncErr) {
+			c.recordPanelFailure("sync", "sync user state", syncErr)
+		}
+	}()
+
 	currentSeq := c.apiClient.UserSyncSeq()
 	delta, err := collectUserDeltaPages(
 		ctx,
@@ -345,6 +362,8 @@ func (c *Controller) refreshAliveState(ctx context.Context) error {
 		newDeviceAlive = deviceState.AliveDevices
 		newUUIDIPFanout = deviceState.UUIDIPFanout
 	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	c.aliveMap = cloneIntMap(newA)
 	c.deviceAliveMap = cloneIntMap(newDeviceAlive)
 	if c.limiter != nil {
@@ -353,6 +372,20 @@ func (c *Controller) refreshAliveState(ctx context.Context) error {
 			c.uuidIPFanoutGlobal = cloneUUIDIPFanoutGlobalState(newUUIDIPFanout)
 		}
 	}
+	return nil
+}
+
+func (c *Controller) refreshAliveStateTask(ctx context.Context) error {
+	if err := c.refreshAliveState(ctx); err != nil {
+		c.recordPanelFailure("alive", "refresh alive state", err)
+		return err
+	}
+	c.lastAliveRefresh = time.Now()
+	if err := c.persistOfflineState(c.info); err != nil {
+		c.recordPanelFailure("alive", "persist alive state", err)
+		return err
+	}
+	c.recordPanelSuccess("alive")
 	return nil
 }
 
