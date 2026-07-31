@@ -96,7 +96,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	c.checkUpdateTask(ctx)
 	c.checkStreamUnlockTask(ctx)
 
-	if err := c.syncUserState(ctx); err != nil {
+	if _, err := c.syncUserState(ctx); err != nil {
 		c.recordPanelFailure("sync", "sync user state", err)
 		return err
 	}
@@ -121,8 +121,116 @@ func (c *Controller) queueReload() error {
 	return nil
 }
 
-func (c *Controller) syncUserState(ctx context.Context) error {
-	delta, err := c.apiClient.GetUserDelta(ctx)
+type userDeltaFetcher func(context.Context, int64) (*panel.UserDeltaData, error)
+
+func collectUserDeltaPages(
+	ctx context.Context,
+	sinceSeq int64,
+	maxPages int,
+	fetch userDeltaFetcher,
+) (*panel.UserDeltaData, error) {
+	combined := &panel.UserDeltaData{LatestSeq: sinceSeq}
+	current := sinceSeq
+	for page := 0; page < maxPages; page++ {
+		delta, err := fetch(ctx, current)
+		if err != nil {
+			return nil, err
+		}
+		if delta == nil || delta.LatestSeq < current {
+			return nil, fmt.Errorf("invalid user delta page after seq %d", current)
+		}
+		if delta.FullRequired {
+			return delta, nil
+		}
+		if delta.HasMore && delta.LatestSeq <= current {
+			return nil, fmt.Errorf(
+				"user delta page did not advance after seq %d",
+				current,
+			)
+		}
+		combined.Events = append(combined.Events, delta.Events...)
+		combined.LatestSeq = delta.LatestSeq
+		combined.ServerTime = delta.ServerTime
+		current = delta.LatestSeq
+		if !delta.HasMore {
+			return combined, nil
+		}
+	}
+	return nil, &panel.UserSyncRetryError{
+		StatusCode: 503,
+		After:      500 * time.Millisecond,
+	}
+}
+
+func commitUserStateWith(
+	previous []panel.UserInfo,
+	next []panel.UserInfo,
+	nextSeq int64,
+	apply func([]panel.UserInfo) error,
+	persist func([]panel.UserInfo, int64) error,
+	setSeq func(int64),
+) error {
+	if err := apply(next); err != nil {
+		return err
+	}
+	if err := persist(next, nextSeq); err != nil {
+		if rollbackErr := apply(previous); rollbackErr != nil {
+			return fmt.Errorf(
+				"persist user snapshot: %w; rollback: %v",
+				err,
+				rollbackErr,
+			)
+		}
+		return fmt.Errorf("persist user snapshot: %w", err)
+	}
+	setSeq(nextSeq)
+	return nil
+}
+
+func (c *Controller) commitUserState(
+	next []panel.UserInfo,
+	nextSeq int64,
+) error {
+	previous := append([]panel.UserInfo(nil), c.userList...)
+	return commitUserStateWith(
+		previous,
+		append([]panel.UserInfo(nil), next...),
+		nextSeq,
+		c.applyUserList,
+		func(users []panel.UserInfo, seq int64) error {
+			return c.persistOfflineStateAt(c.info, users, seq)
+		},
+		c.apiClient.SetUserSyncSeq,
+	)
+}
+
+func (c *Controller) commitFetchedUserState(
+	next []panel.UserInfo,
+	snapshot *panel.UserListSnapshot,
+) error {
+	previous := append([]panel.UserInfo(nil), c.userList...)
+	return commitUserStateWith(
+		previous,
+		append([]panel.UserInfo(nil), next...),
+		snapshot.SyncSeq,
+		c.applyUserList,
+		func(users []panel.UserInfo, seq int64) error {
+			return c.persistOfflineStateAt(c.info, users, seq)
+		},
+		func(int64) {
+			c.apiClient.CommitUserListSnapshot(snapshot)
+		},
+	)
+}
+
+func (c *Controller) syncUserState(ctx context.Context) (int64, error) {
+	currentSeq := c.apiClient.UserSyncSeq()
+	delta, err := collectUserDeltaPages(
+		ctx,
+		currentSeq,
+		10,
+		c.apiClient.GetUserDeltaSince,
+	)
 	forceFullUserList := false
 	if err == nil && delta != nil && !delta.FullRequired {
 		if validateErr := validateUserDelta(delta); validateErr != nil {
@@ -132,52 +240,33 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 			}).Warn("User delta invalid, fallback to full user list")
 			forceFullUserList = true
 		} else {
-			if err := c.refreshAliveStateIfDue(ctx, false); err != nil {
-				return err
-			}
 			pruneUnix, canPrune := userDeltaPruneTime(delta)
-			if len(delta.Events) == 0 {
-				log.WithField("tag", c.tag).Debug("User delta no change")
-				if canPrune {
-					if err := c.pruneExpiredUsers(pruneUnix); err != nil {
-						return err
-					}
-				}
-				c.apiClient.SetUserSyncSeq(delta.LatestSeq)
-				return nil
-			}
 			newU, changed := applyUserDeltaEvents(c.userList, delta.Events)
-			if !changed {
-				log.WithField("tag", c.tag).Debug("User delta no applicable change")
-				if canPrune {
-					if err := c.pruneExpiredUsers(pruneUnix); err != nil {
-						return err
-					}
-				}
-				c.apiClient.SetUserSyncSeq(delta.LatestSeq)
-				return nil
-			}
-			if err := c.applyUserList(newU); err != nil {
-				return err
-			}
 			if canPrune {
-				if err := c.pruneExpiredUsers(pruneUnix); err != nil {
-					return err
-				}
+				var expired bool
+				newU, expired = removeExpiredUsers(newU, pruneUnix)
+				changed = changed || expired
 			}
-			c.apiClient.SetUserSyncSeq(delta.LatestSeq)
-			return nil
+			if !changed && delta.LatestSeq == currentSeq {
+				log.WithField("tag", c.tag).Debug("User delta no applicable change")
+				return currentSeq, nil
+			}
+			if err := c.commitUserState(newU, delta.LatestSeq); err != nil {
+				return currentSeq, err
+			}
+			return delta.LatestSeq, nil
 		}
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+			return currentSeq, err
 		}
 		if !errors.Is(err, panel.ErrUserDeltaUnsupported) {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Warn("Get user delta failed, fallback to full user list")
+			}).Warn("Get user delta failed")
+			return currentSeq, err
 		}
 	} else if delta != nil && delta.FullRequired {
 		log.WithField("tag", c.tag).Info("User delta requires full user list")
@@ -185,36 +274,31 @@ func (c *Controller) syncUserState(ctx context.Context) error {
 	}
 
 	// get user info
-	var newU []panel.UserInfo
-	if forceFullUserList {
-		newU, err = c.apiClient.GetFullUserList(ctx)
-	} else {
-		newU, err = c.apiClient.GetUserList(ctx)
-	}
+	snapshot, err := c.apiClient.FetchUserList(ctx, forceFullUserList)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
 		}).Error("Get user list failed")
-		return fmt.Errorf("get user list: %w", err)
-	}
-
-	if err := c.refreshAliveStateIfDue(ctx, true); err != nil {
-		return err
+		return currentSeq, fmt.Errorf("get user list: %w", err)
 	}
 
 	// node no changed, check users
-	if newU == nil {
+	if snapshot.NotModified && snapshot.SyncSeq == currentSeq {
 		log.WithField("tag", c.tag).Debug("User list no change")
-		return nil
+		return currentSeq, nil
 	}
-	if err := c.applyUserList(newU); err != nil {
-		return err
+	newU := c.userList
+	if !snapshot.NotModified {
+		newU = snapshot.Users
 	}
 	if pruneUnix, canPrune := userDeltaPruneTime(delta); canPrune {
-		return c.pruneExpiredUsers(pruneUnix)
+		newU, _ = removeExpiredUsers(newU, pruneUnix)
 	}
-	return nil
+	if err := c.commitFetchedUserState(newU, snapshot); err != nil {
+		return currentSeq, err
+	}
+	return snapshot.SyncSeq, nil
 }
 
 func (c *Controller) refreshAliveStateIfDue(ctx context.Context, force bool) error {

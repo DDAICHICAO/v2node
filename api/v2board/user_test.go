@@ -284,6 +284,51 @@ func TestGetFullUserListSkipsIfNoneMatch(t *testing.T) {
 	}
 }
 
+func TestFetchUserListDoesNotAdvanceSequenceBeforeCommit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-User-Sync-Seq", "12")
+		_, _ = w.Write([]byte(`{"users":[]}`))
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL)}
+	c.SetUserSyncSeq(10)
+	snapshot, err := c.FetchUserList(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot == nil || snapshot.SyncSeq != 12 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	if got := c.UserSyncSeq(); got != 10 {
+		t.Fatalf("sequence advanced before commit: %d", got)
+	}
+}
+
+func TestGetUserDeltaSinceUsesExplicitPageBoundary(t *testing.T) {
+	var gotSince string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSince = r.URL.Query().Get("since_seq")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"latest_seq":12,"has_more":true,"events":[]}}`))
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL)}
+	c.SetUserSyncSeq(99)
+	delta, err := c.GetUserDeltaSince(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSince != "10" || delta == nil || delta.LatestSeq != 12 || !delta.HasMore {
+		t.Fatalf("since=%q delta=%+v", gotSince, delta)
+	}
+	if c.UserSyncSeq() != 99 {
+		t.Fatalf("explicit page fetch changed global sequence: %d", c.UserSyncSeq())
+	}
+}
+
 func TestFanoutContractsDecodeAndReport(t *testing.T) {
 	var reported bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

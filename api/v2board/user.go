@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -43,6 +44,13 @@ type UserListBody struct {
 	Users []UserInfo `json:"users" msgpack:"users"`
 }
 
+type UserListSnapshot struct {
+	Users       []UserInfo
+	SyncSeq     int64
+	NotModified bool
+	etag        string
+}
+
 const (
 	UserDeltaActionUpsert = "user_upsert"
 	UserDeltaActionDelete = "user_delete"
@@ -57,8 +65,25 @@ type UserDeltaResponse struct {
 type UserDeltaData struct {
 	FullRequired bool             `json:"full_required"`
 	LatestSeq    int64            `json:"latest_seq"`
+	HasMore      bool             `json:"has_more"`
 	ServerTime   int64            `json:"server_time"`
 	Events       []UserDeltaEvent `json:"events"`
+}
+
+type UserSyncRetryError struct {
+	StatusCode int
+	After      time.Duration
+}
+
+func (e *UserSyncRetryError) Error() string {
+	if e == nil {
+		return "user sync temporarily unavailable"
+	}
+	return fmt.Sprintf(
+		"user sync temporarily unavailable: status=%d retry_after=%s",
+		e.StatusCode,
+		e.After,
+	)
 }
 
 type UserDeltaEvent struct {
@@ -141,14 +166,30 @@ func IsValidationError(err error) bool {
 
 // GetUserList will pull user from v2board
 func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
-	return c.getUserList(ctx, false)
+	snapshot, err := c.FetchUserList(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	c.CommitUserListSnapshot(snapshot)
+	if snapshot.NotModified {
+		return nil, nil
+	}
+	return snapshot.Users, nil
 }
 
 func (c *Client) GetFullUserList(ctx context.Context) ([]UserInfo, error) {
-	return c.getUserList(ctx, true)
+	snapshot, err := c.FetchUserList(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	c.CommitUserListSnapshot(snapshot)
+	return snapshot.Users, nil
 }
 
-func (c *Client) getUserList(ctx context.Context, force bool) ([]UserInfo, error) {
+func (c *Client) FetchUserList(
+	ctx context.Context,
+	force bool,
+) (*UserListSnapshot, error) {
 	const path = "/api/v1/server/UniProxy/user"
 	req := c.client.R().
 		SetContext(ctx).
@@ -171,8 +212,21 @@ func (c *Client) getUserList(ctx context.Context, force bool) ([]UserInfo, error
 	defer r.RawResponse.Body.Close()
 
 	if r.StatusCode() == 304 {
-		c.updateUserSyncSeqFromHeader(r.Header().Get("X-User-Sync-Seq"))
-		return nil, nil
+		return &UserListSnapshot{
+			SyncSeq: parseUserSyncSeqHeader(
+				r.Header().Get("X-User-Sync-Seq"),
+				c.UserSyncSeq(),
+			),
+			NotModified: true,
+			etag:        c.userEtag,
+		}, nil
+	}
+	if r.StatusCode() >= 400 {
+		return nil, fmt.Errorf(
+			"get user list http status %d: %s",
+			r.StatusCode(),
+			bodySnippet(r.Body()),
+		)
 	}
 	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
@@ -210,17 +264,43 @@ func (c *Client) getUserList(ctx context.Context, force bool) ([]UserInfo, error
 			userlist.Users = append(userlist.Users, u)
 		}
 	}
-	c.userEtag = r.Header().Get("ETag")
-	c.updateUserSyncSeqFromHeader(r.Header().Get("X-User-Sync-Seq"))
 	if userlist.Users == nil {
 		userlist.Users = []UserInfo{}
 	}
-	return userlist.Users, nil
+	return &UserListSnapshot{
+		Users: userlist.Users,
+		SyncSeq: parseUserSyncSeqHeader(
+			r.Header().Get("X-User-Sync-Seq"),
+			c.UserSyncSeq(),
+		),
+		etag: r.Header().Get("ETag"),
+	}, nil
+}
+
+func (c *Client) CommitUserListSnapshot(snapshot *UserListSnapshot) {
+	if c == nil || snapshot == nil {
+		return
+	}
+	c.userSyncMu.Lock()
+	defer c.userSyncMu.Unlock()
+	if snapshot.SyncSeq < c.userSyncSeq {
+		return
+	}
+	c.userSyncSeq = snapshot.SyncSeq
+	if snapshot.etag != "" {
+		c.userEtag = snapshot.etag
+	}
 }
 
 func (c *Client) GetUserDelta(ctx context.Context) (*UserDeltaData, error) {
+	return c.GetUserDeltaSince(ctx, c.UserSyncSeq())
+}
+
+func (c *Client) GetUserDeltaSince(
+	ctx context.Context,
+	sinceSeq int64,
+) (*UserDeltaData, error) {
 	const path = "/api/v2/server/user-delta"
-	sinceSeq := c.UserSyncSeq()
 	r, err := c.client.R().
 		SetContext(ctx).
 		SetQueryParam("since_seq", strconv.FormatInt(sinceSeq, 10)).
@@ -270,15 +350,15 @@ func (c *Client) MarkUserSyncFullRequired() {
 }
 
 func (c *Client) updateUserSyncSeqFromHeader(value string) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return
+	c.SetUserSyncSeq(parseUserSyncSeqHeader(value, c.UserSyncSeq()))
+}
+
+func parseUserSyncSeqHeader(value string, fallback int64) int64 {
+	seq, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || seq < fallback {
+		return fallback
 	}
-	seq, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || seq < 0 {
-		return
-	}
-	c.SetUserSyncSeq(seq)
+	return seq
 }
 
 // GetUserAlive will fetch the alive_ip count for users

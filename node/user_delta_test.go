@@ -2,11 +2,13 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -171,6 +173,72 @@ func TestValidateUserDeltaRejectsLatestSeqBehindEvent(t *testing.T) {
 	}
 }
 
+func TestCollectUserDeltaPagesKeepsPageBoundary(t *testing.T) {
+	calls := make([]int64, 0, 2)
+	pages := map[int64]*panel.UserDeltaData{
+		10: {
+			LatestSeq: 12,
+			HasMore:   true,
+			Events: []panel.UserDeltaEvent{
+				{Seq: 11, UserID: 101, Action: panel.UserDeltaActionDelete},
+				{Seq: 12, UserID: 102, Action: panel.UserDeltaActionDelete},
+			},
+		},
+		12: {
+			LatestSeq: 14,
+			Events: []panel.UserDeltaEvent{
+				{Seq: 13, UserID: 103, Action: panel.UserDeltaActionDelete},
+				{Seq: 14, UserID: 104, Action: panel.UserDeltaActionDelete},
+			},
+		},
+	}
+
+	result, err := collectUserDeltaPages(
+		context.Background(),
+		10,
+		10,
+		func(_ context.Context, since int64) (*panel.UserDeltaData, error) {
+			calls = append(calls, since)
+			return pages[since], nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []int64{10, 12}) {
+		t.Fatalf("calls=%v", calls)
+	}
+	if result.LatestSeq != 14 || len(result.Events) != 4 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestCommitUserStatePersistFailureRestoresPreviousState(t *testing.T) {
+	previous := []panel.UserInfo{{Id: 1, Uuid: "old"}}
+	next := []panel.UserInfo{{Id: 1, Uuid: "new"}}
+	current := append([]panel.UserInfo(nil), previous...)
+	seq := int64(10)
+	apply := func(users []panel.UserInfo) error {
+		current = append([]panel.UserInfo(nil), users...)
+		return nil
+	}
+	persist := func([]panel.UserInfo, int64) error {
+		return errors.New("disk full")
+	}
+	setSeq := func(nextSeq int64) {
+		seq = nextSeq
+	}
+
+	err := commitUserStateWith(previous, next, 11, apply, persist, setSeq)
+	if err == nil {
+		t.Fatal("snapshot failure accepted")
+	}
+	assertUserListEqual(t, current, previous)
+	if seq != 10 {
+		t.Fatalf("sequence advanced to %d", seq)
+	}
+}
+
 func TestApplyUserListReturnsAddUsersError(t *testing.T) {
 	const tag = "apply-user-list-error"
 	limiter.Init()
@@ -208,7 +276,7 @@ func TestSyncUserStateKeepsUsersWhenPanelUnavailable(t *testing.T) {
 	original := []panel.UserInfo{{Id: 1, Uuid: "cached-user"}}
 	c := &Controller{apiClient: client, userList: append([]panel.UserInfo(nil), original...)}
 
-	if err := c.syncUserState(context.Background()); err == nil {
+	if _, err := c.syncUserState(context.Background()); err == nil {
 		t.Fatal("expected panel error")
 	}
 	assertUserListEqual(t, c.userList, original)

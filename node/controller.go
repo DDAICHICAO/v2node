@@ -125,6 +125,18 @@ func (c *Controller) Start(x *core.V2Core) error {
 }
 
 func (c *Controller) persistOfflineState(info *panel.NodeInfo) error {
+	return c.persistOfflineStateAt(
+		info,
+		c.userList,
+		c.apiClient.UserSyncSeq(),
+	)
+}
+
+func (c *Controller) persistOfflineStateAt(
+	info *panel.NodeInfo,
+	users []panel.UserInfo,
+	seq int64,
+) error {
 	if c.store == nil {
 		return errors.New("offline state store is nil")
 	}
@@ -134,11 +146,11 @@ func (c *Controller) persistOfflineState(info *panel.NodeInfo) error {
 		NodeID:       c.conf.NodeID,
 		SavedAt:      time.Now().Unix(),
 		NodeInfo:     info,
-		Users:        append([]panel.UserInfo{}, c.userList...),
+		Users:        append([]panel.UserInfo{}, users...),
 		Alive:        cloneIntMap(c.aliveMap),
 		DeviceAlive:  cloneIntMap(c.deviceAliveMap),
 		UUIDIPFanout: cloneUUIDIPFanoutGlobalState(c.uuidIPFanoutGlobal),
-		UserSyncSeq:  c.apiClient.UserSyncSeq(),
+		UserSyncSeq:  seq,
 	}
 	return c.store.Save(*c.conf, state)
 }
