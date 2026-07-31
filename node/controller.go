@@ -30,7 +30,6 @@ type Controller struct {
 	aliveMap                map[int]int
 	deviceAliveMap          map[int]int
 	uuidIPFanoutGlobal      panel.UUIDIPFanoutGlobalState
-	lastAliveRefresh        time.Time
 	netSampler              *netstat.Sampler
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
@@ -48,6 +47,9 @@ type Controller struct {
 	userSyncCancel          context.CancelFunc
 	userSyncDone            chan struct{}
 	userSyncRuntime         *userSyncRuntime
+	expiryWakeCh            chan struct{}
+	expiryCancel            context.CancelFunc
+	expiryDone              chan struct{}
 }
 
 // NewController return a Node controller with default parameters.
@@ -329,6 +331,7 @@ func cloneUUIDIPFanoutGlobalState(state panel.UUIDIPFanoutGlobalState) panel.UUI
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
+	c.cancelUserExpiryScheduler()
 	if c.nodeInfoMonitorPeriodic != nil {
 		c.nodeInfoMonitorPeriodic.Close()
 	}
@@ -342,6 +345,7 @@ func (c *Controller) Close() error {
 		c.renewCertPeriodic.Close()
 	}
 	c.closeUserSyncRuntime()
+	c.waitUserExpiryScheduler()
 	limiter.DeleteLimiter(c.tag)
 	err := c.server.DelNode(c.tag)
 	if err != nil {

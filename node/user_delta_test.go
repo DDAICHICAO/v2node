@@ -348,6 +348,30 @@ func TestAliveStateRefreshRunsIndependentlyFromUserDelta(t *testing.T) {
 	}
 }
 
+func TestNextUserExpiryChoosesEarliestFutureTimestamp(t *testing.T) {
+	users := []panel.UserInfo{
+		{Id: 1, ExpiredAt: 200},
+		{Id: 2, ExpiredAt: 150},
+		{Id: 3, ExpiredAt: 0},
+	}
+	got, ok := nextUserExpiry(users, 100)
+	if !ok || got != 150 {
+		t.Fatalf("got=%d ok=%v", got, ok)
+	}
+}
+
+func TestLocalExpiryRemovesAllRowsForExpiredUser(t *testing.T) {
+	users := []panel.UserInfo{
+		{Id: 1, Uuid: "device-a", ExpiredAt: 100},
+		{Id: 1, Uuid: "device-b", ExpiredAt: 100},
+		{Id: 2, Uuid: "active", ExpiredAt: 200},
+	}
+	got, changed := removeExpiredUsers(users, 101)
+	if !changed || len(got) != 1 || got[0].Id != 2 {
+		t.Fatalf("expired rows retained: changed=%v users=%v", changed, got)
+	}
+}
+
 func TestApplyUserListReturnsAddUsersError(t *testing.T) {
 	const tag = "apply-user-list-error"
 	limiter.Init()

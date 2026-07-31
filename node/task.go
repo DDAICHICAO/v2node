@@ -13,6 +13,7 @@ import (
 )
 
 func (c *Controller) startTasks(node *panel.NodeInfo) {
+	c.startUserExpiryScheduler()
 	c.startUserSyncRuntime(node)
 	// fetch node info task
 	c.nodeInfoMonitorPeriodic = &task.Task{
@@ -195,7 +196,7 @@ func (c *Controller) commitUserState(
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	previous := append([]panel.UserInfo(nil), c.userList...)
-	return commitUserStateWith(
+	err := commitUserStateWith(
 		previous,
 		append([]panel.UserInfo(nil), next...),
 		nextSeq,
@@ -205,6 +206,10 @@ func (c *Controller) commitUserState(
 		},
 		c.apiClient.SetUserSyncSeq,
 	)
+	if err == nil {
+		c.notifyUserExpiryScheduler()
+	}
+	return err
 }
 
 func (c *Controller) commitFetchedUserState(
@@ -214,7 +219,7 @@ func (c *Controller) commitFetchedUserState(
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	previous := append([]panel.UserInfo(nil), c.userList...)
-	return commitUserStateWith(
+	err := commitUserStateWith(
 		previous,
 		append([]panel.UserInfo(nil), next...),
 		snapshot.SyncSeq,
@@ -226,6 +231,10 @@ func (c *Controller) commitFetchedUserState(
 			c.apiClient.CommitUserListSnapshot(snapshot)
 		},
 	)
+	if err == nil {
+		c.notifyUserExpiryScheduler()
+	}
+	return err
 }
 
 func (c *Controller) syncUserState(
@@ -318,17 +327,6 @@ func (c *Controller) syncUserState(
 	return snapshot.SyncSeq, nil
 }
 
-func (c *Controller) refreshAliveStateIfDue(ctx context.Context, force bool) error {
-	if !force && !c.lastAliveRefresh.IsZero() && time.Since(c.lastAliveRefresh) < c.aliveStateRefreshInterval() {
-		return nil
-	}
-	if err := c.refreshAliveState(ctx); err != nil {
-		return err
-	}
-	c.lastAliveRefresh = time.Now()
-	return nil
-}
-
 func (c *Controller) aliveStateRefreshInterval() time.Duration {
 	const minInterval = 30 * time.Second
 	if c.info != nil && c.info.PullInterval > minInterval {
@@ -380,7 +378,6 @@ func (c *Controller) refreshAliveStateTask(ctx context.Context) error {
 		c.recordPanelFailure("alive", "refresh alive state", err)
 		return err
 	}
-	c.lastAliveRefresh = time.Now()
 	if err := c.persistOfflineState(c.info); err != nil {
 		c.recordPanelFailure("alive", "persist alive state", err)
 		return err
@@ -435,13 +432,4 @@ func (c *Controller) applyUserList(newU []panel.UserInfo) error {
 	c.userList = newU
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
-}
-
-func (c *Controller) pruneExpiredUsers(nowUnix int64) error {
-	newU, changed := removeExpiredUsers(c.userList, nowUnix)
-	if !changed {
-		return nil
-	}
-	log.WithField("tag", c.tag).Info("Prune expired users from local user list")
-	return c.applyUserList(newU)
 }
