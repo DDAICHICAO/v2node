@@ -7,11 +7,35 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/go-resty/resty/v2"
 )
+
+func TestWakeupCapabilityAndConfigContract(t *testing.T) {
+	if !slices.Contains(deviceLimitCapabilities, "user_sync_wakeup_v1") {
+		t.Fatal("user_sync_wakeup_v1 capability missing")
+	}
+	var base BaseConfig
+	err := json.Unmarshal([]byte(`{
+		"user_sync_wakeup":{
+			"enabled":true,
+			"path":"/api/v2/server/user-sync/wakeup",
+			"heartbeat_seconds":25,
+			"fallback_poll_ms":2000,
+			"merge_ms":250
+		}
+	}`), &base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.UserSyncWakeup == nil || !base.UserSyncWakeup.Enabled ||
+		base.UserSyncWakeup.FallbackPollMS != 2000 {
+		t.Fatalf("unexpected wakeup config: %#v", base.UserSyncWakeup)
+	}
+}
 
 func TestFanoutReservationHTTPClassification(t *testing.T) {
 	tests := []struct {

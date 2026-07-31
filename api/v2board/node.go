@@ -71,17 +71,51 @@ type Route struct {
 }
 
 type BaseConfig struct {
-	PushInterval               any                 `json:"push_interval"`
-	PullInterval               any                 `json:"pull_interval"`
-	DeviceOnlineMinTraffic     int                 `json:"device_online_min_traffic"`
-	NodeReportMinTraffic       int                 `json:"node_report_min_traffic"`
-	DeviceTrafficReport        bool                `json:"device_traffic_report"`
-	DeviceAliveReport          bool                `json:"device_alive_report"`
-	DeviceLimitByUUID          bool                `json:"device_limit_by_uuid"`
-	DeviceLimitEnforcementMode string              `json:"device_limit_enforcement_mode"`
-	UUIDIPFanoutGuard          *UUIDIPFanoutConfig `json:"uuid_ip_fanout_guard"`
+	PushInterval               any                   `json:"push_interval"`
+	PullInterval               any                   `json:"pull_interval"`
+	DeviceOnlineMinTraffic     int                   `json:"device_online_min_traffic"`
+	NodeReportMinTraffic       int                   `json:"node_report_min_traffic"`
+	DeviceTrafficReport        bool                  `json:"device_traffic_report"`
+	DeviceAliveReport          bool                  `json:"device_alive_report"`
+	DeviceLimitByUUID          bool                  `json:"device_limit_by_uuid"`
+	DeviceLimitEnforcementMode string                `json:"device_limit_enforcement_mode"`
+	UUIDIPFanoutGuard          *UUIDIPFanoutConfig   `json:"uuid_ip_fanout_guard"`
+	UserSyncWakeup             *UserSyncWakeupConfig `json:"user_sync_wakeup"`
 	// Optional seconds between SNTP Eclipse online refresh marks.
 	SntpEclipseOnlineRefresh any `json:"sntp_eclipse_online_refresh"`
+}
+
+type UserSyncWakeupConfig struct {
+	Enabled          bool   `json:"enabled"`
+	Path             string `json:"path"`
+	HeartbeatSeconds int    `json:"heartbeat_seconds"`
+	FallbackPollMS   int    `json:"fallback_poll_ms"`
+	MergeMS          int    `json:"merge_ms"`
+}
+
+func (c *UserSyncWakeupConfig) Normalize() {
+	if c == nil {
+		return
+	}
+	if !strings.HasPrefix(c.Path, "/") {
+		c.Path = "/api/v2/server/user-sync/wakeup"
+	}
+	c.HeartbeatSeconds = clampInt(c.HeartbeatSeconds, 10, 120, 25)
+	c.FallbackPollMS = clampInt(c.FallbackPollMS, 500, 10000, 2000)
+	c.MergeMS = clampInt(c.MergeMS, 50, 2000, 250)
+}
+
+func clampInt(value, minValue, maxValue, defaultValue int) int {
+	if value == 0 {
+		return defaultValue
+	}
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 type UUIDIPFanoutConfig struct {
@@ -213,6 +247,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	err = json.Unmarshal(r.Body(), cm)
 	if err != nil {
 		return nil, fmt.Errorf("decode node params error: %s; body=%s", err, bodySnippet(r.Body()))
+	}
+	if cm.BaseConfig != nil && cm.BaseConfig.UserSyncWakeup != nil {
+		cm.BaseConfig.UserSyncWakeup.Normalize()
 	}
 	switch cm.Protocol {
 	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless", "sntp-eclipse", "mieru":

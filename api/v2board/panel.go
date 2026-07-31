@@ -28,6 +28,7 @@ var deviceLimitCapabilities = []string{
 	"device_limit_by_uuid",
 	"stream_unlock_test",
 	"user_delta_sync",
+	"user_sync_wakeup_v1",
 	"uuid_ip_fanout_guard",
 	"uuid_ip_fanout_reservation_v1",
 	"device_limit_event_report",
