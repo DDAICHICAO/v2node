@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -221,6 +222,13 @@ func (c *Client) FetchUserList(
 			etag:        c.userEtag,
 		}, nil
 	}
+	if force && (r.StatusCode() == http.StatusTooManyRequests ||
+		r.StatusCode() == http.StatusServiceUnavailable) {
+		return nil, &UserSyncRetryError{
+			StatusCode: r.StatusCode(),
+			After:      userSyncRetryAfter(r.Header()),
+		}
+	}
 	if r.StatusCode() >= 400 {
 		return nil, fmt.Errorf(
 			"get user list http status %d: %s",
@@ -359,6 +367,29 @@ func parseUserSyncSeqHeader(value string, fallback int64) int64 {
 		return fallback
 	}
 	return seq
+}
+
+func userSyncRetryAfter(header http.Header) time.Duration {
+	ms, _ := strconv.Atoi(strings.TrimSpace(
+		header.Get("X-User-Sync-Retry-After-Ms"),
+	))
+	if ms == 0 {
+		if seconds, err := strconv.Atoi(strings.TrimSpace(
+			header.Get("Retry-After"),
+		)); err == nil {
+			ms = seconds * 1000
+		}
+	}
+	if ms == 0 {
+		ms = 1500
+	}
+	if ms < 500 {
+		ms = 500
+	}
+	if ms > 10000 {
+		ms = 10000
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // GetUserAlive will fetch the alive_ip count for users

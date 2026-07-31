@@ -132,7 +132,15 @@ func (r *userSyncRuntime) runWakeup(ctx context.Context) {
 				Warn("User sync wakeup unavailable; using short polling")
 		}
 		r.setMode(userSyncModeFallback)
-		if !r.runFallbackUntil(ctx, r.reconnectDelay(attempt)) {
+		reconnectAfter := r.reconnectDelay(attempt)
+		initialPollAfter := time.Duration(0)
+		if retryAfter, ok := r.retryDelay(err); ok {
+			initialPollAfter = retryAfter
+			if retryAfter > reconnectAfter {
+				reconnectAfter = retryAfter
+			}
+		}
+		if !r.runFallbackUntil(ctx, reconnectAfter, initialPollAfter) {
 			return
 		}
 		if attempt < 5 {
@@ -226,10 +234,11 @@ func (r *userSyncRuntime) serveConnection(
 func (r *userSyncRuntime) runFallbackUntil(
 	ctx context.Context,
 	reconnectAfter time.Duration,
+	initialPollAfter time.Duration,
 ) bool {
 	deadline := time.NewTimer(reconnectAfter)
 	defer deadline.Stop()
-	poll := time.NewTimer(0)
+	poll := time.NewTimer(initialPollAfter)
 	defer poll.Stop()
 	for {
 		select {
@@ -238,11 +247,17 @@ func (r *userSyncRuntime) runFallbackUntil(
 		case <-deadline.C:
 			return true
 		case <-poll.C:
-			if _, err := r.syncFn(ctx); err != nil && !isContextError(err) {
-				log.WithError(err).WithField("mode", r.modeValue()).
-					Debug("User sync fallback poll failed")
+			nextPoll := r.fallbackInterval()
+			if _, err := r.syncFn(ctx); err != nil {
+				if !isContextError(err) {
+					log.WithError(err).WithField("mode", r.modeValue()).
+						Debug("User sync fallback poll failed")
+				}
+				if retryAfter, ok := r.retryDelay(err); ok {
+					nextPoll = retryAfter
+				}
 			}
-			poll.Reset(r.fallbackInterval())
+			poll.Reset(nextPoll)
 		}
 	}
 }
@@ -343,6 +358,18 @@ func (r *userSyncRuntime) reconnectDelay(attempt int) time.Duration {
 		attempt = len(delays) - 1
 	}
 	return delays[attempt] + stableUserSyncJitter(r.instanceID)
+}
+
+func (r *userSyncRuntime) retryDelay(err error) (time.Duration, bool) {
+	var retry *panel.UserSyncRetryError
+	if !errors.As(err, &retry) || retry == nil {
+		return 0, false
+	}
+	delay := retry.After
+	if delay < 500*time.Millisecond {
+		delay = 500 * time.Millisecond
+	}
+	return delay + stableUserSyncJitter(r.instanceID), true
 }
 
 func stableUserSyncJitter(instanceID string) time.Duration {

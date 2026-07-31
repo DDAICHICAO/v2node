@@ -372,6 +372,77 @@ func TestLocalExpiryRemovesAllRowsForExpiredUser(t *testing.T) {
 	}
 }
 
+func TestFullSyncBreakerOpensAfterThreeFailuresAndResets(t *testing.T) {
+	var breaker fullSyncBreaker
+	now := time.Unix(100, 0)
+	breaker.Failure(now)
+	breaker.Failure(now)
+	if breaker.OpenUntil(now).After(now) {
+		t.Fatal("breaker opened before third failure")
+	}
+	breaker.Failure(now)
+	if got := breaker.OpenUntil(now); !got.Equal(now.Add(30 * time.Second)) {
+		t.Fatalf("open until=%v", got)
+	}
+	breaker.Success()
+	if breaker.OpenUntil(now).After(now) {
+		t.Fatal("breaker did not reset")
+	}
+}
+
+func TestUserSyncRuntimeAddsStableJitterToRetryAfter(t *testing.T) {
+	runtime := &userSyncRuntime{instanceID: "instance-1"}
+	got, ok := runtime.retryDelay(&panel.UserSyncRetryError{
+		StatusCode: http.StatusServiceUnavailable,
+		After:      1500 * time.Millisecond,
+	})
+	want := 1500*time.Millisecond + stableUserSyncJitter("instance-1")
+	if !ok || got != want {
+		t.Fatalf("delay=%v ok=%v want=%v", got, ok, want)
+	}
+}
+
+func TestSyncUserStateBreakerStopsRepeatedForcedFullRequests(t *testing.T) {
+	t.Setenv("V2NODE_TEST_VERSION_HELPER", "1")
+	fullRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v2/server/user-delta":
+			_, _ = w.Write([]byte(`{"data":{"full_required":true,"latest_seq":0}}`))
+		case "/api/v1/server/UniProxy/user":
+			fullRequests++
+			w.Header().Set("X-User-Sync-Retry-After-Ms", "500")
+			http.Error(w, "snapshot busy", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := conf.NodeConfig{
+		APIHost: server.URL,
+		NodeID:  1,
+		Key:     "test",
+	}
+	client, err := panel.New(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &Controller{
+		apiClient: client,
+		userList:  []panel.UserInfo{{Id: 1, Uuid: "cached"}},
+	}
+	for i := 0; i < 4; i++ {
+		if _, err := controller.syncUserState(context.Background()); err == nil {
+			t.Fatalf("sync %d unexpectedly succeeded", i+1)
+		}
+	}
+	if fullRequests != 3 {
+		t.Fatalf("forced full requests=%d, want 3", fullRequests)
+	}
+}
+
 func TestApplyUserListReturnsAddUsersError(t *testing.T) {
 	const tag = "apply-user-list-error"
 	limiter.Init()

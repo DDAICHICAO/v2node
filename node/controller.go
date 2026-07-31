@@ -47,6 +47,7 @@ type Controller struct {
 	userSyncCancel          context.CancelFunc
 	userSyncDone            chan struct{}
 	userSyncRuntime         *userSyncRuntime
+	fullSyncBreaker         fullSyncBreaker
 	expiryWakeCh            chan struct{}
 	expiryCancel            context.CancelFunc
 	expiryDone              chan struct{}

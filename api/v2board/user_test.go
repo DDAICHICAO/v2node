@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 )
@@ -326,6 +327,37 @@ func TestGetUserDeltaSinceUsesExplicitPageBoundary(t *testing.T) {
 	}
 	if c.UserSyncSeq() != 99 {
 		t.Fatalf("explicit page fetch changed global sequence: %d", c.UserSyncSeq())
+	}
+}
+
+func TestFullUserListReturnsBoundedRetryAfter(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{name: "minimum", header: "1", want: 500 * time.Millisecond},
+		{name: "panel delay", header: "1500", want: 1500 * time.Millisecond},
+		{name: "maximum", header: "60000", want: 10 * time.Second},
+		{name: "default", header: "", want: 1500 * time.Millisecond},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.header != "" {
+					w.Header().Set("X-User-Sync-Retry-After-Ms", tc.header)
+				}
+				http.Error(w, "snapshot busy", http.StatusServiceUnavailable)
+			}))
+			defer server.Close()
+
+			client := &Client{client: resty.New().SetBaseURL(server.URL)}
+			_, err := client.FetchUserList(context.Background(), true)
+			var retry *UserSyncRetryError
+			if !errors.As(err, &retry) || retry.After != tc.want {
+				t.Fatalf("retry error=%v", err)
+			}
+		})
 	}
 }
 

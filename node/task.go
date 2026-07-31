@@ -125,6 +125,30 @@ func (c *Controller) queueReload() error {
 
 type userDeltaFetcher func(context.Context, int64) (*panel.UserDeltaData, error)
 
+type fullSyncBreaker struct {
+	failures  int
+	openUntil time.Time
+}
+
+func (b *fullSyncBreaker) Failure(now time.Time) {
+	b.failures++
+	if b.failures >= 3 {
+		b.openUntil = now.Add(30 * time.Second)
+	}
+}
+
+func (b *fullSyncBreaker) Success() {
+	b.failures = 0
+	b.openUntil = time.Time{}
+}
+
+func (b *fullSyncBreaker) OpenUntil(now time.Time) time.Time {
+	if !b.openUntil.After(now) {
+		return time.Time{}
+	}
+	return b.openUntil
+}
+
 func collectUserDeltaPages(
 	ctx context.Context,
 	sinceSeq int64,
@@ -300,8 +324,20 @@ func (c *Controller) syncUserState(
 	}
 
 	// get user info
+	if forceFullUserList {
+		now := time.Now()
+		if until := c.fullSyncBreaker.OpenUntil(now); until.After(now) {
+			return currentSeq, &panel.UserSyncRetryError{
+				StatusCode: 503,
+				After:      until.Sub(now),
+			}
+		}
+	}
 	snapshot, err := c.apiClient.FetchUserList(ctx, forceFullUserList)
 	if err != nil {
+		if forceFullUserList {
+			c.fullSyncBreaker.Failure(time.Now())
+		}
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
@@ -322,7 +358,13 @@ func (c *Controller) syncUserState(
 		newU, _ = removeExpiredUsers(newU, pruneUnix)
 	}
 	if err := c.commitFetchedUserState(newU, snapshot); err != nil {
+		if forceFullUserList {
+			c.fullSyncBreaker.Failure(time.Now())
+		}
 		return currentSeq, err
+	}
+	if forceFullUserList {
+		c.fullSyncBreaker.Success()
 	}
 	return snapshot.SyncSeq, nil
 }
