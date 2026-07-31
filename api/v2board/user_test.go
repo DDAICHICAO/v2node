@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -14,6 +16,14 @@ import (
 
 	"github.com/go-resty/resty/v2"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println("v2node test")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestWakeupCapabilityAndConfigContract(t *testing.T) {
 	if !slices.Contains(deviceLimitCapabilities, "user_sync_wakeup_v1") {
