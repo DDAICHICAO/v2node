@@ -215,6 +215,31 @@ func TestCollectUserDeltaPagesKeepsPageBoundary(t *testing.T) {
 	}
 }
 
+func TestCollectUserDeltaPagesReturnsDurableProgressAtLimit(t *testing.T) {
+	result, err := collectUserDeltaPages(
+		context.Background(),
+		10,
+		2,
+		func(_ context.Context, since int64) (*panel.UserDeltaData, error) {
+			return &panel.UserDeltaData{
+				LatestSeq: since + 1,
+				HasMore:   true,
+				Events: []panel.UserDeltaEvent{{
+					Seq:    since + 1,
+					Action: panel.UserDeltaActionDelete,
+					UserID: int(since + 1),
+				}},
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.LatestSeq != 12 || len(result.Events) != 2 || !result.HasMore {
+		t.Fatalf("progress was discarded at page limit: %+v", result)
+	}
+}
+
 func TestCommitUserStatePersistFailureRestoresPreviousState(t *testing.T) {
 	previous := []panel.UserInfo{{Id: 1, Uuid: "old"}}
 	next := []panel.UserInfo{{Id: 1, Uuid: "new"}}

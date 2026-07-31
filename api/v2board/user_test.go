@@ -38,6 +38,21 @@ func TestWakeupCapabilityAndConfigContract(t *testing.T) {
 	}
 }
 
+func TestWakeupConfigNormalizeMatchesPanelBounds(t *testing.T) {
+	config := UserSyncWakeupConfig{
+		HeartbeatSeconds: 999,
+		FallbackPollMS:   1,
+		MergeMS:          9999,
+	}
+	config.Normalize()
+	if config.Path != "/api/v2/server/user-sync/wakeup" ||
+		config.HeartbeatSeconds != 60 ||
+		config.FallbackPollMS != 1000 ||
+		config.MergeMS != 1000 {
+		t.Fatalf("normalized config=%+v", config)
+	}
+}
+
 func TestWakeupDialConfigUsesHeadersNotQueryToken(t *testing.T) {
 	client := &Client{
 		APIHost:    "https://panel.example.com/?legacy=1",

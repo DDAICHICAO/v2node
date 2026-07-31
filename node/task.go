@@ -176,16 +176,14 @@ func collectUserDeltaPages(
 		}
 		combined.Events = append(combined.Events, delta.Events...)
 		combined.LatestSeq = delta.LatestSeq
+		combined.HasMore = delta.HasMore
 		combined.ServerTime = delta.ServerTime
 		current = delta.LatestSeq
 		if !delta.HasMore {
 			return combined, nil
 		}
 	}
-	return nil, &panel.UserSyncRetryError{
-		StatusCode: 503,
-		After:      500 * time.Millisecond,
-	}
+	return combined, nil
 }
 
 func commitUserStateWith(
@@ -303,6 +301,12 @@ func (c *Controller) syncUserState(
 			}
 			if err := c.commitUserState(newU, delta.LatestSeq); err != nil {
 				return currentSeq, err
+			}
+			if delta.HasMore {
+				return delta.LatestSeq, &panel.UserSyncRetryError{
+					StatusCode: 503,
+					After:      500 * time.Millisecond,
+				}
 			}
 			return delta.LatestSeq, nil
 		}

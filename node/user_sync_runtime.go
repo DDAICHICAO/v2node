@@ -82,11 +82,17 @@ func (r *userSyncRuntime) runLegacy(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if _, err := r.syncFn(ctx); err != nil && !isContextError(err) {
-				log.WithError(err).WithField("mode", r.modeValue()).
-					Warn("User sync legacy poll failed")
+			nextPoll := r.pollInterval(nil)
+			if _, err := r.syncFn(ctx); err != nil {
+				if !isContextError(err) {
+					log.WithError(err).WithField("mode", r.modeValue()).
+						Warn("User sync legacy poll failed")
+				}
+				if retryAfter, ok := r.retryDelay(err); ok {
+					nextPoll = retryAfter
+				}
 			}
-			timer.Reset(r.pollInterval(nil))
+			timer.Reset(nextPoll)
 		}
 	}
 }

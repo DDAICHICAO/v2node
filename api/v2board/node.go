@@ -100,9 +100,9 @@ func (c *UserSyncWakeupConfig) Normalize() {
 	if !strings.HasPrefix(c.Path, "/") {
 		c.Path = "/api/v2/server/user-sync/wakeup"
 	}
-	c.HeartbeatSeconds = clampInt(c.HeartbeatSeconds, 10, 120, 25)
-	c.FallbackPollMS = clampInt(c.FallbackPollMS, 500, 10000, 2000)
-	c.MergeMS = clampInt(c.MergeMS, 50, 2000, 250)
+	c.HeartbeatSeconds = clampInt(c.HeartbeatSeconds, 10, 60, 25)
+	c.FallbackPollMS = clampInt(c.FallbackPollMS, 1000, 10000, 2000)
+	c.MergeMS = clampInt(c.MergeMS, 100, 1000, 250)
 }
 
 func clampInt(value, minValue, maxValue, defaultValue int) int {
