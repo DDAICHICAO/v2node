@@ -37,6 +37,38 @@ func TestWakeupCapabilityAndConfigContract(t *testing.T) {
 	}
 }
 
+func TestWakeupDialConfigUsesHeadersNotQueryToken(t *testing.T) {
+	client := &Client{
+		APIHost:    "https://panel.example.com/?legacy=1",
+		Token:      "private-token",
+		NodeId:     7,
+		instanceID: "instance-1",
+	}
+	url, headers, err := client.UserSyncWakeupDialConfig(&UserSyncWakeupConfig{
+		Path: "/api/v2/server/user-sync/wakeup",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url != "wss://panel.example.com/api/v2/server/user-sync/wakeup" {
+		t.Fatalf("url=%q", url)
+	}
+	if strings.Contains(url, "private-token") || headers.Get("Authorization") != "Bearer private-token" {
+		t.Fatalf("token transport is unsafe: url=%q", url)
+	}
+	if headers.Get("X-SNTP-Node-ID") != "7" ||
+		!strings.Contains(headers.Get("X-SNTP-Capabilities"), "user_sync_wakeup_v1") {
+		t.Fatalf("identity headers missing")
+	}
+}
+
+func TestWakeupMessagesRejectNegativeRevision(t *testing.T) {
+	_, err := decodeWakeupMessage([]byte(`{"type":"user_sync_dirty","revision":-1}`))
+	if err == nil {
+		t.Fatal("negative revision accepted")
+	}
+}
+
 func TestFanoutReservationHTTPClassification(t *testing.T) {
 	tests := []struct {
 		name     string
