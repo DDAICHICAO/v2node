@@ -60,7 +60,11 @@ Expected: FAIL，因为 `serveConnection` 仍要求具体连接类型，并且�
 
 同步错误保持 `catching_up` 并重排定时器；`UserSyncRetryError` 使用 `retryDelay()`，其他同步错误使用 `fallbackInterval()`。ACK 通道缺失或写失败包装为内部连接错误并返回。
 
-- [ ] **Step 5: 运行绿灯和相关包测试**
+- [ ] **Step 5: 保留已经生效的同步退避**
+
+同步错误已安排重试后，新 dirty 只更新最高 revision，不把 Retry-After 缩短为 merge 窗口。增加 500ms Retry-After 期间收到更高 revision 的回归测试。
+
+- [ ] **Step 6: 运行绿灯和相关包测试**
 
 Run:
 

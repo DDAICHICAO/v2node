@@ -241,3 +241,54 @@ git diff --check
 - 验证：设置 `GOEXPERIMENT=jsonv2` 后运行 `go test -count=1 ./api/v2board ./limiter ./node`，三个包全部通过，退出码为 0，且 `node.test` 残留进程数为 0。
 - 下次先查：Windows 上若 Go 测试断言显示 `ok` 但退出清理失败，先检查 `node.test.exe` 数量与 `TestMain` 的命令参数分支，不要先归因于 Go 临时目录或杀毒软件。
 - 相关文件与提交：`node/user_delta_test.go`、`node/update.go`、`common/version/version.go`；预约功能合入 `dev` 的节点提交为 `a1e14de`，测试护栏提交为 `6e637cb`。以上为本地分支状态，尚未推送或发布。
+
+## 2026-07-31：用户同步追赶失败不能转换为 WebSocket 重连风暴
+
+### 症状
+
+用户同步唤醒灰度扩大后，面板 WebSocket 监听队列和连接数快速波动，节点连接反复建立和关闭，新节点长时间没有稳定 `user_sync_applied`。缩回原小批灰度并完整重启面板 Worker 后恢复。
+
+### 影响链
+
+面板 `user_sync_dirty` -> v2node `runWakeup` / `serveConnection` -> `syncUserState` -> 增量分页或强制全量同步 -> `UserSyncRetryError` / 临时 HTTP 错误 -> 关闭 WebSocket -> fallback 短轮询 -> 重连。
+
+### 根因
+
+- 拨号成功后，旧状态机先执行 `activatePush` 再开始读 WebSocket；初始追赶只要暂时失败，刚建立的连接就会被关闭。
+- 读循环收到 dirty 后，`flushPending` 的任何同步错误都会直接退出读循环。正常的增量分页、全量同步熔断和面板短时繁忙因此都被错误地当成连接故障。
+- 若只改成定时重试但不保护 Retry-After，新 dirty 又会把退避缩短到 merge 窗口，在高变更期重新制造追赶压力。
+
+### 修复
+
+- 拨号成功后立即进入读循环，首次追赶和 dirty 合并共用同步定时器。
+- 普通同步错误和 `UserSyncRetryError` 保留当前连接；等待期间继续响应 ping、合并最高 revision，并按 fallback 间隔或 Retry-After 重试。
+- 已生效的 Retry-After 不会被后续 dirty 缩短；dirty 只抬高待确认 revision。
+- 只有拨号、读取、pong 写入、ACK 通道或 ACK 写入失败才退出连接并进入外层 fallback/重连。
+- 用户状态提交成功且 ACK 写成功后才清除最高待确认 revision。
+
+### 验证
+
+```powershell
+$env:GOEXPERIMENT='jsonv2'
+go test ./node -run '^TestUserSyncRuntime' -count=1
+go test ./node ./api/v2board -count=1
+go vet ./node ./api/v2board
+git diff --check
+```
+
+回归测试覆盖：同一连接内失败后重试、等待期间 pong、成功后 ACK 最高 revision、ACK 写失败触发重连，以及新 dirty 不缩短 Retry-After。Windows 当前 `CGO_ENABLED=0` 且没有 gcc，`go test -race` 需在 Linux 构建环境补跑。
+
+### 下次优先检查
+
+1. 区分“拨号成功”“进入 push”“ACK 前进”和“生产已验证”，不要只看二进制版本或 capability。
+2. 同时采样 WebSocket established/listen backlog、节点 `mode`、`applied_revision`、Nginx upstream timeout、Webman worker 和 CPU。
+3. 扩容按原 3 个节点、再加 3 个、再到 10/20 个分批；每批必须等 ACK 与连接数稳定后再继续。
+4. 若连接稳定但追赶仍慢，继续检查 `force_full`、增量 `has_more`、全量同步熔断和面板用户缓存，不要重新把同步错误改成断线。
+
+### 相关文件
+
+- 运行时：`node/user_sync_runtime.go`
+- 用户同步：`node/task.go`
+- WebSocket 协议：`api/v2board/wakeup.go`
+- 回归测试：`node/user_delta_test.go`
+- 设计与计划：`docs/superpowers/specs/2026-07-31-user-sync-wakeup-stability-design.md`、`docs/superpowers/plans/2026-07-31-user-sync-wakeup-stability.md`

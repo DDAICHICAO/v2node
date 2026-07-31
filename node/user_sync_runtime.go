@@ -22,6 +22,30 @@ const (
 	userSyncModeClosed     userSyncMode = "closed"
 )
 
+type userSyncWakeupConnection interface {
+	ReadMessage(context.Context) (*panel.UserSyncWakeupMessage, error)
+	SendPong(int64) error
+	Close() error
+}
+
+type userSyncWakeupTransportError struct {
+	err error
+}
+
+func (e *userSyncWakeupTransportError) Error() string {
+	if e == nil || e.err == nil {
+		return "user sync wakeup transport error"
+	}
+	return e.err.Error()
+}
+
+func (e *userSyncWakeupTransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
 type userSyncRuntime struct {
 	controller     *Controller
 	config         *panel.UserSyncWakeupConfig
@@ -119,14 +143,10 @@ func (r *userSyncRuntime) runWakeup(ctx context.Context) {
 					message.AppliedAt,
 				)
 			})
-			if err = r.activatePush(ctx); err == nil {
-				if r.pendingRevision() > 0 {
-					err = r.flushPending(ctx)
-				}
-			}
-			if err == nil {
+			var reachedPush bool
+			reachedPush, err = r.serveConnection(ctx, conn)
+			if reachedPush {
 				attempt = 0
-				err = r.serveConnection(ctx, conn)
 			}
 			r.setAckFn(nil)
 			_ = conn.Close()
@@ -159,8 +179,8 @@ func (r *userSyncRuntime) runWakeup(ctx context.Context) {
 
 func (r *userSyncRuntime) serveConnection(
 	ctx context.Context,
-	conn *panel.UserSyncWakeupConnection,
-) error {
+	conn userSyncWakeupConnection,
+) (reachedPush bool, serveErr error) {
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -190,51 +210,75 @@ func (r *userSyncRuntime) serveConnection(
 		}
 	}()
 
-	var mergeTimer *time.Timer
-	var mergeC <-chan time.Time
+	r.setMode(userSyncModeCatchingUp)
+	mergeTimer := time.NewTimer(
+		time.Duration(r.config.MergeMS) * time.Millisecond,
+	)
+	mergeC := mergeTimer.C
+	catchUpRetryPending := false
 	defer func() {
-		if mergeTimer != nil {
-			mergeTimer.Stop()
-		}
+		mergeTimer.Stop()
 	}()
+	resetMergeTimer := func(delay time.Duration) {
+		if !mergeTimer.Stop() {
+			select {
+			case <-mergeTimer.C:
+			default:
+			}
+		}
+		mergeTimer.Reset(delay)
+		mergeC = mergeTimer.C
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
-			return ctx.Err()
+			return reachedPush, ctx.Err()
 		case err := <-readErrors:
-			return err
+			return reachedPush, err
 		case message := <-messages:
 			switch message.Type {
 			case "ping":
 				if err := conn.SendPong(r.now().Unix()); err != nil {
-					return err
+					return reachedPush, err
 				}
 			case "user_sync_dirty":
 				r.enqueueRevision(message.Revision)
-				if mergeTimer == nil {
-					mergeTimer = time.NewTimer(
-						time.Duration(r.config.MergeMS) * time.Millisecond,
-					)
-				} else {
-					if !mergeTimer.Stop() {
-						select {
-						case <-mergeTimer.C:
-						default:
-						}
-					}
-					mergeTimer.Reset(
+				if !catchUpRetryPending {
+					resetMergeTimer(
 						time.Duration(r.config.MergeMS) * time.Millisecond,
 					)
 				}
-				mergeC = mergeTimer.C
 			}
 		case <-mergeC:
 			mergeC = nil
-			if err := r.flushPending(ctx); err != nil {
-				return err
+			catchUpRetryPending = false
+			var err error
+			if r.pendingRevision() > 0 {
+				err = r.flushPending(ctx)
+			} else {
+				err = r.activatePush(ctx)
 			}
+			if err != nil {
+				if isContextError(err) {
+					return reachedPush, err
+				}
+				var transportErr *userSyncWakeupTransportError
+				if errors.As(err, &transportErr) {
+					return reachedPush, err
+				}
+				r.setMode(userSyncModeCatchingUp)
+				retryAfter := r.fallbackInterval()
+				if delay, ok := r.retryDelay(err); ok {
+					retryAfter = delay
+				}
+				catchUpRetryPending = true
+				resetMergeTimer(retryAfter)
+				continue
+			}
+			r.setMode(userSyncModePush)
+			reachedPush = true
 		}
 	}
 }
@@ -297,7 +341,9 @@ func (r *userSyncRuntime) flushPending(ctx context.Context) error {
 		return err
 	}
 	if ack == nil {
-		return errors.New("user sync acknowledgement channel is unavailable")
+		return &userSyncWakeupTransportError{
+			err: errors.New("user sync acknowledgement channel is unavailable"),
+		}
 	}
 	message := panel.UserSyncAppliedMessage{
 		Type:      "user_sync_applied",
@@ -306,7 +352,7 @@ func (r *userSyncRuntime) flushPending(ctx context.Context) error {
 		AppliedAt: r.now().Unix(),
 	}
 	if err := ack(ctx, message); err != nil {
-		return err
+		return &userSyncWakeupTransportError{err: err}
 	}
 	r.mu.Lock()
 	if r.highestRevision <= revision {

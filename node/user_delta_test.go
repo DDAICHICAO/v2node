@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,86 @@ import (
 	"github.com/wyx2685/v2node/core"
 	"github.com/wyx2685/v2node/limiter"
 )
+
+type fakeUserSyncWakeupConnection struct {
+	messages   chan *panel.UserSyncWakeupMessage
+	applied    chan panel.UserSyncAppliedMessage
+	pongs      chan int64
+	closed     chan struct{}
+	closeOnce  sync.Once
+	closeCalls atomic.Int32
+	appliedErr error
+}
+
+type userSyncServeResult struct {
+	reachedPush bool
+	err         error
+}
+
+func newFakeUserSyncWakeupConnection() *fakeUserSyncWakeupConnection {
+	return &fakeUserSyncWakeupConnection{
+		messages: make(chan *panel.UserSyncWakeupMessage, 8),
+		applied:  make(chan panel.UserSyncAppliedMessage, 8),
+		pongs:    make(chan int64, 8),
+		closed:   make(chan struct{}),
+	}
+}
+
+func (c *fakeUserSyncWakeupConnection) ReadMessage(
+	ctx context.Context,
+) (*panel.UserSyncWakeupMessage, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.closed:
+		return nil, errors.New("fake wakeup connection closed")
+	case message := <-c.messages:
+		return message, nil
+	}
+}
+
+func (c *fakeUserSyncWakeupConnection) SendApplied(
+	revision int64,
+	syncSeq int64,
+	appliedAt int64,
+) error {
+	if c.appliedErr != nil {
+		return c.appliedErr
+	}
+	c.applied <- panel.UserSyncAppliedMessage{
+		Type:      "user_sync_applied",
+		Revision:  revision,
+		SyncSeq:   syncSeq,
+		AppliedAt: appliedAt,
+	}
+	return nil
+}
+
+func (c *fakeUserSyncWakeupConnection) SendPong(receivedAt int64) error {
+	c.pongs <- receivedAt
+	return nil
+}
+
+func (c *fakeUserSyncWakeupConnection) Close() error {
+	c.closeCalls.Add(1)
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return nil
+}
+
+func serveUserSyncRuntimeForTest(
+	ctx context.Context,
+	runtime *userSyncRuntime,
+	conn userSyncWakeupConnection,
+) <-chan userSyncServeResult {
+	done := make(chan userSyncServeResult, 1)
+	go func() {
+		reachedPush, err := runtime.serveConnection(ctx, conn)
+		done <- userSyncServeResult{reachedPush: reachedPush, err: err}
+	}()
+	return done
+}
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
@@ -309,6 +391,291 @@ func TestUserSyncRuntimeDoesNotAckFailedSync(t *testing.T) {
 	}
 	if acked {
 		t.Fatal("failed sync was acknowledged")
+	}
+}
+
+func TestUserSyncRuntimeKeepsConnectionWhileCatchUpRetries(t *testing.T) {
+	conn := newFakeUserSyncWakeupConnection()
+	firstAttempt := make(chan struct{})
+	var syncCalls atomic.Int32
+	runtime := &userSyncRuntime{
+		config: &panel.UserSyncWakeupConfig{
+			Enabled:          true,
+			HeartbeatSeconds: 10,
+			FallbackPollMS:   50,
+			MergeMS:          1,
+		},
+		mode: userSyncModeFallback,
+		syncFn: func(context.Context) (int64, error) {
+			call := syncCalls.Add(1)
+			if call == 1 {
+				close(firstAttempt)
+				return 0, errors.New("temporary catch-up failure")
+			}
+			return 99, nil
+		},
+	}
+	runtime.setAckFn(func(
+		_ context.Context,
+		message panel.UserSyncAppliedMessage,
+	) error {
+		return conn.SendApplied(
+			message.Revision,
+			message.SyncSeq,
+			message.AppliedAt,
+		)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := serveUserSyncRuntimeForTest(ctx, runtime, conn)
+	conn.messages <- &panel.UserSyncWakeupMessage{
+		Type:        "user_sync_dirty",
+		Revision:    42,
+		PublishedAt: 1,
+	}
+
+	select {
+	case <-firstAttempt:
+	case <-time.After(time.Second):
+		t.Fatal("first catch-up attempt did not run")
+	}
+	select {
+	case result := <-done:
+		t.Fatalf("connection exited after catch-up failure: %v", result.err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	conn.messages <- &panel.UserSyncWakeupMessage{
+		Type:   "ping",
+		SentAt: 1,
+	}
+	select {
+	case receivedAt := <-conn.pongs:
+		if receivedAt <= 0 {
+			t.Fatalf("invalid pong timestamp %d", receivedAt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ping was not handled while catch-up was waiting to retry")
+	}
+
+	select {
+	case applied := <-conn.applied:
+		if applied.Revision != 42 || applied.SyncSeq != 99 {
+			t.Fatalf("applied=%+v", applied)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending revision was not acknowledged after retry")
+	}
+	if got := conn.closeCalls.Load(); got != 0 {
+		t.Fatalf("connection closed %d times before retry succeeded", got)
+	}
+	if got := syncCalls.Load(); got != 2 {
+		t.Fatalf("sync calls=%d, want 2", got)
+	}
+
+	cancel()
+	result := <-done
+	if !result.reachedPush {
+		t.Fatal("successful catch-up did not report push state")
+	}
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("serve connection error=%v", result.err)
+	}
+}
+
+func TestUserSyncRuntimeReconnectsAfterAckWriteFailure(t *testing.T) {
+	conn := newFakeUserSyncWakeupConnection()
+	conn.appliedErr = errors.New("ack write failed")
+	runtime := &userSyncRuntime{
+		config: &panel.UserSyncWakeupConfig{
+			Enabled:          true,
+			HeartbeatSeconds: 10,
+			FallbackPollMS:   20,
+			MergeMS:          1,
+		},
+		syncFn: func(context.Context) (int64, error) {
+			return 99, nil
+		},
+	}
+	runtime.setAckFn(func(
+		_ context.Context,
+		message panel.UserSyncAppliedMessage,
+	) error {
+		return conn.SendApplied(
+			message.Revision,
+			message.SyncSeq,
+			message.AppliedAt,
+		)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := serveUserSyncRuntimeForTest(ctx, runtime, conn)
+	conn.messages <- &panel.UserSyncWakeupMessage{
+		Type:        "user_sync_dirty",
+		Revision:    42,
+		PublishedAt: 1,
+	}
+
+	select {
+	case result := <-done:
+		cancel()
+		if result.reachedPush {
+			t.Fatal("failed acknowledgement reported push state")
+		}
+		if result.err == nil ||
+			!strings.Contains(result.err.Error(), "ack write failed") {
+			t.Fatalf("serve connection error=%v", result.err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("ack write failure did not return control for reconnect")
+	}
+}
+
+func TestUserSyncRuntimeDirtyMessageDoesNotShortenCatchUpRetry(t *testing.T) {
+	conn := newFakeUserSyncWakeupConnection()
+	firstAttempt := make(chan struct{})
+	secondAttempt := make(chan struct{})
+	var syncCalls atomic.Int32
+	runtime := &userSyncRuntime{
+		config: &panel.UserSyncWakeupConfig{
+			Enabled:          true,
+			HeartbeatSeconds: 10,
+			FallbackPollMS:   20,
+			MergeMS:          1,
+		},
+		syncFn: func(context.Context) (int64, error) {
+			switch syncCalls.Add(1) {
+			case 1:
+				close(firstAttempt)
+				return 0, &panel.UserSyncRetryError{
+					StatusCode: http.StatusServiceUnavailable,
+					After:      500 * time.Millisecond,
+				}
+			default:
+				close(secondAttempt)
+				return 99, nil
+			}
+		},
+	}
+	runtime.setAckFn(func(
+		_ context.Context,
+		message panel.UserSyncAppliedMessage,
+	) error {
+		return conn.SendApplied(
+			message.Revision,
+			message.SyncSeq,
+			message.AppliedAt,
+		)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := serveUserSyncRuntimeForTest(ctx, runtime, conn)
+	conn.messages <- &panel.UserSyncWakeupMessage{
+		Type:        "user_sync_dirty",
+		Revision:    42,
+		PublishedAt: 1,
+	}
+	select {
+	case <-firstAttempt:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("first catch-up attempt did not run")
+	}
+
+	conn.messages <- &panel.UserSyncWakeupMessage{
+		Type:        "user_sync_dirty",
+		Revision:    43,
+		PublishedAt: 2,
+	}
+	select {
+	case <-secondAttempt:
+		cancel()
+		<-done
+		t.Fatal("dirty message shortened the active catch-up retry delay")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := runtime.pendingRevision(); got != 43 {
+		cancel()
+		<-done
+		t.Fatalf("pending revision=%d, want 43", got)
+	}
+
+	cancel()
+	result := <-done
+	if result.reachedPush {
+		t.Fatal("failed catch-up reported push state")
+	}
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("serve connection error=%v", result.err)
+	}
+}
+
+func TestUserSyncRuntimeReportsEarlierPushAfterLaterCatchUpFailure(t *testing.T) {
+	conn := newFakeUserSyncWakeupConnection()
+	initialSync := make(chan struct{})
+	dirtySync := make(chan struct{})
+	var syncCalls atomic.Int32
+	runtime := &userSyncRuntime{
+		config: &panel.UserSyncWakeupConfig{
+			Enabled:          true,
+			HeartbeatSeconds: 10,
+			FallbackPollMS:   500,
+			MergeMS:          1,
+		},
+		syncFn: func(context.Context) (int64, error) {
+			switch syncCalls.Add(1) {
+			case 1:
+				close(initialSync)
+				return 10, nil
+			default:
+				close(dirtySync)
+				return 10, errors.New("later catch-up failure")
+			}
+		},
+	}
+	runtime.setAckFn(func(
+		_ context.Context,
+		message panel.UserSyncAppliedMessage,
+	) error {
+		return conn.SendApplied(
+			message.Revision,
+			message.SyncSeq,
+			message.AppliedAt,
+		)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := serveUserSyncRuntimeForTest(ctx, runtime, conn)
+	select {
+	case <-initialSync:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("initial catch-up did not run")
+	}
+	conn.messages <- &panel.UserSyncWakeupMessage{
+		Type:        "user_sync_dirty",
+		Revision:    42,
+		PublishedAt: 1,
+	}
+	select {
+	case <-dirtySync:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("dirty catch-up did not run")
+	}
+
+	cancel()
+	result := <-done
+	if !result.reachedPush {
+		t.Fatal("earlier push state was lost after later catch-up failure")
+	}
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("serve connection error=%v", result.err)
 	}
 }
 
