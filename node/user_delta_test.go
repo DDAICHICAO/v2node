@@ -427,6 +427,21 @@ func TestUserSyncRuntimeAddsStableJitterToRetryAfter(t *testing.T) {
 	}
 }
 
+func TestUserSyncRuntimeThrottlesWakeupWarnings(t *testing.T) {
+	now := time.Unix(100, 0)
+	runtime := &userSyncRuntime{nowFn: func() time.Time { return now }}
+	if !runtime.shouldWarnWakeupUnavailable() {
+		t.Fatal("first warning was suppressed")
+	}
+	if runtime.shouldWarnWakeupUnavailable() {
+		t.Fatal("repeated warning was not throttled")
+	}
+	now = now.Add(61 * time.Second)
+	if !runtime.shouldWarnWakeupUnavailable() {
+		t.Fatal("warning did not reopen after throttle window")
+	}
+}
+
 func TestSyncUserStateBreakerStopsRepeatedForcedFullRequests(t *testing.T) {
 	t.Setenv("V2NODE_TEST_VERSION_HELPER", "1")
 	fullRequests := 0

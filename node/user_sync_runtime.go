@@ -32,6 +32,7 @@ type userSyncRuntime struct {
 	mode                userSyncMode
 	highestRevision     int64
 	lastAppliedRevision int64
+	lastWakeupWarningAt time.Time
 	ackFn               func(context.Context, panel.UserSyncAppliedMessage) error
 
 	syncFn func(context.Context) (int64, error)
@@ -133,7 +134,8 @@ func (r *userSyncRuntime) runWakeup(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err != nil && !isContextError(err) {
+		if err != nil && !isContextError(err) &&
+			r.shouldWarnWakeupUnavailable() {
 			log.WithError(err).WithField("mode", "fallback").
 				Warn("User sync wakeup unavailable; using short polling")
 		}
@@ -407,6 +409,18 @@ func (r *userSyncRuntime) pendingRevision() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.highestRevision
+}
+
+func (r *userSyncRuntime) shouldWarnWakeupUnavailable() bool {
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.lastWakeupWarningAt.IsZero() &&
+		now.Sub(r.lastWakeupWarningAt) < time.Minute {
+		return false
+	}
+	r.lastWakeupWarningAt = now
+	return true
 }
 
 func (r *userSyncRuntime) now() time.Time {
