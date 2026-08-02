@@ -9,13 +9,18 @@ import (
 )
 
 type fakeBatchSpool[T any] struct {
-	mu      sync.Mutex
-	batches [][]T
-	block   chan struct{}
-	err     error
+	mu        sync.Mutex
+	batches   [][]T
+	block     chan struct{}
+	started   chan struct{}
+	startOnce sync.Once
+	err       error
 }
 
 func (s *fakeBatchSpool[T]) EnqueueBatch(events []T) error {
+	if s.started != nil {
+		s.startOnce.Do(func() { close(s.started) })
+	}
 	if s.block != nil {
 		<-s.block
 	}
@@ -23,6 +28,62 @@ func (s *fakeBatchSpool[T]) EnqueueBatch(events []T) error {
 	defer s.mu.Unlock()
 	s.batches = append(s.batches, append([]T(nil), events...))
 	return s.err
+}
+
+func TestPersistBatcherTrySubmitReturnsBeforeTransactionCompletes(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{})
+	spool := &fakeBatchSpool[int]{block: block, started: started}
+	batcher := newPersistBatcher(persistBatcherConfig[int]{
+		Spool: spool, QueueSize: 1, BatchSize: 1,
+		BatchWindow: time.Millisecond, SubmitTimeout: time.Hour,
+	})
+	defer func() {
+		close(block)
+		if err := batcher.Close(context.Background()); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}()
+
+	if err := batcher.TrySubmit(1); err != nil {
+		t.Fatalf("try submit: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not receive admitted event")
+	}
+}
+
+func TestPersistBatcherTrySubmitRejectsFullQueueImmediately(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{})
+	spool := &fakeBatchSpool[int]{block: block, started: started}
+	batcher := newPersistBatcher(persistBatcherConfig[int]{
+		Spool: spool, QueueSize: 1, BatchSize: 1,
+		BatchWindow: time.Millisecond, SubmitTimeout: time.Hour,
+	})
+	defer func() {
+		close(block)
+		if err := batcher.Close(context.Background()); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}()
+
+	if err := batcher.TrySubmit(1); err != nil {
+		t.Fatalf("first admission: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not start")
+	}
+	if err := batcher.TrySubmit(2); err != nil {
+		t.Fatalf("second admission: %v", err)
+	}
+	if err := batcher.TrySubmit(3); !errors.Is(err, ErrPersistenceQueueFull) {
+		t.Fatalf("third admission error=%v", err)
+	}
 }
 
 func TestPersistBatcherUsesBoundedSingleWriterBatches(t *testing.T) {

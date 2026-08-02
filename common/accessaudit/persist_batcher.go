@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	ErrPersistenceTimeout = errors.New("access audit persistence timeout")
-	ErrPersistencePending = errors.New("access audit persistence result pending")
-	ErrPersistenceClosed  = errors.New("access audit persistence is closed")
+	ErrPersistenceTimeout   = errors.New("access audit persistence timeout")
+	ErrPersistencePending   = errors.New("access audit persistence result pending")
+	ErrPersistenceClosed    = errors.New("access audit persistence is closed")
+	ErrPersistenceQueueFull = errors.New("access audit persistence queue full")
 )
 
 type batchSpool[T any] interface {
@@ -133,6 +134,27 @@ func (b *persistBatcher[T]) Submit(event T) error {
 	}
 }
 
+func (b *persistBatcher[T]) TrySubmit(event T) error {
+	if b == nil || b.config.Spool == nil {
+		return ErrPersistenceClosed
+	}
+	b.Start()
+	request := persistRequest[T]{event: event}
+
+	b.acceptMu.RLock()
+	defer b.acceptMu.RUnlock()
+	if b.closed.Load() {
+		return ErrPersistenceClosed
+	}
+	select {
+	case b.requests <- request:
+		b.recordDepth()
+		return nil
+	default:
+		return ErrPersistenceQueueFull
+	}
+}
+
 func (b *persistBatcher[T]) Status() PersistBatcherStatus {
 	if b == nil {
 		return PersistBatcherStatus{}
@@ -227,7 +249,9 @@ func (b *persistBatcher[T]) persistBatch(batch []persistRequest[T]) {
 		b.config.OnSuccess(events)
 	}
 	for _, request := range batch {
-		request.result <- err
+		if request.result != nil {
+			request.result <- err
+		}
 	}
 }
 
