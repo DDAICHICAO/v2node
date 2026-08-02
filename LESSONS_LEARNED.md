@@ -342,5 +342,5 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - `persistBatcher` 保留原有等待事务结果的 `Submit`，新增 `TrySubmit`：队列有容量时只完成有界接收就返回；队列已满返回 `ErrPersistenceQueueFull`；异步请求不创建结果 channel，后台单写入器仍按原批次执行 `EnqueueBatch`，并在真实事务失败时触发整批 `OnFailure`。
 - 普通访问 `Client.Enqueue` 和 `FlowClient.Report` 已切换到 `TrySubmit`。因此 `logSntpUserAccess` 位于 `handler.Dispatch` 前不再意味着代理请求等待 bbolt；队列满或关闭时仍立即放行业务，并通过现有内存 gap 聚合记录失败数量、字节数和时间范围。
 - 回归测试先在旧客户端实现上稳定失败：普通访问和 FlowTraffic 都出现 `waited for local transaction`，满队列出现 `waited instead of failing fast`；切换到非阻塞接收后这些测试通过。现有上传、补传、批次拆分和后台事务失败测试改为显式等待 spool 状态，不再依赖调用方同步等待落盘。
-- `GOEXPERIMENT=jsonv2 go test ./common/accessaudit ./core/app/dispatcher -count=1` 与 `GOEXPERIMENT=jsonv2 go vet ./common/accessaudit ./core/app/dispatcher` 通过。Windows 本机未安装 `gcc`，`go test -race ./common/accessaudit` 因 `-race requires cgo` / `C compiler "gcc" not found` 未能执行，部署前应在带 CGO 工具链的 Linux CI 或构建机补跑。
+- `GOEXPERIMENT=jsonv2 go test ./... -count=1` 与 `GOEXPERIMENT=jsonv2 go vet ./common/accessaudit ./core/app/dispatcher` 通过。全仓回归发现并修正了 `node` 状态上报测试的旧同步假设：测试现在等待两类事件进入持久化 spool 后再校验 pending 字段。Windows 本机未安装 `gcc`，`go test -race ./common/accessaudit` 因 `-race requires cgo` / `C compiler "gcc" not found` 未能执行，部署前应在带 CGO 工具链的 Linux CI 或构建机补跑。
 - 对应提交：`0de78ac`（批处理非阻塞接收）和 `6b95752`（两类客户端迁移）。当前只完成代码与本地验证，尚未部署生产；上线后仍需按前述步骤连续观察至少 15 分钟，并分别确认延迟恢复、审计落盘和补传状态。

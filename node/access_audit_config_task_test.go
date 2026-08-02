@@ -202,7 +202,7 @@ func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 		Enabled: true, Endpoint: server.URL, Token: "secret",
 		BatchSize: 10, MaxQueueSize: 100, FlushInterval: time.Hour,
 		Timeout: 20 * time.Millisecond, Now: func() time.Time { return now },
-		HTTPClient: server.Client(),
+		HTTPClient:    server.Client(),
 		SpoolPath:     filepath.Join(t.TempDir(), "access.db"),
 		MaxSpoolBytes: 1 << 20, MaxSpoolAge: time.Hour,
 		FlowTraffic: accessaudit.FlowConfig{
@@ -227,6 +227,18 @@ func TestAppendAccessAuditRuntimeStatusReportsCurrentConfig(t *testing.T) {
 	}
 	if err := accessaudit.ReportFlow(flow); err != nil {
 		t.Fatalf("persist flow event: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		accessStatus := accessaudit.CurrentRuntimeStatus()
+		flowStatus := accessaudit.CurrentFlowRuntimeStatus()
+		if accessStatus.PendingEvents == 1 && flowStatus.PendingEvents == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("audit events were not persisted: access=%#v flow=%#v", accessStatus, flowStatus)
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	controller := &Controller{
