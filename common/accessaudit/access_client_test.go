@@ -2,6 +2,7 @@ package accessaudit
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -21,6 +22,106 @@ func accessEventForTest(id string, now time.Time) Event {
 		UID: 100, UUID: id, SourceIP: "192.0.2.10",
 		TargetHost: "example.com", TargetPort: 443,
 		Network: "tcp", InboundTag: "trojan", OutboundTag: "direct",
+	}
+}
+
+func TestAccessClientEnqueueReturnsAfterAdmission(t *testing.T) {
+	now := time.Date(2026, 8, 2, 8, 0, 0, 0, time.UTC)
+	block := make(chan struct{})
+	started := make(chan struct{})
+	spool := &fakeBatchSpool[Event]{block: block, started: started}
+	batcher := newPersistBatcher(persistBatcherConfig[Event]{
+		Spool: spool, QueueSize: 1, BatchSize: 1,
+		BatchWindow: time.Millisecond, SubmitTimeout: time.Hour,
+	})
+	client := &Client{
+		config:    Config{Enabled: true, Now: func() time.Time { return now }},
+		persister: batcher,
+		wakeCh:    make(chan struct{}, 1),
+	}
+	returned := make(chan bool, 1)
+	go func() { returned <- client.Enqueue(accessEventForTest("nonblocking", now)) }()
+	select {
+	case ok := <-returned:
+		if !ok {
+			t.Fatal("event was not admitted")
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(block)
+		<-returned
+		t.Fatal("enqueue waited for local transaction")
+	}
+	close(block)
+	if err := batcher.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestAccessClientRejectsFullPersistenceQueueAndRecordsGap(t *testing.T) {
+	now := time.Date(2026, 8, 2, 8, 10, 0, 0, time.UTC)
+	block := make(chan struct{})
+	started := make(chan struct{})
+	writerSpool := &fakeBatchSpool[Event]{block: block, started: started}
+	batcher := newPersistBatcher(persistBatcherConfig[Event]{
+		Spool: writerSpool, QueueSize: 1, BatchSize: 1,
+		BatchWindow: time.Millisecond, SubmitTimeout: time.Hour,
+	})
+	gapSpool, err := NewBoltAccessSpool(SpoolConfig{
+		Path: filepath.Join(t.TempDir(), "gap.db"), MaxBytes: 1 << 20,
+		MaxAge: time.Hour, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			close(block)
+			released = true
+		}
+	}
+	defer func() {
+		release()
+		if err := batcher.Close(context.Background()); err != nil {
+			t.Fatalf("close batcher: %v", err)
+		}
+		if err := gapSpool.Close(); err != nil {
+			t.Fatalf("close gap spool: %v", err)
+		}
+	}()
+	client := &Client{
+		config:    Config{Enabled: true, Now: func() time.Time { return now }},
+		spool:     gapSpool,
+		persister: batcher,
+		wakeCh:    make(chan struct{}, 1),
+	}
+	if err := batcher.TrySubmit(accessEventForTest("writer", now)); err != nil {
+		t.Fatalf("start writer: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not start")
+	}
+	if err := batcher.TrySubmit(accessEventForTest("queued", now)); err != nil {
+		t.Fatalf("fill queue: %v", err)
+	}
+
+	returned := make(chan bool, 1)
+	go func() { returned <- client.Enqueue(accessEventForTest("rejected", now)) }()
+	select {
+	case ok := <-returned:
+		if ok {
+			t.Fatal("full queue event was reported as accepted")
+		}
+	case <-time.After(100 * time.Millisecond):
+		release()
+		<-returned
+		t.Fatal("full queue admission waited instead of failing fast")
+	}
+	status := client.Status()
+	if status.PersistenceFailures != 1 || status.PersistenceFailureFrom != now.Unix() {
+		t.Fatalf("missing queue-full gap: %#v", status)
 	}
 }
 
@@ -52,6 +153,7 @@ func TestAccessClientRetainsFailureAndReplaysAfterRestart(t *testing.T) {
 	if !client.Enqueue(accessEventForTest("event-a", now)) {
 		t.Fatal("local persistence failed")
 	}
+	waitForPendingEvents(t, client.spool.Stats, 1)
 	if err := client.flushOnce(); err == nil {
 		t.Fatal("expected remote failure")
 	}
@@ -100,6 +202,7 @@ func TestAccessClientBisects400AndRejectsOnlyBadSingleton(t *testing.T) {
 		!client.Enqueue(accessEventForTest("event-good", now)) {
 		t.Fatal("persist access events")
 	}
+	waitForPendingEvents(t, client.spool.Stats, 2)
 	if err := client.flushOnce(); err != nil {
 		t.Fatalf("bisect: %v", err)
 	}

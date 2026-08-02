@@ -105,7 +105,6 @@ type FlowClient struct {
 
 	persistLogMu   sync.Mutex
 	persistLastLog time.Time
-	persistDelayAt time.Time
 	persistFailing bool
 }
 
@@ -226,12 +225,8 @@ func (c *FlowClient) Report(event FlowEvent) error {
 	if err := event.Normalize(c.config.Now()); err != nil {
 		return err
 	}
-	if err := c.persister.Submit(event); err != nil {
-		if errors.Is(err, ErrPersistencePending) {
-			c.recordPersistenceDelay(err)
-			return nil
-		}
-		if errors.Is(err, ErrPersistenceTimeout) || errors.Is(err, ErrPersistenceClosed) {
+	if err := c.persister.TrySubmit(event); err != nil {
+		if errors.Is(err, ErrPersistenceQueueFull) || errors.Is(err, ErrPersistenceClosed) {
 			c.recordPersistenceFailures([]FlowEvent{event}, err)
 		}
 		return err
@@ -289,16 +284,6 @@ func (c *FlowClient) recordPersistenceLog(err error) {
 		c.persistLastLog = now
 	}
 	c.persistFailing = true
-}
-
-func (c *FlowClient) recordPersistenceDelay(err error) {
-	now := c.config.Now()
-	c.persistLogMu.Lock()
-	defer c.persistLogMu.Unlock()
-	if c.persistDelayAt.IsZero() || now.Sub(c.persistDelayAt) >= time.Minute {
-		log.WithField("err", err).Warn("SNTP flow audit local persistence delayed")
-		c.persistDelayAt = now
-	}
 }
 
 func (c *FlowClient) recordPersistenceFailures(events []FlowEvent, err error) {

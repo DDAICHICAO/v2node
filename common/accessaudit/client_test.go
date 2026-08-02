@@ -16,6 +16,39 @@ import (
 	"time"
 )
 
+func waitForPendingEvents(t *testing.T, stats func() (SpoolStats, error), want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		got, err := stats()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.PendingEvents == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pending events=%d want=%d", got.PendingEvents, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForPersistenceFailures(t *testing.T, status func() uint64, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		got := status()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("persistence failures=%d want=%d", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestFlowTrafficClientSendsHomogeneousSignedPayloadAndAcks(t *testing.T) {
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	var receivedBody []byte
@@ -50,6 +83,7 @@ func TestFlowTrafficClientSendsHomogeneousSignedPayloadAndAcks(t *testing.T) {
 	if err := client.Report(flowEventForTest(1, now)); err != nil {
 		t.Fatalf("report: %v", err)
 	}
+	waitForPendingEvents(t, spool.Stats, 1)
 	if err := client.flushOnce(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -108,6 +142,7 @@ func TestFlowTrafficClientRetainsEventsForTransientAndAuthFailures(t *testing.T)
 			if err := client.Report(flowEventForTest(1, now)); err != nil {
 				t.Fatalf("report: %v", err)
 			}
+			waitForPendingEvents(t, spool.Stats, 1)
 			if err := client.flushOnce(); err == nil {
 				t.Fatal("expected flush failure")
 			}
@@ -161,6 +196,7 @@ func TestFlowTrafficClientBisectsInvalidBatchAndRejectsOnlyBadSingleton(t *testi
 	if err := client.Report(good); err != nil {
 		t.Fatalf("report good: %v", err)
 	}
+	waitForPendingEvents(t, spool.Stats, 2)
 	if err := client.flushOnce(); err != nil {
 		t.Fatalf("handled invalid batch should not block queue: %v", err)
 	}
@@ -211,10 +247,39 @@ func TestFlowClientBatchesConcurrentReportsWithoutWriterWaiters(t *testing.T) {
 			t.Fatalf("report: %v", err)
 		}
 	}
+	waitForPendingEvents(t, spool.Stats, events)
 	status := client.Status()
 	if status.PendingEvents != events || status.PersistQueueHighWatermark > 2000 {
 		t.Fatalf("unexpected status: %#v", status)
 	}
+}
+
+func TestFlowClientReportReturnsAfterAdmission(t *testing.T) {
+	now := time.Date(2026, 8, 2, 8, 5, 0, 0, time.UTC)
+	block := make(chan struct{})
+	spool := &failingFlowSpool{block: block}
+	client, err := NewFlowClient(FlowClientConfig{
+		Enabled: true, Endpoint: "http://127.0.0.1:1", Token: "secret",
+		BatchSize: 1, MaxQueueSize: 1, PersistTimeout: time.Hour,
+		Now: func() time.Time { return now }, Spool: spool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	returned := make(chan error, 1)
+	go func() { returned <- client.Report(flowEventForTest(1, now)) }()
+	select {
+	case reportErr := <-returned:
+		if reportErr != nil {
+			t.Fatalf("report: %v", reportErr)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(block)
+		<-returned
+		t.Fatal("report waited for local transaction")
+	}
+	close(block)
+	client.Close()
 }
 
 func TestFlowClientExposesPersistenceFailureGap(t *testing.T) {
@@ -230,9 +295,12 @@ func TestFlowClientExposesPersistenceFailureGap(t *testing.T) {
 	}
 	client.Start()
 	defer client.Close()
-	if err := client.Report(flowEventForTest(1, now)); err == nil {
-		t.Fatal("expected persistence error")
+	if err := client.Report(flowEventForTest(1, now)); err != nil {
+		t.Fatalf("accepted event: %v", err)
 	}
+	waitForPersistenceFailures(t, func() uint64 {
+		return client.Status().PersistenceFailures
+	}, 1)
 	status := client.Status()
 	if status.PersistenceFailures != 1 || status.PersistenceFailureFrom != now.Unix() {
 		t.Fatalf("missing explicit gap: %#v", status)
@@ -256,8 +324,8 @@ func TestFlowClientTreatsAcceptedPersistenceDelayAsQueued(t *testing.T) {
 		t.Fatalf("accepted delayed event must remain queued: %v", err)
 	}
 	status := client.Status()
-	if status.PersistTimeouts != 1 || status.PersistenceFailures != 0 {
-		t.Fatalf("delay must not be counted as a persistence gap: %#v", status)
+	if status.PersistTimeouts != 0 || status.PersistenceFailures != 0 {
+		t.Fatalf("accepted event must not wait or create a gap: %#v", status)
 	}
 	close(block)
 	deadline := time.Now().Add(time.Second)
@@ -276,7 +344,7 @@ func TestFlowClientTreatsAcceptedPersistenceDelayAsQueued(t *testing.T) {
 	}
 }
 
-func TestFlowClientRecordsFailureThatArrivesAfterCallerTimeout(t *testing.T) {
+func TestFlowClientRecordsFailureThatArrivesAfterAdmission(t *testing.T) {
 	now := time.Date(2026, 7, 23, 6, 5, 0, 0, time.UTC)
 	block := make(chan struct{})
 	spool := &failingFlowSpool{block: block, err: errors.New("disk read-only")}

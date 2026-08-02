@@ -132,7 +132,6 @@ type Client struct {
 
 	persistLogMu   sync.Mutex
 	persistLastLog time.Time
-	persistDelayAt time.Time
 	persistFailing bool
 }
 
@@ -412,12 +411,8 @@ func (c *Client) Enqueue(event Event) bool {
 		log.WithField("err", err).Warn("SNTP access audit event rejected before persistence")
 		return false
 	}
-	if err := c.persister.Submit(event); err != nil {
-		if errors.Is(err, ErrPersistencePending) {
-			c.recordPersistenceDelay(err)
-			return true
-		}
-		if errors.Is(err, ErrPersistenceTimeout) || errors.Is(err, ErrPersistenceClosed) {
+	if err := c.persister.TrySubmit(event); err != nil {
+		if errors.Is(err, ErrPersistenceQueueFull) || errors.Is(err, ErrPersistenceClosed) {
 			c.recordPersistenceFailures([]Event{event}, err)
 		}
 		return false
@@ -614,16 +609,6 @@ func (c *Client) recordPersistenceLog(err error) {
 		c.persistLastLog = now
 	}
 	c.persistFailing = true
-}
-
-func (c *Client) recordPersistenceDelay(err error) {
-	now := c.config.Now()
-	c.persistLogMu.Lock()
-	defer c.persistLogMu.Unlock()
-	if c.persistDelayAt.IsZero() || now.Sub(c.persistDelayAt) >= time.Minute {
-		log.WithField("err", err).Warn("SNTP access audit local persistence delayed")
-		c.persistDelayAt = now
-	}
 }
 
 func (c *Client) recordPersistenceFailures(events []Event, err error) {
