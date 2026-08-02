@@ -300,3 +300,47 @@ git diff --check
 - 修复：追赶失败后只在传入的父 `ctx.Err()` 非空时退出运行时；父上下文仍有效时，单次请求的 `context.Canceled` / `context.DeadlineExceeded` 与其他同步错误一样保留当前连接并按 fallback 间隔重试。读取、pong、ACK 等真实传输错误仍立即交给外层重连。
 - 验证：新增回归先稳定失败于 `connection exited after request deadline`，修复后与普通追赶失败、ACK 写失败测试共同通过；`GOEXPERIMENT=jsonv2 go test ./...`、`go vet ./...` 和 `git diff --check` 通过。
 - 下次先查：若只有大权限范围节点反复重连，先比较 `/UniProxy/user?force_full=1` 的服务端耗时与 v2node `DefaultNodeTimeout`，并区分“请求 deadline”与“父运行时已取消”；不要仅凭错误类型包含 `context deadline exceeded` 就断开 WebSocket。
+
+## 2026-08-02：审计落盘结果等待会给新代理请求增加固定一秒延迟
+
+### 症状
+
+HK 高连接 Trojan 节点的 TCP/入口延迟仍在正常范围，但 FullTClash 的 HTTP 延迟从数百毫秒升到约 2.1–2.3 秒；同批非 Trojan 节点约为 1.3 秒，Trojan 额外增加接近 1 秒。节点日志每分钟同时出现 `SNTP access audit local persistence delayed` 和 `SNTP flow audit local persistence delayed`，错误为 `access audit persistence result pending`。
+
+### 影响链与根因
+
+`Trojan 认证成功` -> `DefaultDispatcher.routedDispatch` -> `logSntpUserAccess` -> `accessaudit.Enqueue` -> `Client.Enqueue` -> `persistBatcher.Submit` -> 等待 bbolt 批次结果最多 1 秒 -> `handler.Dispatch`。
+
+普通访问审计位于真正出站转发之前。事件进入有界队列后，`persistBatcher.Submit` 仍同步等待 `request.result`；当 bbolt 单写者、上传 ACK 和磁盘同步不能在默认 `PersistTimeout=1s` 内返回时，请求虽然最终继续并且没有形成 persistence gap，但新代理请求已经被固定阻塞约 1 秒。FlowTraffic 的最终事件也使用同一等待模型，主要影响连接收尾。
+
+现场的 `access.db` 约 35 MiB、`flow.db` 约 154 MiB，进程启动后累计物理写入约 294 GiB；短采样出现 10%–32% I/O wait 和阻塞任务。日志中有数千次限频后的 `persistence delayed`，但 `persistence failed`、OOM、panic、fatal 和流量上报任务超时均为 0。这说明本次是“同步等待落盘结果拖慢数据面”，不是已经确认的审计数据丢失。
+
+### 证书排除
+
+- 证书文件和节点配置早于本次延迟出现，延迟前最近的运行时变化是 v2node 二进制升级与重启。
+- 按真实入口补齐 PROXY Protocol 后，在节点回环连续执行 20 次 TLS 握手，中位数约 2.86 ms。
+- 节点直出 Cloudflare、Google 的 DNS/TCP/TLS/首字节多数在 2–60 ms；当前自签证书没有 OCSP URI 会产生 `ignoring invalid OCSP` 告警，但没有形成秒级 TLS 握手等待。
+
+### 修复与止血边界
+
+- 代码修复应把“事件已被有界队列接收”和“bbolt 最终提交结果”拆开：数据面在队列成功接收后立即继续，真实事务失败由现有整批 `OnFailure` 回调记录 gap；队列未接收、已关闭或已满时仍要明确计数，不能静默丢弃。
+- 生产 A/B 止血可先备份配置，只关闭 `AccessAudit.FlowTraffic.Enabled` 并重启，保留普通访问审计，观察普通访问 `persistence delayed` 是否消失以及 HTTP 延迟是否恢复。未取得变更授权前不要执行。
+- 不应把删除 spool、覆盖空库、关闭全部访问审计或更换证书作为首选修复；这些操作要么破坏证据，要么与已验证的阻塞点无关。
+
+### 验证与下次优先检查
+
+1. 同时采样 FullTClash TCP/HTTP 延迟、`journalctl -u v2node` 的两类 persistence warning、`access.db` / `flow.db` 大小和 `vmstat 1` 的 I/O wait。
+2. 在修复版本中加入回归：让 `EnqueueBatch` 超过 1 秒才完成，断言 `logSntpUserAccess` 所在数据面不会等待事务结果，同时最终成功不记 gap、最终失败只记一次 gap。
+3. 生产验证分开报告“配置已下发”“服务已重启”“延迟已恢复”“审计仍可补传”，至少连续观察 15 分钟。
+
+ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能作为修复完成依据：节点没有重启，日志入口健康检查约 0.52 秒且长连接发送队列为空，但两类 `persistence delayed` 在 45 分钟内仍每分钟出现；10 秒采样中进程物理写入约 32 MiB，折合约 3.75 MiB/s，I/O wait 多次达到 17%–23%。因此远端消费变快只能让个别批次或磁盘空档暂时低延迟，不能解除数据面同步等待本地事务结果的结构性问题。
+
+相关文件：`core/app/dispatcher/default.go`、`common/accessaudit/client.go`、`common/accessaudit/flow_client.go`、`common/accessaudit/persist_batcher.go`、`conf/access_audit.go`。
+
+### 已实施修复与本地验证
+
+- `persistBatcher` 保留原有等待事务结果的 `Submit`，新增 `TrySubmit`：队列有容量时只完成有界接收就返回；队列已满返回 `ErrPersistenceQueueFull`；异步请求不创建结果 channel，后台单写入器仍按原批次执行 `EnqueueBatch`，并在真实事务失败时触发整批 `OnFailure`。
+- 普通访问 `Client.Enqueue` 和 `FlowClient.Report` 已切换到 `TrySubmit`。因此 `logSntpUserAccess` 位于 `handler.Dispatch` 前不再意味着代理请求等待 bbolt；队列满或关闭时仍立即放行业务，并通过现有内存 gap 聚合记录失败数量、字节数和时间范围。
+- 回归测试先在旧客户端实现上稳定失败：普通访问和 FlowTraffic 都出现 `waited for local transaction`，满队列出现 `waited instead of failing fast`；切换到非阻塞接收后这些测试通过。现有上传、补传、批次拆分和后台事务失败测试改为显式等待 spool 状态，不再依赖调用方同步等待落盘。
+- `GOEXPERIMENT=jsonv2 go test ./common/accessaudit ./core/app/dispatcher -count=1` 与 `GOEXPERIMENT=jsonv2 go vet ./common/accessaudit ./core/app/dispatcher` 通过。Windows 本机未安装 `gcc`，`go test -race ./common/accessaudit` 因 `-race requires cgo` / `C compiler "gcc" not found` 未能执行，部署前应在带 CGO 工具链的 Linux CI 或构建机补跑。
+- 对应提交：`0de78ac`（批处理非阻塞接收）和 `6b95752`（两类客户端迁移）。当前只完成代码与本地验证，尚未部署生产；上线后仍需按前述步骤连续观察至少 15 分钟，并分别确认延迟恢复、审计落盘和补传状态。
