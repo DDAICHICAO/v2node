@@ -137,7 +137,7 @@ func (m *managedTLSManager) Prepare(now time.Time) error {
 	return nil
 }
 
-func (m *managedTLSManager) Start(ctx context.Context, onReady func()) {
+func (m *managedTLSManager) Start(ctx context.Context, onReady func() error) {
 	m.mu.Lock()
 	if m.started || m.closed {
 		m.mu.Unlock()
@@ -428,7 +428,7 @@ func (m *managedTLSManager) setSyncRequestID(requestID string) {
 	m.mu.Unlock()
 }
 
-func (m *managedTLSManager) notifyReady(ctx context.Context, callback func()) {
+func (m *managedTLSManager) notifyReady(ctx context.Context, callback func() error) {
 	if callback == nil || ctx.Err() != nil {
 		return
 	}
@@ -437,11 +437,15 @@ func (m *managedTLSManager) notifyReady(ctx context.Context, callback func()) {
 		m.mu.Unlock()
 		return
 	}
-	m.readyNotified = true
 	m.mu.Unlock()
-	if ctx.Err() == nil {
-		callback()
+	if ctx.Err() != nil || callback() != nil {
+		return
 	}
+	m.mu.Lock()
+	if !m.closed {
+		m.readyNotified = true
+	}
+	m.mu.Unlock()
 }
 
 func managedTLSLocalVersion(local *managedTLSLocalCertificate) uint64 {

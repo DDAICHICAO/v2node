@@ -252,6 +252,7 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) error {
 		SampledAt:      throughput.CapturedAt.Unix(),
 	}
 	c.appendAccessAuditRuntimeStatus(&status)
+	c.appendManagedTLSRuntimeStatus(&status)
 	c.appendTLSRuntimeStatus(&status)
 	if err := c.apiClient.ReportNodeRuntimeStatus(reportCtx, status); err != nil {
 		log.WithFields(log.Fields{
@@ -260,7 +261,61 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) error {
 		}).Debug("Report node runtime status failed")
 		return err
 	}
+	if c.managedTLS != nil && status.TLSCertSyncRequestID != "" {
+		c.managedTLS.MarkSyncRequestReported(status.TLSCertSyncRequestID)
+	}
 	return nil
+}
+
+func (c *Controller) reportManagedTLSRuntimeStatus(ctx context.Context) error {
+	reportCtx, cancel := context.WithTimeout(ctx, nodeRuntimeStatusReportTimeout)
+	defer cancel()
+	hostname, _ := os.Hostname()
+	status := panel.NodeRuntimeStatus{
+		Hostname:  strings.TrimSpace(hostname),
+		SampledAt: time.Now().Unix(),
+	}
+	if c.conf != nil {
+		status.MachineInstanceID = instance.ResolveMachineID(c.conf.APIHost)
+	}
+	c.appendManagedTLSRuntimeStatus(&status)
+	c.appendTLSRuntimeStatus(&status)
+	if err := c.apiClient.ReportNodeRuntimeStatus(reportCtx, status); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Debug("Report managed TLS runtime status failed")
+		return err
+	}
+	if c.managedTLS != nil && status.TLSCertSyncRequestID != "" {
+		c.managedTLS.MarkSyncRequestReported(status.TLSCertSyncRequestID)
+	}
+	return nil
+}
+
+func (c *Controller) appendManagedTLSRuntimeStatus(status *panel.NodeRuntimeStatus) {
+	if c == nil || status == nil {
+		return
+	}
+	if c.apiClient != nil {
+		status.TLSCertTokenConfigured = c.apiClient.TLSCertificateTokenConfigured()
+		status.TLSCertTokenFingerprint = c.apiClient.TLSCertificateTokenFingerprint()
+	}
+	if c.managedTLS != nil {
+		appendManagedTLSStatus(status, c.managedTLS.Snapshot())
+	}
+}
+
+func appendManagedTLSStatus(status *panel.NodeRuntimeStatus, snapshot managedTLSStatusSnapshot) {
+	if status == nil {
+		return
+	}
+	status.TLSCertManaged = snapshot.Managed
+	status.TLSCertScopeID = snapshot.ScopeID
+	status.TLSCertVersion = snapshot.Version
+	status.TLSCertNotAfter = snapshot.NotAfter
+	status.TLSCertSyncStatus = string(snapshot.Status)
+	status.TLSCertTokenConfigured = snapshot.TokenConfigured
+	status.TLSCertTokenFingerprint = snapshot.TokenFingerprint
+	status.TLSCertLastErrorCode = snapshot.LastErrorCode
+	status.TLSCertSyncRequestID = snapshot.SyncRequestID
 }
 
 func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeStatus) {

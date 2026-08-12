@@ -40,6 +40,7 @@ VERSION_ARG=""
 API_HOST_ARG=""
 NODE_ID_ARG=""
 API_KEY_ARG=""
+TLS_CERTIFICATE_TOKEN_ARG="${TLS_CERTIFICATE_TOKEN:-}"
 ACCESS_AUDIT_ENABLED_ARG="${ACCESS_AUDIT_ENABLED:-false}"
 ACCESS_AUDIT_ENDPOINT_ARG="${ACCESS_AUDIT_ENDPOINT:-}"
 ACCESS_AUDIT_TOKEN_ARG="${ACCESS_AUDIT_TOKEN:-}"
@@ -79,11 +80,13 @@ generate_v2node_nodes_json() {
         local api_host="$1"
         local node_ids="$2"
         local api_key="$3"
+        local tls_certificate_token="$4"
         local compact_node_ids
         local ids=()
         local id
         local i
         local comma
+        local token_json=""
 
         compact_node_ids=$(printf '%s' "$node_ids" | tr -d '[:space:]')
         if [[ -z "$compact_node_ids" ]]; then
@@ -104,6 +107,14 @@ generate_v2node_nodes_json() {
             fi
         done
 
+        if [[ ${#ids[@]} -gt 1 && -n "$tls_certificate_token" ]]; then
+            echo "one --tls-certificate-token cannot be copied to multiple node ids; configure the corresponding TlsCertificateToken inside each Nodes[] entry" >&2
+            return 1
+        fi
+        if [[ -n "$tls_certificate_token" ]]; then
+            token_json=$(printf ',\n            "TlsCertificateToken": "%s"' "$tls_certificate_token")
+        fi
+
         for i in "${!ids[@]}"; do
             comma=","
             if [[ "$i" -eq $((${#ids[@]} - 1)) ]]; then
@@ -113,7 +124,7 @@ generate_v2node_nodes_json() {
         {
             "ApiHost": "${api_host}",
             "NodeID": ${ids[$i]},
-            "ApiKey": "${api_key}",
+            "ApiKey": "${api_key}"${token_json},
             "Timeout": 15
         }${comma}
 EOF
@@ -129,6 +140,8 @@ parse_args() {
                 NODE_ID_ARG="$2"; shift 2 ;;
             --api-key)
                 API_KEY_ARG="$2"; shift 2 ;;
+            --tls-certificate-token)
+                TLS_CERTIFICATE_TOKEN_ARG="$2"; shift 2 ;;
             --access-audit-enabled)
                 ACCESS_AUDIT_ENABLED_ARG="$2"; shift 2 ;;
             --access-audit-endpoint)
@@ -156,6 +169,7 @@ parse_args() {
             --sntp-access)
                 SNTP_ACCESS_ARG="$2"; shift 2 ;;
             -h|--help)
+                echo "受管证书选项: --tls-certificate-token TOKEN（仅支持单个 --node-id；多节点请分别配置 Nodes[]）"
                 echo "用法: $0 [版本号] [--api-host URL] [--node-id ID[,ID...]] [--api-key KEY] [--access-audit-enabled true|false] [--access-audit-endpoint URL] [--access-audit-token TOKEN]"
                 exit 0 ;;
             --*)
@@ -327,6 +341,7 @@ generate_v2node_config() {
         local api_host="$1"
         local node_id="$2"
         local api_key="$3"
+        local tls_certificate_token="$4"
         local access_audit_enabled
         local sntp_access
         local access_audit_batch_size
@@ -357,7 +372,7 @@ generate_v2node_config() {
         access_flow_spool_path="${ACCESS_FLOW_SPOOL_PATH_ARG:-/var/lib/v2node/access-audit-spool/flow.db}"
         access_flow_max_spool_bytes=$(positive_int_or_default "$ACCESS_FLOW_MAX_SPOOL_BYTES_ARG" "268435456")
         access_flow_max_spool_age="${ACCESS_FLOW_MAX_SPOOL_AGE_ARG:-24h}"
-        if ! nodes_json=$(generate_v2node_nodes_json "$api_host" "$node_id" "$api_key"); then
+        if ! nodes_json=$(generate_v2node_nodes_json "$api_host" "$node_id" "$api_key" "$tls_certificate_token"); then
             echo -e "${red}Invalid --node-id: ${node_id}${plain}"
             return 1
         fi
@@ -586,7 +601,7 @@ EOF
     if [[ ! -f /etc/v2node/config.json ]]; then
         # 如果通过 CLI 传入了完整参数，则直接生成配置并跳过交互
         if [[ -n "$API_HOST_ARG" && -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
-            if generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG"; then
+            if generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG" "$TLS_CERTIFICATE_TOKEN_ARG"; then
                 echo -e "${green}已根据参数生成 /etc/v2node/config.json${plain}"
                 first_install=false
             else
@@ -655,7 +670,9 @@ EOF
             read -rp "节点通讯密钥: " api_key
 
             # 生成配置文件（覆盖可能从包中复制的模板）
-            generate_v2node_config "$api_host" "$node_id" "$api_key" || exit 1
+            read -rsp "TLS 证书令牌（未启用受管证书可留空）: " tls_certificate_token
+            echo
+            generate_v2node_config "$api_host" "$node_id" "$api_key" "$tls_certificate_token" || exit 1
         else
             echo "${green}已跳过自动生成配置。如需后续生成，可执行: v2node generate${plain}"
         fi

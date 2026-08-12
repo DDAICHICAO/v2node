@@ -18,6 +18,15 @@ type NodeRuntimeStatus struct {
 	TLSCertSHA256                        string   `json:"tls_cert_sha256,omitempty"`
 	TLSCertFile                          string   `json:"tls_cert_file,omitempty"`
 	TLSVerifyPeerCertByName              string   `json:"tls_verify_peer_cert_by_name,omitempty"`
+	TLSCertManaged                       bool     `json:"tls_cert_managed"`
+	TLSCertScopeID                       uint64   `json:"tls_cert_scope_id,omitempty"`
+	TLSCertVersion                       uint64   `json:"tls_cert_version,omitempty"`
+	TLSCertNotAfter                      int64    `json:"tls_cert_not_after,omitempty"`
+	TLSCertSyncStatus                    string   `json:"tls_cert_sync_status,omitempty"`
+	TLSCertTokenConfigured               bool     `json:"tls_cert_token_configured"`
+	TLSCertTokenFingerprint              string   `json:"tls_cert_token_fingerprint,omitempty"`
+	TLSCertLastErrorCode                 string   `json:"tls_cert_last_error_code,omitempty"`
+	TLSCertSyncRequestID                 string   `json:"tls_cert_sync_request_id,omitempty"`
 	AccessAuditReported                  bool     `json:"access_audit_reported,omitempty"`
 	AccessAuditEnabled                   bool     `json:"access_audit_enabled"`
 	AccessAuditEndpoint                  string   `json:"access_audit_endpoint,omitempty"`

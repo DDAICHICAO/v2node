@@ -22,35 +22,39 @@ import (
 )
 
 type Controller struct {
-	server                  *core.V2Core
-	apiClient               *panel.Client
-	tag                     string
-	limiter                 *limiter.Limiter
-	userList                []panel.UserInfo
-	aliveMap                map[int]int
-	deviceAliveMap          map[int]int
-	uuidIPFanoutGlobal      panel.UUIDIPFanoutGlobalState
-	netSampler              *netstat.Sampler
-	conf                    *conf.NodeConfig
-	info                    *panel.NodeInfo
-	nodeInfoMonitorPeriodic *task.Task
-	aliveStatePeriodic      *task.Task
-	userReportPeriodic      *task.Task
-	renewCertPeriodic       *task.Task
-	store                   *offlineStateStore
-	bootstrap               *offlineState
-	startedOffline          bool
-	offlineTracker          offlineTracker
-	pendingNodeInfo         *panel.NodeInfo
-	userSyncMu              sync.Mutex
-	stateMu                 sync.Mutex
-	userSyncCancel          context.CancelFunc
-	userSyncDone            chan struct{}
-	userSyncRuntime         *userSyncRuntime
-	fullSyncBreaker         fullSyncBreaker
-	expiryWakeCh            chan struct{}
-	expiryCancel            context.CancelFunc
-	expiryDone              chan struct{}
+	server                   *core.V2Core
+	apiClient                *panel.Client
+	tag                      string
+	limiter                  *limiter.Limiter
+	userList                 []panel.UserInfo
+	aliveMap                 map[int]int
+	deviceAliveMap           map[int]int
+	uuidIPFanoutGlobal       panel.UUIDIPFanoutGlobalState
+	netSampler               *netstat.Sampler
+	conf                     *conf.NodeConfig
+	info                     *panel.NodeInfo
+	nodeInfoMonitorPeriodic  *task.Task
+	aliveStatePeriodic       *task.Task
+	userReportPeriodic       *task.Task
+	renewCertPeriodic        *task.Task
+	managedTLSStatusPeriodic *task.Task
+	managedTLS               *managedTLSManager
+	managedTLSStatusMu       sync.Mutex
+	runtime                  controllerRuntimeLifecycle
+	store                    *offlineStateStore
+	bootstrap                *offlineState
+	startedOffline           bool
+	offlineTracker           offlineTracker
+	pendingNodeInfo          *panel.NodeInfo
+	userSyncMu               sync.Mutex
+	stateMu                  sync.Mutex
+	userSyncCancel           context.CancelFunc
+	userSyncDone             chan struct{}
+	userSyncRuntime          *userSyncRuntime
+	fullSyncBreaker          fullSyncBreaker
+	expiryWakeCh             chan struct{}
+	expiryCancel             context.CancelFunc
+	expiryDone               chan struct{}
 }
 
 // NewController return a Node controller with default parameters.
@@ -84,54 +88,138 @@ func (c *Controller) Start(x *core.V2Core) error {
 		return errors.New("bootstrap user state is incomplete")
 	}
 	c.tag = node.Tag
-
-	// add limiter
-	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap, c.deviceAliveMap, c.supportsDeviceLimitByUUID())
-	l.UpdateUUIDIPFanoutConfig(uuidIPFanoutLimiterConfig(c.info.Common.BaseConfig.UUIDIPFanoutGuard))
-	l.UpdateUUIDIPFanoutGlobal(uuidIPFanoutLimiterGlobal(c.uuidIPFanoutGlobal), time.Now())
-	c.limiter = l
-	c.installUUIDIPFanoutReservation(l)
-	if node.Security == panel.Tls {
-		err := c.requestCert()
-		if err != nil {
-			return fmt.Errorf("request cert error: %s", err)
+	if c.usesManagedTLS() {
+		store := newManagedTLSFileStore("/etc/v2node/certificates", c.conf.NodeID)
+		c.managedTLS = newManagedTLSManager(
+			c.apiClient,
+			store,
+			&managedTLSLegoIssuer{},
+			node.Common.TlsSettings.CertificateScopeID,
+			node.Common.TlsSettings.PrimaryServerName(),
+		)
+		prepareErr := c.managedTLS.Prepare(time.Now().UTC())
+		if prepareErr != nil && !errors.Is(prepareErr, ErrManagedTLSPending) {
+			return fmt.Errorf("prepare managed TLS certificate: %w", prepareErr)
 		}
-	}
-	// Add new tag
-	err := c.server.AddNode(c.tag, node)
-	if err != nil {
-		return fmt.Errorf("add new node error: %s", err)
-	}
-	added, err := c.server.AddUsers(&core.AddUsersParams{
-		Tag:      c.tag,
-		Users:    c.userList,
-		NodeInfo: node,
-	})
-	if err != nil {
-		return fmt.Errorf("add users error: %s", err)
-	}
-	log.WithField("tag", c.tag).Infof("Added %d new users", added)
-	if _, _, err := c.netSampler.Sample(); err != nil {
+		if prepareErr == nil {
+			if err := c.startRuntime(); err != nil {
+				return err
+			}
+			c.managedTLS.Start(context.Background(), c.startRuntimeAfterManagedTLSReady)
+			return nil
+		}
+
+		c.startManagedTLSStatusReporter()
+		c.managedTLS.Start(context.Background(), c.startRuntimeAfterManagedTLSReady)
 		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Debug("Prime network throughput sampler failed")
+			"tag":      c.tag,
+			"node_id":  c.conf.NodeID,
+			"scope_id": node.Common.TlsSettings.CertificateScopeID,
+		}).Warning("Managed TLS certificate is not ready; this node is waiting without blocking other nodes")
+		return nil
 	}
-	c.info = node
-	if !c.startedOffline {
-		if err := c.persistOfflineState(node); err != nil {
+
+	return c.startRuntime()
+}
+
+func (c *Controller) usesManagedTLS() bool {
+	return c != nil && c.info != nil && c.info.Security == panel.Tls &&
+		c.info.Common != nil && c.info.Common.CertInfo != nil &&
+		strings.EqualFold(strings.TrimSpace(c.info.Common.CertInfo.CertMode), "managed")
+}
+
+func (c *Controller) startRuntimeAfterManagedTLSReady() error {
+	if err := c.startRuntime(); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Start node after managed TLS became ready failed")
+		return err
+	}
+	c.stopManagedTLSStatusReporter()
+	return nil
+}
+
+func (c *Controller) startRuntime() error {
+	return c.runtime.Start(func() error {
+		node := c.info
+
+		// add limiter
+		l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap, c.deviceAliveMap, c.supportsDeviceLimitByUUID())
+		l.UpdateUUIDIPFanoutConfig(uuidIPFanoutLimiterConfig(c.info.Common.BaseConfig.UUIDIPFanoutGuard))
+		l.UpdateUUIDIPFanoutGlobal(uuidIPFanoutLimiterGlobal(c.uuidIPFanoutGlobal), time.Now())
+		c.limiter = l
+		c.installUUIDIPFanoutReservation(l)
+		if node.Security == panel.Tls && !c.usesManagedTLS() {
+			if err := c.requestCert(); err != nil {
+				limiter.DeleteLimiter(c.tag)
+				c.limiter = nil
+				return fmt.Errorf("request cert error: %s", err)
+			}
+		}
+		// Add new tag
+		if err := c.server.AddNode(c.tag, node); err != nil {
+			limiter.DeleteLimiter(c.tag)
+			c.limiter = nil
+			return fmt.Errorf("add new node error: %s", err)
+		}
+		added, err := c.server.AddUsers(&core.AddUsersParams{
+			Tag:      c.tag,
+			Users:    c.userList,
+			NodeInfo: node,
+		})
+		if err != nil {
+			if deleteErr := c.server.DelNode(c.tag); deleteErr != nil {
+				log.WithFields(log.Fields{"tag": c.tag, "err": deleteErr}).Warning("Rollback node after adding users failed")
+			}
+			limiter.DeleteLimiter(c.tag)
+			c.limiter = nil
+			return fmt.Errorf("add users error: %s", err)
+		}
+		log.WithField("tag", c.tag).Infof("Added %d new users", added)
+		if _, _, err := c.netSampler.Sample(); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Error("Persist initial offline snapshot failed")
+			}).Debug("Prime network throughput sampler failed")
 		}
-	} else {
-		offlineErr := errors.New("panel unavailable during bootstrap; using offline snapshot")
-		c.recordPanelFailureAt("sync", "bootstrap", offlineErr, time.Unix(c.bootstrap.SavedAt, 0))
-		c.recordPanelFailureAt("sync", "bootstrap", offlineErr, time.Now())
+		if !c.startedOffline {
+			if err := c.persistOfflineState(node); err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Persist initial offline snapshot failed")
+			}
+		} else {
+			offlineErr := errors.New("panel unavailable during bootstrap; using offline snapshot")
+			c.recordPanelFailureAt("sync", "bootstrap", offlineErr, time.Unix(c.bootstrap.SavedAt, 0))
+			c.recordPanelFailureAt("sync", "bootstrap", offlineErr, time.Now())
+		}
+		c.startTasks(node)
+		return nil
+	})
+}
+
+func (c *Controller) startManagedTLSStatusReporter() {
+	c.managedTLSStatusMu.Lock()
+	defer c.managedTLSStatusMu.Unlock()
+	if c.managedTLSStatusPeriodic != nil {
+		return
 	}
-	c.startTasks(node)
-	return nil
+	c.managedTLSStatusPeriodic = &task.Task{
+		Name:            "managedTLSStatusTask",
+		Interval:        time.Minute,
+		Execute:         c.reportManagedTLSRuntimeStatus,
+		ReloadOnTimeout: false,
+	}
+	_ = c.managedTLSStatusPeriodic.Start(true)
+}
+
+func (c *Controller) stopManagedTLSStatusReporter() {
+	c.managedTLSStatusMu.Lock()
+	periodic := c.managedTLSStatusPeriodic
+	c.managedTLSStatusPeriodic = nil
+	c.managedTLSStatusMu.Unlock()
+	if periodic != nil {
+		periodic.Close()
+	}
 }
 
 func (c *Controller) persistOfflineState(info *panel.NodeInfo) error {
@@ -332,6 +420,10 @@ func cloneUUIDIPFanoutGlobalState(state panel.UUIDIPFanoutGlobalState) panel.UUI
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
+	if c.managedTLS != nil {
+		c.managedTLS.Close()
+	}
+	c.stopManagedTLSStatusReporter()
 	c.cancelUserExpiryScheduler()
 	if c.nodeInfoMonitorPeriodic != nil {
 		c.nodeInfoMonitorPeriodic.Close()
@@ -347,10 +439,57 @@ func (c *Controller) Close() error {
 	}
 	c.closeUserSyncRuntime()
 	c.waitUserExpiryScheduler()
-	limiter.DeleteLimiter(c.tag)
-	err := c.server.DelNode(c.tag)
-	if err != nil {
-		return fmt.Errorf("del node error: %s", err)
+	return c.runtime.Close(func() error {
+		limiter.DeleteLimiter(c.tag)
+		c.limiter = nil
+		if err := c.server.DelNode(c.tag); err != nil {
+			return fmt.Errorf("del node error: %s", err)
+		}
+		return nil
+	})
+}
+
+type controllerRuntimeLifecycle struct {
+	mu      sync.Mutex
+	started bool
+	closed  bool
+}
+
+func (l *controllerRuntimeLifecycle) Start(start func() error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return errors.New("controller runtime is closed")
 	}
+	if l.started {
+		return nil
+	}
+	if err := start(); err != nil {
+		return err
+	}
+	l.started = true
+	return nil
+}
+
+func (l *controllerRuntimeLifecycle) Started() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.started
+}
+
+func (l *controllerRuntimeLifecycle) Close(stop func() error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	if !l.started {
+		return nil
+	}
+	if err := stop(); err != nil {
+		return err
+	}
+	l.started = false
 	return nil
 }

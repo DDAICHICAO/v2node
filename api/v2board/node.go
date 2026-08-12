@@ -265,6 +265,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
 	cf := cm.TlsSettings.CertFile
 	kf := cm.TlsSettings.KeyFile
+	if cm.TlsSettings.CertMode == "managed" {
+		cf, kf = managedTLSCertificatePaths(c.NodeId)
+	}
 	if cf == "" {
 		cf = filepath.Join("/etc/v2node/", cm.Protocol+strconv.Itoa(c.NodeId)+".cer")
 	}
@@ -298,6 +301,11 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	node.Common = cm
 
 	return node, nil
+}
+
+func managedTLSCertificatePaths(nodeID int) (string, string) {
+	base := filepath.Join("/etc/v2node/certificates", strconv.Itoa(nodeID), "current")
+	return filepath.Join(base, "fullchain.pem"), filepath.Join(base, "private.key")
 }
 
 func bodySnippet(body []byte) string {
