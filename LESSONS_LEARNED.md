@@ -372,3 +372,27 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 回归测试先在旧客户端实现上稳定失败：普通访问和 FlowTraffic 都出现 `waited for local transaction`，满队列出现 `waited instead of failing fast`；切换到非阻塞接收后这些测试通过。现有上传、补传、批次拆分和后台事务失败测试改为显式等待 spool 状态，不再依赖调用方同步等待落盘。
 - `GOEXPERIMENT=jsonv2 go test ./... -count=1` 与 `GOEXPERIMENT=jsonv2 go vet ./common/accessaudit ./core/app/dispatcher` 通过。全仓回归发现并修正了 `node` 状态上报测试的旧同步假设：测试现在等待两类事件进入持久化 spool 后再校验 pending 字段。Windows 本机未安装 `gcc`，`go test -race ./common/accessaudit` 因 `-race requires cgo` / `C compiler "gcc" not found` 未能执行，部署前应在带 CGO 工具链的 Linux CI 或构建机补跑。
 - 对应提交：`0de78ac`（批处理非阻塞接收）和 `6b95752`（两类客户端迁移）。当前只完成代码与本地验证，尚未部署生产；上线后仍需按前述步骤连续观察至少 15 分钟，并分别确认延迟恢复、审计落盘和补传状态。
+
+## 2026-08-13：多 NodeID 机器的受管证书凭证必须按面板和 NodeID 隔离
+
+### 症状与影响链
+
+同一台机器可运行多个 NodeID，同一 NodeID 也可部署到多台实例。旧流程要求把后台只显示一次的 `TlsCertificateToken` 手工写入每台实例；漏配时节点继续使用旧 `http` / `dns` ACME 路径，证书失败又可能触发整个多节点进程被 systemd 反复拉起。
+
+影响链：后台创建证书作用域 -> NodeID 凭证生成 -> 每个实例手工配置 -> 节点切换 `cert_mode=managed` -> HMAC 拉取共享证书。手工步骤既容易漏掉新实例，也容易把同机其他 NodeID 的凭证误用过来。
+
+### 根因与修复
+
+- 证书共享边界是作用域，访问凭证边界是 NodeID，机器不是任何一者；因此不能选“这台机器上的某个节点凭证”作为全机共享凭证。
+- 新节点能力 `managed_tls_auto_credential_v1` 通过既有面板 `ApiKey + NodeID + instance_id` 身份，在配置进入 `managed` 后领取本 NodeID 的凭证。
+- 本地凭证按规范化 `ApiHost + NodeID` 生成独立文件名，保存于 `/etc/v2node/credentials`；目录权限 `0700`、文件权限 `0600`，使用同目录临时文件和原子替换。相同 NodeID 的多个实例领取同一个面板凭证，不同 NodeID 或不同面板绝不复用。
+- 显式 `TlsCertificateToken` 保持最高优先级，兼容旧部署。自动凭证收到受管证书接口 `401` 时只刷新并重试一次；并发请求发现其他协程已换新后直接复用，避免形成领取风暴。
+- 首次领取失败后，即使节点配置正文未变化，后续配置轮询仍会重试；状态快照动态读取当前凭证指纹，避免领取成功后继续上报旧的“未配置”状态。
+
+### 验证、下次检查与相关文件
+
+- 临时回归覆盖：同机 NodeID 隔离、不同面板隔离、落盘重载、显式 Token 优先、401 单次刷新、配置正文未变化时继续领取。
+- `GOEXPERIMENT=jsonv2 go test ./... -count=1`、`go vet ./api/v2board ./node`、`git diff --check` 通过；临时测试文件已按仓库约定删除。
+- 生产验证先看 `/etc/v2node/credentials/node-<NodeID>-<ApiHostHash>.json` 的权限和 NodeID，再看状态上报指纹、受管证书版本以及旧 ACME 日志是否停止。日志和文档不得记录明文凭证。
+- 相关文件：`api/v2board/managed_tls_credential.go`、`api/v2board/managed_tls.go`、`api/v2board/node.go`、`api/v2board/panel.go`、`node/managed_tls_manager.go`。
+- 对应实现提交：`e0321fe`。
