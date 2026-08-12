@@ -1,5 +1,33 @@
 # LESSONS LEARNED
 
+## 2026-08-12：同机多 NodeID 的受管证书必须隔离本地身份
+
+### 症状与链路
+
+一个 NodeID 可同时运行多实例，逐实例 ACME 会反复申请；一台机器也可运行多个 NodeID，因此不能把“机器上某个节点生成的证书”作为无条件共享证书。完整链路为 `conf.NodeConfig.TlsCertificateToken` -> v2board HMAC 证书接口 -> `managedTLSManager` -> scope lease / Lego DNS-01 -> NodeID 本地 store -> `Controller.startRuntime` -> `/api/v2/server/status`。
+
+### 根因与边界
+
+- 共享边界应是 v2board 明确维护的 certificate scope，不是机器、实例或相同域名。
+- 每个 `Nodes[]` 条目对应一个 NodeID credential；同机多 NodeID 不能复制同一个 token。
+- 同 scope 的 NodeID 只共享证书内容和版本，不共享本地目录、Controller 生命周期或 API 身份。
+- DNS provider 使用进程环境变量，必须把整个 Lego Obtain 放在进程级互斥区并在错误、取消和 panic 路径恢复环境。
+
+### 修复
+
+- 增加独立 HMAC client、固定 canonical、时间窗和 nonce；受管接口不携带普通 panel query token，也不允许客户端选择 scope。
+- 证书安装在 `/etc/v2node/certificates/{NodeID}/current`，保留 current/previous 并校验 scope metadata、精确 SAN、私钥、有效期和 serverAuth。
+- manager 先下载，缺证书才竞争 scope lease；发布后重新 GET 确认 canonical 指纹再安装。已有有效本地证书时 panel 故障进入 degraded，不中断运行。
+- managed 尚未 ready 时只让该 Controller 等待并独立上报状态，不阻塞同进程其他 NodeID；ready 后只启动一次 runtime。受管更新不写 `ReloadCh`，旧 `renewCertTask` 排除 managed。
+- 安装脚本只允许单 NodeID 携带 `--tls-certificate-token`；多 NodeID 必须在各自 `Nodes[]` 中配置对应 token。
+
+### 验证与下次检查
+
+- 验证：`GOEXPERIMENT=jsonv2 go test ./api/v2board ./node`、`bash -n script/install.sh`、安装脚本单/多 NodeID 函数测试、`git diff --check`。
+- 下次先查：managed 状态字段的 scope/version/status/token fingerprint、各 NodeID `metadata.json`、进程 `MainPID/NRestarts`、面板 scope lease holder 和失败冷却；日志不得记录 token、DNS 凭据、PEM、私钥或完整签名。
+- 相关文件：`api/v2board/managed_tls.go`, `node/managed_tls_store.go`, `node/managed_tls_issuer.go`, `node/managed_tls_manager.go`, `node/controller.go`, `node/user.go`, `script/install.sh`。
+- 关键提交：`9e5ad14`, `b03e8d4`, `b7d9cf6`, `2551a68`, `367e653`。
+
 ## 2026-07-14：面板失联不应拖垮节点数据面
 
 ### 症状
