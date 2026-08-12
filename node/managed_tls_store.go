@@ -309,6 +309,18 @@ func validateManagedTLSLocalCertificate(certificate *managedTLSLocalCertificate,
 	if err := leaf.VerifyHostname(certificate.Metadata.Domain); err != nil {
 		return errManagedTLSLocalCertificateInvalid
 	}
+	if len(leaf.ExtKeyUsage) > 0 {
+		serverUsage := false
+		for _, usage := range leaf.ExtKeyUsage {
+			if usage == x509.ExtKeyUsageServerAuth || usage == x509.ExtKeyUsageAny {
+				serverUsage = true
+				break
+			}
+		}
+		if !serverUsage {
+			return errManagedTLSLocalCertificateInvalid
+		}
+	}
 	if checkTime && (now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter)) {
 		return errManagedTLSLocalCertificateInvalid
 	}
