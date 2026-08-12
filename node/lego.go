@@ -279,3 +279,46 @@ func (u *User) Load(path string) error {
 	}
 	return nil
 }
+
+func managedTLSUserFromAccount(account *panel.ManagedTLSACMEAccount) (*User, error) {
+	if account == nil || strings.TrimSpace(account.Email) == "" || len(account.Registration) == 0 || strings.TrimSpace(account.PrivateKeyPEM) == "" {
+		return nil, fmt.Errorf("managed TLS ACME account is incomplete")
+	}
+	user := &User{Email: strings.TrimSpace(account.Email)}
+	if err := json.Unmarshal(account.Registration, &user.Registration); err != nil || user.Registration == nil {
+		return nil, fmt.Errorf("decode managed TLS ACME registration")
+	}
+	block, _ := pem.Decode([]byte(account.PrivateKeyPEM))
+	if block == nil {
+		return nil, fmt.Errorf("decode managed TLS ACME private key")
+	}
+	privateKey, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse managed TLS ACME private key")
+	}
+	user.key = privateKey
+	return user, nil
+}
+
+func exportManagedTLSAccount(user *User) (*panel.ManagedTLSACMEAccount, error) {
+	if user == nil || strings.TrimSpace(user.Email) == "" || user.Registration == nil {
+		return nil, fmt.Errorf("managed TLS ACME account is incomplete")
+	}
+	privateKey, ok := user.key.(*ecdsa.PrivateKey)
+	if !ok || privateKey == nil {
+		return nil, fmt.Errorf("managed TLS ACME private key is invalid")
+	}
+	privateKeyPEM, err := EncodePrivate(privateKey)
+	if err != nil {
+		return nil, err
+	}
+	registrationJSON, err := json.Marshal(user.Registration)
+	if err != nil {
+		return nil, err
+	}
+	return &panel.ManagedTLSACMEAccount{
+		Email:         user.Email,
+		Registration:  registrationJSON,
+		PrivateKeyPEM: privateKeyPEM,
+	}, nil
+}

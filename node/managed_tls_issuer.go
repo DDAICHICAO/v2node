@@ -1,0 +1,163 @@
+package node
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/go-acme/lego/v4/certcrypto"
+	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v4/lego"
+	"github.com/go-acme/lego/v4/providers/dns"
+	"github.com/go-acme/lego/v4/registration"
+	panel "github.com/wyx2685/v2node/api/v2board"
+)
+
+var managedTLSLegoMu sync.Mutex
+
+type managedTLSIssueRequest struct {
+	ScopeID     uint64
+	Domain      string
+	Provider    string
+	DNSEnv      map[string]string
+	ACMEAccount *panel.ManagedTLSACMEAccount
+}
+
+type managedTLSIssueResult struct {
+	FullchainPEM  []byte
+	PrivateKeyPEM []byte
+	ACMEAccount   panel.ManagedTLSACMEAccount
+}
+
+type managedTLSIssuer interface {
+	Issue(ctx context.Context, request managedTLSIssueRequest) (*managedTLSIssueResult, error)
+}
+
+type managedTLSLegoIssuer struct {
+	obtain func(context.Context, managedTLSIssueRequest) (*managedTLSIssueResult, error)
+}
+
+func (i *managedTLSLegoIssuer) Issue(ctx context.Context, request managedTLSIssueRequest) (*managedTLSIssueResult, error) {
+	managedTLSLegoMu.Lock()
+	defer managedTLSLegoMu.Unlock()
+
+	restore, err := applyManagedTLSDNSEnvironment(request.DNSEnv)
+	if err != nil {
+		return nil, fmt.Errorf("managed_tls_dns_environment_invalid")
+	}
+	defer restore()
+	if i.obtain != nil {
+		return i.obtain(ctx, request)
+	}
+	return issueManagedTLSWithLego(ctx, request)
+}
+
+func issueManagedTLSWithLego(ctx context.Context, request managedTLSIssueRequest) (*managedTLSIssueResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("managed_tls_issue_cancelled")
+	}
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(request.Domain)), ".")
+	provider := strings.ToLower(strings.TrimSpace(request.Provider))
+	if !validManagedTLSDomain(domain) || provider == "" || len(request.DNSEnv) == 0 {
+		return nil, fmt.Errorf("managed_tls_issue_config_invalid")
+	}
+
+	var user *User
+	var err error
+	if request.ACMEAccount != nil {
+		user, err = managedTLSUserFromAccount(request.ACMEAccount)
+	} else {
+		user, err = newManagedTLSLegoUser("node@v2board.com")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("managed_tls_acme_account_invalid")
+	}
+	config := lego.NewConfig(user)
+	config.Certificate.KeyType = certcrypto.RSA2048
+	client, err := lego.NewClient(config)
+	if err != nil {
+		return nil, fmt.Errorf("managed_tls_lego_client_failed")
+	}
+	if user.Registration == nil {
+		user.Registration, err = client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+		if err != nil {
+			return nil, fmt.Errorf("managed_tls_acme_registration_failed")
+		}
+	}
+	providerInstance, err := dns.NewDNSChallengeProviderByName(provider)
+	if err != nil {
+		return nil, fmt.Errorf("managed_tls_dns_provider_failed")
+	}
+	if err := client.Challenge.SetDNS01Provider(providerInstance); err != nil {
+		return nil, fmt.Errorf("managed_tls_dns_provider_failed")
+	}
+	resource, err := client.Certificate.Obtain(certificate.ObtainRequest{Domains: []string{domain}, Bundle: true})
+	if err != nil {
+		return nil, fmt.Errorf("managed_tls_obtain_failed")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("managed_tls_issue_cancelled")
+	}
+	account, err := exportManagedTLSAccount(user)
+	if err != nil {
+		return nil, fmt.Errorf("managed_tls_acme_account_invalid")
+	}
+	return &managedTLSIssueResult{
+		FullchainPEM:  append([]byte(nil), resource.Certificate...),
+		PrivateKeyPEM: append([]byte(nil), resource.PrivateKey...),
+		ACMEAccount:   *account,
+	}, nil
+}
+
+func newManagedTLSLegoUser(email string) (*User, error) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return &User{Email: email, key: privateKey}, nil
+}
+
+func applyManagedTLSDNSEnvironment(environment map[string]string) (func(), error) {
+	keys := make([]string, 0, len(environment))
+	for key := range environment {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	type oldValue struct {
+		value  string
+		exists bool
+	}
+	old := make(map[string]oldValue, len(keys))
+	applied := make([]string, 0, len(keys))
+	restore := func() {
+		for index := len(applied) - 1; index >= 0; index-- {
+			key := applied[index]
+			previous := old[key]
+			if previous.exists {
+				_ = os.Setenv(key, previous.value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		}
+	}
+	for _, key := range keys {
+		if strings.TrimSpace(key) == "" || strings.ContainsRune(key, '=') {
+			restore()
+			return nil, fmt.Errorf("invalid environment key")
+		}
+		value, exists := os.LookupEnv(key)
+		old[key] = oldValue{value: value, exists: exists}
+		if err := os.Setenv(key, environment[key]); err != nil {
+			restore()
+			return nil, err
+		}
+		applied = append(applied, key)
+	}
+	return restore, nil
+}
