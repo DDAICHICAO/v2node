@@ -204,6 +204,10 @@ func (e *EncSettings) UnmarshalJSON(data []byte) error {
 }
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
+	if c.managedTLSCredentialRequired.Load() {
+		_ = c.EnsureManagedTLSCredential(ctx, false)
+	}
+
 	const path = "/api/v2/server/config"
 	r, err := c.client.
 		R().
@@ -248,6 +252,14 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	err = json.Unmarshal(r.Body(), cm)
 	if err != nil {
 		return nil, fmt.Errorf("decode node params error: %s; body=%s", err, bodySnippet(r.Body()))
+	}
+	managedTLSRequired := cm.TlsSettings.CertMode == "managed"
+	c.managedTLSCredentialRequired.Store(managedTLSRequired)
+	if managedTLSRequired {
+		// Credential bootstrap is best effort. The managed TLS manager keeps the
+		// node blocked until a credential becomes available and retries on later
+		// config pulls without taking unrelated instances down.
+		_ = c.EnsureManagedTLSCredential(ctx, false)
 	}
 	if cm.BaseConfig != nil && cm.BaseConfig.UserSyncWakeup != nil {
 		cm.BaseConfig.UserSyncWakeup.Normalize()

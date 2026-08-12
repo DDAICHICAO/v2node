@@ -161,19 +161,48 @@ func (c *Client) FailManagedTLSCertificate(ctx context.Context, request ManagedT
 }
 
 func (c *Client) TLSCertificateTokenConfigured() bool {
-	return c != nil && strings.TrimSpace(c.tlsCertificateToken) != ""
+	if c == nil {
+		return false
+	}
+	c.managedTLSCredentialMu.RLock()
+	defer c.managedTLSCredentialMu.RUnlock()
+	return strings.TrimSpace(c.tlsCertificateToken) != ""
 }
 
 func (c *Client) TLSCertificateTokenFingerprint() string {
-	if !c.TLSCertificateTokenConfigured() {
+	if c == nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(c.tlsCertificateToken))
-	return hex.EncodeToString(sum[:])[:16]
+	c.managedTLSCredentialMu.RLock()
+	defer c.managedTLSCredentialMu.RUnlock()
+	if strings.TrimSpace(c.tlsCertificateToken) == "" {
+		return ""
+	}
+	return managedTLSTokenFingerprint(c.tlsCertificateToken)
 }
 
 func (c *Client) managedTLSRequest(ctx context.Context, method, path string, body []byte, query map[string]string) (*resty.Response, error) {
-	if c == nil || !c.TLSCertificateTokenConfigured() || c.NodeId <= 0 || strings.TrimSpace(c.instanceID) == "" {
+	if c == nil || c.NodeId <= 0 || strings.TrimSpace(c.instanceID) == "" {
+		return nil, &ManagedTLSError{StatusCode: http.StatusUnauthorized, Code: "managed_tls_credential_missing"}
+	}
+	if !c.TLSCertificateTokenConfigured() {
+		if err := c.EnsureManagedTLSCredential(ctx, false); err != nil {
+			return nil, err
+		}
+	}
+	rejectedToken := c.managedTLSCredentialToken()
+	response, err := c.managedTLSRequestOnce(ctx, method, path, body, query, rejectedToken)
+	if err != nil || response == nil || response.StatusCode() != http.StatusUnauthorized || c.tlsCertificateTokenIsExplicit() {
+		return response, err
+	}
+	if err := c.refreshManagedTLSCredentialAfterUnauthorized(ctx, rejectedToken); err != nil {
+		return nil, err
+	}
+	return c.managedTLSRequestOnce(ctx, method, path, body, query, c.managedTLSCredentialToken())
+}
+
+func (c *Client) managedTLSRequestOnce(ctx context.Context, method, path string, body []byte, query map[string]string, token string) (*resty.Response, error) {
+	if token == "" {
 		return nil, &ManagedTLSError{StatusCode: http.StatusUnauthorized, Code: "managed_tls_credential_missing"}
 	}
 	now := time.Now()
@@ -203,7 +232,7 @@ func (c *Client) managedTLSRequest(ctx context.Context, method, path string, bod
 		SetHeader("X-SNTP-Instance-ID", c.instanceID).
 		SetHeader("X-SNTP-Timestamp", strconv.FormatInt(timestamp, 10)).
 		SetHeader("X-SNTP-Nonce", nonce).
-		SetHeader("X-SNTP-Signature", managedTLSSignature(c.tlsCertificateToken, canonical)).
+		SetHeader("X-SNTP-Signature", managedTLSSignature(token, canonical)).
 		SetHeader("Accept", "application/json")
 	for key, value := range query {
 		request.SetQueryParam(key, value)
@@ -220,6 +249,24 @@ func (c *Client) managedTLSRequest(ctx context.Context, method, path string, bod
 		return nil, &ManagedTLSError{Code: "managed_tls_response_missing"}
 	}
 	return response, nil
+}
+
+func (c *Client) managedTLSCredentialToken() string {
+	if c == nil {
+		return ""
+	}
+	c.managedTLSCredentialMu.RLock()
+	defer c.managedTLSCredentialMu.RUnlock()
+	return strings.TrimSpace(c.tlsCertificateToken)
+}
+
+func (c *Client) tlsCertificateTokenIsExplicit() bool {
+	if c == nil {
+		return false
+	}
+	c.managedTLSCredentialMu.RLock()
+	defer c.managedTLSCredentialMu.RUnlock()
+	return c.tlsCertificateTokenExplicit
 }
 
 func managedTLSCanonical(method, path string, nodeID int, instanceID string, timestamp int64, nonce string, body []byte) string {

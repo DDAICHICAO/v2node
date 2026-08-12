@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -33,26 +34,31 @@ var deviceLimitCapabilities = []string{
 	"uuid_ip_fanout_reservation_v1",
 	"device_limit_event_report",
 	"managed_tls_certificate_v1",
+	managedTLSAutoCredentialCapability,
 }
 
 type Client struct {
-	client                  *resty.Client
-	managedTLSClient        *resty.Client
-	APIHost                 string
-	Token                   string
-	AppTransportTokenSecret string
-	NodeId                  int
-	nodeEtag                string
-	userEtag                string
-	userSyncMu              sync.RWMutex
-	userSyncSeq             int64
-	responseBodyHash        string
-	instanceID              string
-	tlsCertificateToken     string
-	managedTLSNow           func() time.Time
-	managedTLSNonce         func() (string, error)
-	UserList                *UserListBody
-	AliveMap                *AliveMap
+	client                       *resty.Client
+	managedTLSClient             *resty.Client
+	APIHost                      string
+	Token                        string
+	AppTransportTokenSecret      string
+	NodeId                       int
+	nodeEtag                     string
+	userEtag                     string
+	userSyncMu                   sync.RWMutex
+	userSyncSeq                  int64
+	responseBodyHash             string
+	instanceID                   string
+	tlsCertificateToken          string
+	tlsCertificateTokenExplicit  bool
+	managedTLSCredentialMu       sync.RWMutex
+	managedTLSCredentialStore    *managedTLSCredentialStore
+	managedTLSCredentialRequired atomic.Bool
+	managedTLSNow                func() time.Time
+	managedTLSNonce              func() (string, error)
+	UserList                     *UserListBody
+	AliveMap                     *AliveMap
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
@@ -114,17 +120,26 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		}
 		return nil
 	})
+	tlsCertificateToken := strings.TrimSpace(c.TLSCertificateToken)
+	credentialStore := newManagedTLSCredentialStore(managedTLSCredentialBaseDir, c.APIHost, c.NodeID)
+	if tlsCertificateToken == "" {
+		if credential, err := credentialStore.Load(); err == nil {
+			tlsCertificateToken = credential.Token
+		}
+	}
 	return &Client{
-		client:                  client,
-		managedTLSClient:        managedTLSClient,
-		Token:                   c.Key,
-		AppTransportTokenSecret: c.AppTransportTokenSecret,
-		APIHost:                 c.APIHost,
-		NodeId:                  c.NodeID,
-		instanceID:              resolvedInstanceID,
-		tlsCertificateToken:     strings.TrimSpace(c.TLSCertificateToken),
-		UserList:                &UserListBody{},
-		AliveMap:                &AliveMap{},
+		client:                      client,
+		managedTLSClient:            managedTLSClient,
+		Token:                       c.Key,
+		AppTransportTokenSecret:     c.AppTransportTokenSecret,
+		APIHost:                     c.APIHost,
+		NodeId:                      c.NodeID,
+		instanceID:                  resolvedInstanceID,
+		tlsCertificateToken:         tlsCertificateToken,
+		tlsCertificateTokenExplicit: strings.TrimSpace(c.TLSCertificateToken) != "",
+		managedTLSCredentialStore:   credentialStore,
+		UserList:                    &UserListBody{},
+		AliveMap:                    &AliveMap{},
 	}, nil
 }
 

@@ -193,8 +193,13 @@ func (m *managedTLSManager) Close() {
 
 func (m *managedTLSManager) Snapshot() managedTLSStatusSnapshot {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.snapshot
+	snapshot := m.snapshot
+	m.mu.RUnlock()
+	if m.client != nil {
+		snapshot.TokenConfigured = m.client.TLSCertificateTokenConfigured()
+		snapshot.TokenFingerprint = m.client.TLSCertificateTokenFingerprint()
+	}
+	return snapshot
 }
 
 func (m *managedTLSManager) MarkSyncRequestReported(requestID string) {
