@@ -32,10 +32,12 @@ var deviceLimitCapabilities = []string{
 	"uuid_ip_fanout_guard",
 	"uuid_ip_fanout_reservation_v1",
 	"device_limit_event_report",
+	"managed_tls_certificate_v1",
 }
 
 type Client struct {
 	client                  *resty.Client
+	managedTLSClient        *resty.Client
 	APIHost                 string
 	Token                   string
 	AppTransportTokenSecret string
@@ -46,6 +48,9 @@ type Client struct {
 	userSyncSeq             int64
 	responseBodyHash        string
 	instanceID              string
+	tlsCertificateToken     string
+	managedTLSNow           func() time.Time
+	managedTLSNonce         func() (string, error)
 	UserList                *UserListBody
 	AliveMap                *AliveMap
 }
@@ -72,6 +77,15 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		}
 	})
 	client.SetBaseURL(c.APIHost)
+	managedTLSClient := resty.New()
+	managedTLSClient.SetRetryCount(retryCount)
+	managedTLSClient.SetHeader("User-Agent", fmt.Sprintf("v2node go-resty/%s (https://github.com/go-resty/resty)", resty.Version))
+	if c.Timeout > 0 {
+		managedTLSClient.SetTimeout(time.Duration(c.Timeout) * time.Second)
+	} else {
+		managedTLSClient.SetTimeout(time.Duration(conf.DefaultNodeTimeout) * time.Second)
+	}
+	managedTLSClient.SetBaseURL(c.APIHost)
 	// set params
 	queryParams := map[string]string{
 		"node_type": "v2node",
@@ -102,11 +116,13 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	})
 	return &Client{
 		client:                  client,
+		managedTLSClient:        managedTLSClient,
 		Token:                   c.Key,
 		AppTransportTokenSecret: c.AppTransportTokenSecret,
 		APIHost:                 c.APIHost,
 		NodeId:                  c.NodeID,
 		instanceID:              resolvedInstanceID,
+		tlsCertificateToken:     strings.TrimSpace(c.TLSCertificateToken),
 		UserList:                &UserListBody{},
 		AliveMap:                &AliveMap{},
 	}, nil

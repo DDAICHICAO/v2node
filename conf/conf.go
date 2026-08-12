@@ -35,6 +35,7 @@ type NodeConfig struct {
 	Timeout                 int    `mapstructure:"Timeout"`
 	RetryCount              *int   `mapstructure:"RetryCount"`
 	AppTransportTokenSecret string `mapstructure:"AppTransportTokenSecret"`
+	TLSCertificateToken     string `mapstructure:"TlsCertificateToken"`
 }
 
 func New() *Conf {
