@@ -6,7 +6,7 @@
 
 用户到期或流量耗尽后，面板/节点用户列表已经删除该用户，但高并发转发机仍可能保留少量长期 `ESTABLISHED` 连接，TCP 数量和连接相关内存不能随用户删除完全回落。完整链路为：v2board `traffic:update` / 用户到期 -> `user_delete` 或 v2node 本地到期调度 -> `Controller.applyUserList` -> `V2Core.DelUsers` -> `LinkManager.CloseAll`，同时代理请求走 `DefaultDispatcher` -> limiter -> `LinkManagers` -> `AddLink`。
 
-### 当前代码结论与根因
+### 修复前代码结论与根因
 
 - 到期用户有本地最早到期时间调度；流量耗尽由 v2board 入账后生成 `user_delete`。正常删除路径确实调用 `DelUsers` 和 `CloseAll`，因此不是“完全没有连接回收”。
 - dispatcher 的两个连接登记入口使用 `sync.Map.Load` 后自行创建并 `Store`，不是原子的单实例登记。同一用户首次并发建连时可产生多个 `LinkManager`，后写入者覆盖前者，被覆盖 manager 上的连接不再能由全局表找到。
@@ -16,12 +16,21 @@
 
 ### 验证、线上判别与下次检查
 
-- 当前 `dev` 为 `9365469`。定向回归 `GOEXPERIMENT=jsonv2 go test ./node -run 'Test(RemoveExpiredUsers|NextUserExpiry|LocalExpiry|ApplyUserList)' -count=1`、FlowTraffic dispatcher 测试、access-audit 非阻塞测试及 `go vet ./node ./core/app/dispatcher ./common/accessaudit` 均通过；现有测试没有覆盖用户删除与新 dispatch 并发发生时的 active-link 回收。
+- 诊断基线 `dev@9365469` 的定向回归 `GOEXPERIMENT=jsonv2 go test ./node -run 'Test(RemoveExpiredUsers|NextUserExpiry|LocalExpiry|ApplyUserList)' -count=1`、FlowTraffic dispatcher 测试、access-audit 非阻塞测试及 `go vet ./node ./core/app/dispatcher ./common/accessaudit` 均通过；当时的测试没有覆盖用户删除与新 dispatch 并发发生时的 active-link 回收。
 - 当前 FlowTraffic 已使用 `TrySubmit`，旧的 bbolt 同步入队阻塞连接清理问题不应直接套用到当前源码；生产二进制仍需单独核对版本和运行状态。
 - 线上先按 TCP state 和用户维度判别：持续 `ESTABLISHED` 且删除后仍有字节变化才符合本竞态；大量 `TIME_WAIT` 是另一类内核状态，`CLOSE_WAIT`、conntrack 增长、转发机 NAT 内存或旧二进制也要分开检查。
 - 修复回归至少覆盖：同用户首次并发建连只产生一个 generation；`CloseAll` 与 `AddLink` 并发时新 link 被拒绝/中断；全局 delete 与在途 dispatch 并发时不能复活 entry；用户重新授权后可创建新 generation；TCP/UDP 和两条 dispatcher 登记入口保持一致。
 - 相关文件：`core/app/dispatcher/default.go`、`core/app/dispatcher/linkmanager.go`、`core/user.go`、`node/task.go`、`node/user_expiry.go`、`limiter/limiter.go`；面板链路位于 v2board `app/Console/Commands/TrafficUpdate.php` 与 `app/Services/NodeUserSyncService.php`。
-- 本轮只完成代码诊断与轻量验证，尚未实现、提交、部署连接生命周期修复，也未取得线上主机样本证明某台转发机的现象全部由此竞态造成。
+- 诊断阶段没有取得线上主机样本证明某台转发机的现象全部由此竞态造成；代码修复完成后仍需单独核对生产二进制并做灰度观察。
+
+### 已实施修复与验证
+
+- dispatcher 已改为权威 `LinkRegistry`：只有 `AddUsers` 能激活用户槽位，两条代理登记路径只能加入已激活槽位；`DeactivateUser` 原子删除槽位并在 registry 锁外关闭 writer、interrupt 原始 reader。
+- `DelUsers` 对整批用户先关闭数据面，再执行 Xray、自定义入站和 Mieru 的认证清理。认证清理失败只产生脱敏告警，不会重新开放 registry，也不会阻止 limiter 更新和离线用户快照提交。
+- 标准协议重复添加时先通过 `UserManager.GetUser` 识别相同已安装凭据；批量新增失败只回滚本次新装凭据，任何失败批次都不会提前激活连接槽。
+- 回归覆盖未激活拒绝、停用后拒绝复活、同用户并发登记唯一 manager、登记/停用锁边界、按 IP 定向关闭、重新授权 generation 隔离、批量新增回滚和认证清理失败时保持 fail-closed。FlowTraffic 继续使用非阻塞 `TrySubmit`，不进入连接关闭等待路径。
+- 本地执行 `GOEXPERIMENT=jsonv2 go test ./core/app/dispatcher ./core ./limiter ./node ./common/accessaudit -count=1`、节点到期/快照定向回归、`go vet ./core/app/dispatcher ./core ./limiter ./node ./common/accessaudit`、旧 `LinkManagers` 源码扫描和 `git diff --check`，结果均通过。
+- 实现提交为 `33f2205`（连接生命周期注册表）、`c8943d5`（dispatcher 接入）和 `faf67d8`（授权/失效链）。当前 Windows 主机为 `CGO_ENABLED=0` 且没有 `gcc`，未执行 Linux `go test -race`；生产二进制版本核对和转发机 TCP/RSS/FD 灰度也尚未执行，不能据此声称线上已经修复。
 
 ## 2026-08-12：同机多 NodeID 的受管证书必须隔离本地身份
 
