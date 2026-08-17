@@ -131,7 +131,7 @@ type DefaultDispatcher struct {
 	stats        stats.Manager
 	fdns         dns.FakeDNSEngine
 	Counter      sync.Map
-	LinkManagers sync.Map // map[string]*LinkManager
+	LinkRegistry *LinkRegistry
 }
 
 func init() {
@@ -155,7 +155,16 @@ func (d *DefaultDispatcher) Init(config *Config, om outbound.Manager, router rou
 	d.router = router
 	d.policy = pm
 	d.stats = sm
+	d.LinkRegistry = NewLinkRegistry()
 	return nil
+}
+
+func (d *DefaultDispatcher) registerUserLink(user string, writer buf.Writer, reader buf.Reader, source string) (*ManagedWriter, error) {
+	managed, ok := d.LinkRegistry.RegisterLink(user, writer, reader, source)
+	if !ok {
+		return nil, errors.New("user connection lifecycle is inactive")
+	}
+	return managed, nil
 }
 
 // Type implements common.HasType.
@@ -326,21 +335,19 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			common.Interrupt(inboundLink.Reader)
 			return nil, nil, nil, errors.New(rejectMessage)
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
+		managedWriter, registerErr := d.registerUserLink(
+			user.Email,
+			uplinkWriter,
+			outboundLink.Reader,
+			sourceIP,
+		)
+		if registerErr != nil {
+			_ = common.Close(outboundLink.Writer)
+			_ = common.Close(inboundLink.Writer)
+			_ = common.Interrupt(outboundLink.Reader)
+			_ = common.Interrupt(inboundLink.Reader)
+			return nil, nil, nil, registerErr
 		}
-		managedWriter := &ManagedWriter{
-			writer:  uplinkWriter,
-			manager: lm,
-			source:  sourceIP,
-		}
-		lm.AddLink(managedWriter, outboundLink.Reader)
 		inboundLink.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
@@ -511,19 +518,14 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			common.Interrupt(outbound.Reader)
 			return errors.New(rejectMessage)
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
-		}
-		managedWriter := &ManagedWriter{
-			writer:  outbound.Writer,
-			manager: lm,
-			source:  sourceIP,
+		managedWriter, registerErr := d.registerUserLink(
+			user.Email,
+			outbound.Writer,
+			outbound.Reader,
+			sourceIP,
+		)
+		if registerErr != nil {
+			return registerErr
 		}
 		outbound.Writer = managedWriter
 		if w != nil {
@@ -544,7 +546,6 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			Reader:  &buf.TimeoutWrapperReader{Reader: outbound.Reader},
 			Counter: &ts.UpCounter,
 		}
-		lm.AddLink(managedWriter, outbound.Reader)
 		outbound.Writer = &dispatcher.SizeStatWriter{
 			Counter: downcounter,
 			Writer:  outbound.Writer,

@@ -206,3 +206,25 @@ func TestLinkRegistryReactivationUsesIndependentManager(t *testing.T) {
 		t.Fatal("old lifecycle callback corrupted the new manager")
 	}
 }
+
+func TestDefaultDispatcherInitCreatesLinkRegistry(t *testing.T) {
+	d := new(DefaultDispatcher)
+	if err := d.Init(&Config{}, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if d.LinkRegistry == nil {
+		t.Fatal("dispatcher registry was not initialized")
+	}
+}
+
+func TestDefaultDispatcherRegisterUserLinkFailsClosed(t *testing.T) {
+	d := &DefaultDispatcher{LinkRegistry: NewLinkRegistry()}
+	writer := &lifecycleWriter{}
+	reader := &lifecycleReader{}
+	if _, err := d.registerUserLink("node|inactive", writer, reader, "192.0.2.7"); err == nil {
+		t.Fatal("inactive dispatcher registration succeeded")
+	}
+	if !writer.closed.Load() || !reader.interrupted.Load() {
+		t.Fatal("dispatcher rejection leaked its link")
+	}
+}
