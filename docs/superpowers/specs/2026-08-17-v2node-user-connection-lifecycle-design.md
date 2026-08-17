@@ -82,12 +82,14 @@ dispatcher 不具备 `ActivateUser` 权限，也不得在用户不存在时隐�
 
 `V2Core.AddUsers` 在凭据加入成功时激活对应 registry 槽位。批量新增部分失败时，既有凭据回滚和 registry 激活状态必须一起回滚；正常重复同步不得替换已激活 manager。
 
-`V2Core.DelUsers` 对每个用户执行：
+`V2Core.DelUsers` 按以下顺序处理整批用户：
 
-1. 调用 `DeactivateUser`，从数据面立即封死用户并硬断全部连接。
+1. 先对整批用户逐一调用 `DeactivateUser`，从数据面立即封死全部用户并硬断现有连接；不得先等待某个认证清理完成再关闭下一个用户。
 2. 从 Xray 或自定义入站删除认证用户；“未找到”按幂等成功处理，其他清理错误记录为告警但不重新开放数据面。
-3. 清理 UID 映射、流量计数器和 limiter 用户状态。
+3. 清理 V2Core 的 UID 映射和流量计数器。
 4. 记录本次实际关闭数量；日志只保留 node tag、UID、数量和通用原因，不记录原始 UUID、IP、token 或目标地址。
+
+`V2Core.DelUsers` 成功返回后，现有 `Controller.applyUserList` 继续通过 `limiter.UpdateUser` 清理 limiter 用户状态，再更新并持久化用户快照。即使认证清理失败，V2Core 也必须保持 fail-closed 并允许这条既有提交链继续前进。
 
 registry 是数据面最终准入门。认证用户清理失败时不得重新开放旧连接，也不得阻止本地用户快照提交失效状态，否则进程重启可能从旧离线快照重新授权该用户。残留认证记录只存在于当前内核内存中，registry 和 limiter 已删除后不能建立转发，节点重建时会自然清除。重新授权必须显式经过 AddUsers/ActivateUser；若底层仍存在相同用户凭据，AddUsers 应把它作为幂等已安装状态处理或先替换后激活，不能由代理请求自行恢复。
 
