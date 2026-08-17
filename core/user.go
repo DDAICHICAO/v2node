@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
-	"github.com/wyx2685/v2node/core/app/dispatcher"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/infra/conf"
@@ -43,86 +43,110 @@ func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
+	vc.deactivateUsers(users, tag)
+
 	if server, ok := vc.eclipse[tag]; ok {
-		vc.users.mapLock.Lock()
-		for i := range users {
-			user := format.UserTag(tag, users[i].Uuid)
-			delete(vc.users.uidMap, user)
-			if vc.dispatcher != nil {
-				if v, ok := vc.dispatcher.Counter.Load(tag); ok {
-					tc := v.(*counter.TrafficCounter)
-					tc.Delete(user)
-				}
-				if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-					lm := v.(*dispatcher.LinkManager)
-					lm.CloseAll()
-					vc.dispatcher.LinkManagers.Delete(user)
-				}
-			}
-		}
-		vc.users.mapLock.Unlock()
 		server.DelUsers(users)
 		return nil
 	}
 	if server, ok := vc.mieru[tag]; ok {
-		vc.users.mapLock.Lock()
-		for i := range users {
-			user := format.UserTag(tag, users[i].Uuid)
-			delete(vc.users.uidMap, user)
-			if vc.dispatcher != nil {
-				if v, ok := vc.dispatcher.Counter.Load(tag); ok {
-					tc := v.(*counter.TrafficCounter)
-					tc.Delete(user)
-				}
-				if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-					lm := v.(*dispatcher.LinkManager)
-					lm.CloseAll()
-					vc.dispatcher.LinkManagers.Delete(user)
-				}
-			}
+		if err := server.DelUsers(users); err != nil {
+			log.WithFields(log.Fields{
+				"tag":        tag,
+				"error_type": fmt.Sprintf("%T", err),
+			}).Warn("Mieru credential cleanup failed; user data plane remains closed")
 		}
-		vc.users.mapLock.Unlock()
-		return server.DelUsers(users)
+		return nil
 	}
-	userManager, err := vc.GetUserManager(tag)
+	manager, err := vc.GetUserManager(tag)
 	if err != nil {
-		return fmt.Errorf("get user manager error: %s", err)
+		log.WithFields(log.Fields{
+			"tag":        tag,
+			"error_type": fmt.Sprintf("%T", err),
+		}).Warn("User manager unavailable; user data plane remains closed")
+		return nil
 	}
-	var user string
-	vc.users.mapLock.Lock()
-	defer vc.users.mapLock.Unlock()
-	for i := range users {
-		user = format.UserTag(tag, users[i].Uuid)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err = userManager.RemoveUser(ctx, user)
-		cancel()
-		if err != nil {
-			return err
-		}
-		delete(vc.users.uidMap, user)
-		if v, ok := vc.dispatcher.Counter.Load(tag); ok {
-			tc := v.(*counter.TrafficCounter)
-			tc.Delete(user)
-		}
-		if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-			lm := v.(*dispatcher.LinkManager)
-			lm.CloseAll()
-			vc.dispatcher.LinkManagers.Delete(user)
-		}
-	}
+	vc.removeManagedUsers(manager, users, tag)
 	return nil
 }
 
 func (vc *V2Core) CloseUserIP(tag string, uuid string, ip string) int {
-	if vc.dispatcher == nil {
+	if vc.dispatcher == nil || vc.dispatcher.LinkRegistry == nil {
 		return 0
 	}
-	user := format.UserTag(tag, uuid)
-	if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-		lm := v.(*dispatcher.LinkManager)
-		return lm.CloseByIP(strings.TrimPrefix(strings.TrimSpace(ip), "::ffff:"))
+	return vc.dispatcher.LinkRegistry.CloseUserIP(
+		format.UserTag(tag, uuid),
+		strings.TrimPrefix(strings.TrimSpace(ip), "::ffff:"),
+	)
+}
+
+func userLinkKeys(tag string, users []panel.UserInfo) []string {
+	keys := make([]string, 0, len(users))
+	for i := range users {
+		keys = append(keys, format.UserTag(tag, users[i].Uuid))
 	}
-	return 0
+	return keys
+}
+
+func (v *V2Core) activateUserLinks(users []string) {
+	if v.dispatcher == nil || v.dispatcher.LinkRegistry == nil {
+		return
+	}
+	for _, user := range users {
+		v.dispatcher.LinkRegistry.ActivateUser(user)
+	}
+}
+
+func (v *V2Core) deactivateUsers(users []panel.UserInfo, tag string) {
+	for i := range users {
+		closed := 0
+		if v.dispatcher != nil && v.dispatcher.LinkRegistry != nil {
+			closed = v.dispatcher.LinkRegistry.DeactivateUser(format.UserTag(tag, users[i].Uuid))
+		}
+		log.WithFields(log.Fields{
+			"tag":    tag,
+			"uid":    users[i].Id,
+			"closed": closed,
+			"reason": "user_invalidated",
+		}).Info("User data plane deactivated")
+	}
+
+	v.users.mapLock.Lock()
+	for i := range users {
+		delete(v.users.uidMap, format.UserTag(tag, users[i].Uuid))
+	}
+	v.users.mapLock.Unlock()
+	if v.dispatcher == nil {
+		return
+	}
+	if value, ok := v.dispatcher.Counter.Load(tag); ok {
+		traffic := value.(*counter.TrafficCounter)
+		for i := range users {
+			traffic.Delete(format.UserTag(tag, users[i].Uuid))
+		}
+	}
+}
+
+func (v *V2Core) removeManagedUsers(manager proxy.UserManager, users []panel.UserInfo, tag string) {
+	for i := range users {
+		user := format.UserTag(tag, users[i].Uuid)
+		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		installed := manager.GetUser(lookupCtx, user)
+		lookupCancel()
+		if installed == nil {
+			continue
+		}
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := manager.RemoveUser(removeCtx, user)
+		removeCancel()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"tag":        tag,
+				"uid":        users[i].Id,
+				"error_type": fmt.Sprintf("%T", err),
+			}).Warn("Credential cleanup failed; user data plane remains closed")
+		}
+	}
 }
 
 func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
@@ -172,6 +196,7 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	if server, ok := v.eclipse[p.Tag]; ok {
 		server.AddUsers(p.Users)
 		v.commitUserUIDs(p.Tag, p.Users)
+		v.activateUserLinks(userLinkKeys(p.Tag, p.Users))
 		return len(p.Users), nil
 	}
 	if server, ok := v.mieru[p.Tag]; ok {
@@ -179,6 +204,7 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 			return 0, err
 		}
 		v.commitUserUIDs(p.Tag, p.Users)
+		v.activateUserLinks(userLinkKeys(p.Tag, p.Users))
 		return len(p.Users), nil
 	}
 	var users []*protocol.User
@@ -203,27 +229,39 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	default:
 		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
 	}
-	man, err := v.GetUserManager(p.Tag)
+	manager, err := v.GetUserManager(p.Tag)
 	if err != nil {
 		return 0, fmt.Errorf("get user manager error: %s", err)
 	}
-	addedEmails := make([]string, 0, len(users))
-	for _, u := range users {
-		mUser, err := u.ToMemoryUser()
+	return v.addManagedUsers(manager, p.Tag, p.Users, users)
+}
+
+func (v *V2Core) addManagedUsers(manager proxy.UserManager, tag string, infos []panel.UserInfo, users []*protocol.User) (int, error) {
+	readyEmails := make([]string, 0, len(users))
+	newEmails := make([]string, 0, len(users))
+	for _, user := range users {
+		memoryUser, err := user.ToMemoryUser()
 		if err != nil {
-			rollbackAddedUsers(man, addedEmails)
+			rollbackAddedUsers(manager, newEmails)
 			return 0, err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err = man.AddUser(ctx, mUser)
-		cancel()
-		if err != nil {
-			rollbackAddedUsers(man, addedEmails)
-			return 0, err
+		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		installed := manager.GetUser(lookupCtx, user.Email)
+		lookupCancel()
+		if installed == nil {
+			addCtx, addCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err = manager.AddUser(addCtx, memoryUser)
+			addCancel()
+			if err != nil {
+				rollbackAddedUsers(manager, newEmails)
+				return 0, err
+			}
+			newEmails = append(newEmails, user.Email)
 		}
-		addedEmails = append(addedEmails, u.Email)
+		readyEmails = append(readyEmails, user.Email)
 	}
-	v.commitUserUIDs(p.Tag, p.Users)
+	v.commitUserUIDs(tag, infos)
+	v.activateUserLinks(readyEmails)
 	return len(users), nil
 }
 
