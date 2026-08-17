@@ -1,5 +1,28 @@
 # LESSONS LEARNED
 
+## 2026-08-17：用户失效时的连接回收必须和新连接登记使用同一生命周期门闩
+
+### 症状与影响链
+
+用户到期或流量耗尽后，面板/节点用户列表已经删除该用户，但高并发转发机仍可能保留少量长期 `ESTABLISHED` 连接，TCP 数量和连接相关内存不能随用户删除完全回落。完整链路为：v2board `traffic:update` / 用户到期 -> `user_delete` 或 v2node 本地到期调度 -> `Controller.applyUserList` -> `V2Core.DelUsers` -> `LinkManager.CloseAll`，同时代理请求走 `DefaultDispatcher` -> limiter -> `LinkManagers` -> `AddLink`。
+
+### 当前代码结论与根因
+
+- 到期用户有本地最早到期时间调度；流量耗尽由 v2board 入账后生成 `user_delete`。正常删除路径确实调用 `DelUsers` 和 `CloseAll`，因此不是“完全没有连接回收”。
+- dispatcher 的两个连接登记入口使用 `sync.Map.Load` 后自行创建并 `Store`，不是原子的单实例登记。同一用户首次并发建连时可产生多个 `LinkManager`，后写入者覆盖前者，被覆盖 manager 上的连接不再能由全局表找到。
+- `LinkManager.CloseAll` 只清空当时已有的 links，没有 closed/tombstone 状态；与删除并发的 `AddLink` 可以在清空后重新加入连接。
+- `DelUsers` 在关闭后删除全局 manager entry。已经完成认证和 limiter 检查的在途请求仍可能在删除窗口重新登记 manager，之后没有第二次用户删除事件，这些连接只能依赖远端关闭或 Xray idle policy；持续有流量的连接可以长期存活。
+- 仅把 `Load`/`Store` 改成 `LoadOrStore` 只能消除首次创建覆盖，不能修复 `CloseAll` 与 `AddLink` 的删除竞态。正确边界需要按用户序列化 get-or-create / close，并让 close 在同一互斥区设置 generation 或 tombstone；`AddLink` 必须拒绝并立即中断已关闭 generation，用户重新授权时再显式开启新 generation。
+
+### 验证、线上判别与下次检查
+
+- 当前 `dev` 为 `9365469`。定向回归 `GOEXPERIMENT=jsonv2 go test ./node -run 'Test(RemoveExpiredUsers|NextUserExpiry|LocalExpiry|ApplyUserList)' -count=1`、FlowTraffic dispatcher 测试、access-audit 非阻塞测试及 `go vet ./node ./core/app/dispatcher ./common/accessaudit` 均通过；现有测试没有覆盖用户删除与新 dispatch 并发发生时的 active-link 回收。
+- 当前 FlowTraffic 已使用 `TrySubmit`，旧的 bbolt 同步入队阻塞连接清理问题不应直接套用到当前源码；生产二进制仍需单独核对版本和运行状态。
+- 线上先按 TCP state 和用户维度判别：持续 `ESTABLISHED` 且删除后仍有字节变化才符合本竞态；大量 `TIME_WAIT` 是另一类内核状态，`CLOSE_WAIT`、conntrack 增长、转发机 NAT 内存或旧二进制也要分开检查。
+- 修复回归至少覆盖：同用户首次并发建连只产生一个 generation；`CloseAll` 与 `AddLink` 并发时新 link 被拒绝/中断；全局 delete 与在途 dispatch 并发时不能复活 entry；用户重新授权后可创建新 generation；TCP/UDP 和两条 dispatcher 登记入口保持一致。
+- 相关文件：`core/app/dispatcher/default.go`、`core/app/dispatcher/linkmanager.go`、`core/user.go`、`node/task.go`、`node/user_expiry.go`、`limiter/limiter.go`；面板链路位于 v2board `app/Console/Commands/TrafficUpdate.php` 与 `app/Services/NodeUserSyncService.php`。
+- 本轮只完成代码诊断与轻量验证，尚未实现、提交、部署连接生命周期修复，也未取得线上主机样本证明某台转发机的现象全部由此竞态造成。
+
 ## 2026-08-12：同机多 NodeID 的受管证书必须隔离本地身份
 
 ### 症状与链路
