@@ -13,6 +13,7 @@ import (
 	"github.com/wyx2685/v2node/common/format"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
+	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/anytls"
@@ -31,13 +32,17 @@ func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("no such inbound tag: %s", err)
 	}
+	return inboundUserManager(handler, tag)
+}
+
+func inboundUserManager(handler inbound.Handler, tag string) (proxy.UserManager, error) {
 	inboundInstance, ok := handler.(proxy.GetInbound)
 	if !ok {
-		return nil, fmt.Errorf("handler %s is not implement proxy.GetInbound", tag)
+		return nil, fmt.Errorf("handler %s does not expose inbound", tag)
 	}
 	userManager, ok := inboundInstance.GetInbound().(proxy.UserManager)
 	if !ok {
-		return nil, fmt.Errorf("handler %s is not implement proxy.UserManager", tag)
+		return nil, fmt.Errorf("handler %s does not implement user manager", tag)
 	}
 	return userManager, nil
 }
@@ -207,33 +212,39 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 		v.activateUserLinks(userLinkKeys(p.Tag, p.Users))
 		return len(p.Users), nil
 	}
-	var users []*protocol.User
-	switch p.NodeInfo.Type {
-	case "vmess":
-		users = buildVmessUsers(p.Tag, p.Users)
-	case "vless":
-		users = buildVlessUsers(p.Tag, p.Users, p.Common.Flow)
-	case "trojan":
-		users = buildTrojanUsers(p.Tag, p.Users)
-	case "shadowsocks":
-		users = buildSSUsers(p.Tag,
-			p.Users,
-			p.Common.Cipher,
-			p.Common.ServerKey)
-	case "hysteria2":
-		users = buildHysteria2Users(p.Tag, p.Users)
-	case "tuic":
-		users = buildTuicUsers(p.Tag, p.Users)
-	case "anytls":
-		users = buildAnyTLSUsers(p.Tag, p.Users)
-	default:
-		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
+	users, err := buildCoreUsers(p)
+	if err != nil {
+		return 0, err
 	}
 	manager, err := v.GetUserManager(p.Tag)
 	if err != nil {
 		return 0, fmt.Errorf("get user manager error: %s", err)
 	}
 	return v.addManagedUsers(manager, p.Tag, p.Users, users)
+}
+
+func buildCoreUsers(p *AddUsersParams) ([]*protocol.User, error) {
+	switch p.NodeInfo.Type {
+	case "vmess":
+		return buildVmessUsers(p.Tag, p.Users), nil
+	case "vless":
+		return buildVlessUsers(p.Tag, p.Users, p.Common.Flow), nil
+	case "trojan":
+		return buildTrojanUsers(p.Tag, p.Users), nil
+	case "shadowsocks":
+		return buildSSUsers(p.Tag,
+			p.Users,
+			p.Common.Cipher,
+			p.Common.ServerKey), nil
+	case "hysteria2":
+		return buildHysteria2Users(p.Tag, p.Users), nil
+	case "tuic":
+		return buildTuicUsers(p.Tag, p.Users), nil
+	case "anytls":
+		return buildAnyTLSUsers(p.Tag, p.Users), nil
+	default:
+		return nil, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
+	}
 }
 
 func (v *V2Core) addManagedUsers(manager proxy.UserManager, tag string, infos []panel.UserInfo, users []*protocol.User) (int, error) {

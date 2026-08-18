@@ -35,20 +35,29 @@ func (v *V2Core) removeInbound(tag string) error {
 }
 
 func (v *V2Core) addInbound(config *core.InboundHandlerConfig) error {
-	rawHandler, err := core.CreateObject(v.Server, config)
+	handler, err := v.createInboundHandler(config)
 	if err != nil {
 		return err
 	}
+	return v.addInboundHandler(handler)
+}
+
+func (v *V2Core) createInboundHandler(config *core.InboundHandlerConfig) (inbound.Handler, error) {
+	rawHandler, err := core.CreateObject(v.Server, config)
+	if err != nil {
+		return nil, err
+	}
 	handler, ok := rawHandler.(inbound.Handler)
 	if !ok {
-		return fmt.Errorf("not an InboundHandler: %s", err)
+		return nil, errors.New("created object is not an inbound handler")
 	}
+	return handler, nil
+}
+
+func (v *V2Core) addInboundHandler(handler inbound.Handler) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := v.ihm.AddHandler(ctx, handler); err != nil {
-		return err
-	}
-	return nil
+	return v.ihm.AddHandler(ctx, handler)
 }
 
 func (v *V2Core) AddStreamUnlockProbeInbound(tag string, port int) error {

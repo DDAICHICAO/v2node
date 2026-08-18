@@ -1,9 +1,11 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/xtls/xray-core/features/inbound"
 )
 
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
@@ -57,4 +59,33 @@ func (v *V2Core) DelNode(tag string) error {
 		return fmt.Errorf("remove in error: %s", err)
 	}
 	return nil
+}
+
+func (v *V2Core) ReplaceNode(tag string, info *panel.NodeInfo, users []panel.UserInfo) error {
+	if isSntpEclipseNode(info) || isMieruNode(info) {
+		return errors.New("managed TLS runtime replacement is unsupported for this node type")
+	}
+	rollbackConfig, err := v.currentInboundSnapshot(tag)
+	if err != nil {
+		return fmt.Errorf("snapshot current inbound: %w", err)
+	}
+	candidate, err := v.prepareNodeInbound(tag, info, users)
+	if err != nil {
+		return fmt.Errorf("prepare candidate inbound: %w", err)
+	}
+	rollback, err := v.prepareInboundFromConfig(
+		rollbackConfig,
+		&AddUsersParams{Tag: tag, Users: users, NodeInfo: info},
+	)
+	if err != nil {
+		_ = candidate.Close()
+		return fmt.Errorf("prepare rollback inbound: %w", err)
+	}
+	return swapPreparedInbound(tag, candidate, rollback, inboundSwapHooks{
+		remove: v.removeInbound,
+		add:    v.addInboundHandler,
+		close: func(handler inbound.Handler) error {
+			return handler.Close()
+		},
+	})
 }
