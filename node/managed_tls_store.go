@@ -25,11 +25,13 @@ import (
 var errManagedTLSLocalCertificateInvalid = errors.New("managed TLS local certificate invalid")
 
 type managedTLSMetadata struct {
-	ScopeID           uint64 `json:"scope_id"`
-	Domain            string `json:"domain"`
-	Version           uint64 `json:"version"`
-	CertificateSHA256 string `json:"certificate_sha256"`
-	NotAfter          int64  `json:"not_after"`
+	ScopeID           uint64   `json:"scope_id"`
+	Domain            string   `json:"domain"`
+	Domains           []string `json:"domains,omitempty"`
+	MigrationID       uint64   `json:"migration_id,omitempty"`
+	Version           uint64   `json:"version"`
+	CertificateSHA256 string   `json:"certificate_sha256"`
+	NotAfter          int64    `json:"not_after"`
 }
 
 type managedTLSLocalCertificate struct {
@@ -69,7 +71,8 @@ func (s *managedTLSFileStore) Current(expectedScopeID uint64, domain string, now
 	if err != nil {
 		return nil, err
 	}
-	if certificate.Metadata.ScopeID != expectedScopeID || !sameManagedTLSDomain(certificate.Metadata.Domain, domain) {
+	domains, domainErr := managedTLSMetadataDomains(certificate.Metadata)
+	if certificate.Metadata.ScopeID != expectedScopeID || domainErr != nil || !managedTLSDomainsContain(domains, domain) {
 		return nil, errManagedTLSLocalCertificateInvalid
 	}
 	if err := validateManagedTLSLocalCertificate(certificate, now, true); err != nil {
@@ -295,7 +298,11 @@ func readManagedTLSCertificate(directory string) (*managedTLSLocalCertificate, e
 
 func validateManagedTLSLocalCertificate(certificate *managedTLSLocalCertificate, now time.Time, checkTime bool) error {
 	if certificate == nil || certificate.Metadata.ScopeID == 0 || certificate.Metadata.Version == 0 ||
-		!validManagedTLSDomain(certificate.Metadata.Domain) || len(certificate.FullchainPEM) == 0 || len(certificate.PrivateKeyPEM) == 0 {
+		len(certificate.FullchainPEM) == 0 || len(certificate.PrivateKeyPEM) == 0 {
+		return errManagedTLSLocalCertificateInvalid
+	}
+	domains, err := managedTLSMetadataDomains(certificate.Metadata)
+	if err != nil {
 		return errManagedTLSLocalCertificateInvalid
 	}
 	certBlock, _ := pem.Decode(certificate.FullchainPEM)
@@ -303,11 +310,14 @@ func validateManagedTLSLocalCertificate(certificate *managedTLSLocalCertificate,
 		return errManagedTLSLocalCertificateInvalid
 	}
 	leaf, err := x509.ParseCertificate(certBlock.Bytes)
-	if err != nil || len(leaf.DNSNames) != 1 || !sameManagedTLSDomain(leaf.DNSNames[0], certificate.Metadata.Domain) {
+	leafDomains, domainErr := normalizeManagedTLSDomains(leaf.DNSNames)
+	if err != nil || domainErr != nil || !managedTLSDomainSlicesEqual(leafDomains, domains) {
 		return errManagedTLSLocalCertificateInvalid
 	}
-	if err := leaf.VerifyHostname(certificate.Metadata.Domain); err != nil {
-		return errManagedTLSLocalCertificateInvalid
+	for _, domain := range domains {
+		if err := leaf.VerifyHostname(domain); err != nil {
+			return errManagedTLSLocalCertificateInvalid
+		}
 	}
 	if len(leaf.ExtKeyUsage) > 0 {
 		serverUsage := false
@@ -449,8 +459,58 @@ func copyManagedTLSDirectory(source, target string) error {
 }
 
 func sameManagedTLSCertificate(left, right *managedTLSLocalCertificate) bool {
-	return left != nil && right != nil && left.Metadata == right.Metadata &&
+	return left != nil && right != nil && sameManagedTLSMetadata(left.Metadata, right.Metadata) &&
 		bytes.Equal(left.FullchainPEM, right.FullchainPEM) && bytes.Equal(left.PrivateKeyPEM, right.PrivateKeyPEM)
+}
+
+func managedTLSMetadataDomains(metadata managedTLSMetadata) ([]string, error) {
+	if !validManagedTLSDomain(metadata.Domain) {
+		return nil, errManagedTLSLocalCertificateInvalid
+	}
+	domains := metadata.Domains
+	if len(domains) == 0 {
+		domains = []string{metadata.Domain}
+	}
+	normalized, err := normalizeManagedTLSDomains(domains)
+	if err != nil || !managedTLSDomainsContain(normalized, metadata.Domain) {
+		return nil, errManagedTLSLocalCertificateInvalid
+	}
+	return normalized, nil
+}
+
+func managedTLSDomainsContain(domains []string, expected string) bool {
+	expected = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(expected)), ".")
+	for _, domain := range domains {
+		if domain == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func managedTLSDomainSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameManagedTLSMetadata(left, right managedTLSMetadata) bool {
+	leftDomains, leftErr := managedTLSMetadataDomains(left)
+	rightDomains, rightErr := managedTLSMetadataDomains(right)
+	return leftErr == nil && rightErr == nil &&
+		left.ScopeID == right.ScopeID &&
+		sameManagedTLSDomain(left.Domain, right.Domain) &&
+		managedTLSDomainSlicesEqual(leftDomains, rightDomains) &&
+		left.MigrationID == right.MigrationID &&
+		left.Version == right.Version &&
+		strings.EqualFold(left.CertificateSHA256, right.CertificateSHA256) &&
+		left.NotAfter == right.NotAfter
 }
 
 func sameManagedTLSDomain(left, right string) bool {

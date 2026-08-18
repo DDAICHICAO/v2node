@@ -322,7 +322,7 @@ func (m *managedTLSManager) issueWithLease(ctx context.Context, lease *panel.Man
 		}
 	}()
 	result, issueErr := m.issuer.Issue(ctx, managedTLSIssueRequest{
-		ScopeID: m.scopeID, Domain: m.domain, Provider: lease.Provider,
+		ScopeID: m.scopeID, Domains: []string{m.domain}, Provider: lease.Provider,
 		DNSEnv: lease.DNSEnv, ACMEAccount: lease.ACMEAccount,
 	})
 	cancelHeartbeat()

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,17 +21,20 @@ import (
 const managedTLSCertificatePath = "/api/v2/server/tls-certificate"
 
 type ManagedTLSCertificate struct {
-	Status            string `json:"status"`
-	ScopeID           uint64 `json:"scope_id"`
-	Version           uint64 `json:"version"`
-	Domain            string `json:"domain"`
-	FullchainPEM      string `json:"fullchain_pem"`
-	PrivateKeyPEM     string `json:"private_key_pem"`
-	NotAfter          int64  `json:"not_after"`
-	RenewAt           int64  `json:"renew_at"`
-	CertificateSHA256 string `json:"certificate_sha256"`
-	ForceInstall      bool   `json:"force_install"`
-	SyncRequestID     string `json:"sync_request_id"`
+	Status            string   `json:"status"`
+	ScopeID           uint64   `json:"scope_id"`
+	Version           uint64   `json:"version"`
+	Domain            string   `json:"domain"`
+	Purpose           string   `json:"purpose,omitempty"`
+	MigrationID       uint64   `json:"migration_id,omitempty"`
+	Domains           []string `json:"domains,omitempty"`
+	FullchainPEM      string   `json:"fullchain_pem"`
+	PrivateKeyPEM     string   `json:"private_key_pem"`
+	NotAfter          int64    `json:"not_after"`
+	RenewAt           int64    `json:"renew_at"`
+	CertificateSHA256 string   `json:"certificate_sha256"`
+	ForceInstall      bool     `json:"force_install"`
+	SyncRequestID     string   `json:"sync_request_id"`
 }
 
 type ManagedTLSACMEAccount struct {
@@ -40,8 +44,11 @@ type ManagedTLSACMEAccount struct {
 }
 
 type ManagedTLSLeaseRequest struct {
-	Domain  string `json:"domain"`
-	LeaseID string `json:"lease_id,omitempty"`
+	Domain      string   `json:"domain"`
+	LeaseID     string   `json:"lease_id,omitempty"`
+	Purpose     string   `json:"purpose,omitempty"`
+	MigrationID uint64   `json:"migration_id,omitempty"`
+	Domains     []string `json:"domains,omitempty"`
 }
 
 type ManagedTLSLeaseResponse struct {
@@ -53,6 +60,9 @@ type ManagedTLSLeaseResponse struct {
 	Provider       string                 `json:"provider"`
 	DNSEnv         map[string]string      `json:"dns_env"`
 	ACMEAccount    *ManagedTLSACMEAccount `json:"acme_account"`
+	Purpose        string                 `json:"purpose,omitempty"`
+	MigrationID    uint64                 `json:"migration_id,omitempty"`
+	Domains        []string               `json:"domains,omitempty"`
 }
 
 type ManagedTLSPublishRequest struct {
@@ -61,13 +71,19 @@ type ManagedTLSPublishRequest struct {
 	FullchainPEM  string                 `json:"fullchain_pem"`
 	PrivateKeyPEM string                 `json:"private_key_pem"`
 	ACMEAccount   *ManagedTLSACMEAccount `json:"acme_account"`
+	Purpose       string                 `json:"purpose,omitempty"`
+	MigrationID   uint64                 `json:"migration_id,omitempty"`
+	Domains       []string               `json:"domains,omitempty"`
 }
 
 type ManagedTLSFailRequest struct {
-	LeaseID   string `json:"lease_id"`
-	Domain    string `json:"domain"`
-	ErrorCode string `json:"error_code"`
-	Message   string `json:"message"`
+	LeaseID     string   `json:"lease_id"`
+	Domain      string   `json:"domain"`
+	ErrorCode   string   `json:"error_code"`
+	Message     string   `json:"message"`
+	Purpose     string   `json:"purpose,omitempty"`
+	MigrationID uint64   `json:"migration_id,omitempty"`
+	Domains     []string `json:"domains,omitempty"`
 }
 
 type ManagedTLSError struct {
@@ -101,11 +117,55 @@ func (c *Client) GetManagedTLSCertificate(ctx context.Context, domain string, ve
 		return nil, &ManagedTLSError{StatusCode: response.StatusCode(), Code: "managed_tls_response_invalid"}
 	}
 	if certificate.Status == "ready" {
-		if certificate.ScopeID == 0 || !strings.EqualFold(strings.TrimSuffix(certificate.Domain, "."), strings.TrimSuffix(strings.TrimSpace(domain), ".")) {
+		domains, domainErr := managedTLSCertificateDomains(certificate)
+		if certificate.ScopeID == 0 || domainErr != nil || !containsManagedTLSDomain(domains, domain) {
 			return nil, &ManagedTLSError{StatusCode: http.StatusConflict, Code: "managed_tls_domain_mismatch"}
 		}
 	}
 	return &certificate, nil
+}
+
+func managedTLSCertificateDomains(certificate ManagedTLSCertificate) ([]string, error) {
+	domains := certificate.Domains
+	if len(domains) == 0 {
+		domains = []string{certificate.Domain}
+	}
+	normalized, err := normalizeManagedTLSAPIDomains(domains)
+	if err != nil || !containsManagedTLSDomain(normalized, certificate.Domain) {
+		return nil, fmt.Errorf("managed_tls_domain_mismatch")
+	}
+	return normalized, nil
+}
+
+func normalizeManagedTLSAPIDomains(domains []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(domains))
+	normalized := make([]string, 0, len(domains))
+	for _, value := range domains {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+		if domain == "" || !strings.Contains(domain, ".") || strings.ContainsAny(domain, "*/\\: \t\r\n") {
+			return nil, fmt.Errorf("managed_tls_domain_mismatch")
+		}
+		if _, exists := seen[domain]; exists {
+			continue
+		}
+		seen[domain] = struct{}{}
+		normalized = append(normalized, domain)
+	}
+	if len(normalized) < 1 || len(normalized) > 2 {
+		return nil, fmt.Errorf("managed_tls_domain_mismatch")
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func containsManagedTLSDomain(domains []string, expected string) bool {
+	expected = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(expected)), ".")
+	for _, domain := range domains {
+		if domain == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) LeaseManagedTLSCertificate(ctx context.Context, request ManagedTLSLeaseRequest) (*ManagedTLSLeaseResponse, error) {

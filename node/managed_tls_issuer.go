@@ -23,7 +23,7 @@ var managedTLSLegoMu sync.Mutex
 
 type managedTLSIssueRequest struct {
 	ScopeID     uint64
-	Domain      string
+	Domains     []string
 	Provider    string
 	DNSEnv      map[string]string
 	ACMEAccount *panel.ManagedTLSACMEAccount
@@ -46,6 +46,11 @@ type managedTLSLegoIssuer struct {
 func (i *managedTLSLegoIssuer) Issue(ctx context.Context, request managedTLSIssueRequest) (*managedTLSIssueResult, error) {
 	managedTLSLegoMu.Lock()
 	defer managedTLSLegoMu.Unlock()
+	domains, err := normalizeManagedTLSDomains(request.Domains)
+	if err != nil {
+		return nil, fmt.Errorf("managed_tls_issue_config_invalid")
+	}
+	request.Domains = domains
 
 	restore, err := applyManagedTLSDNSEnvironment(request.DNSEnv)
 	if err != nil {
@@ -62,9 +67,9 @@ func issueManagedTLSWithLego(ctx context.Context, request managedTLSIssueRequest
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("managed_tls_issue_cancelled")
 	}
-	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(request.Domain)), ".")
+	domains, domainErr := normalizeManagedTLSDomains(request.Domains)
 	provider := strings.ToLower(strings.TrimSpace(request.Provider))
-	if !validManagedTLSDomain(domain) || provider == "" || len(request.DNSEnv) == 0 {
+	if domainErr != nil || provider == "" || len(request.DNSEnv) == 0 {
 		return nil, fmt.Errorf("managed_tls_issue_config_invalid")
 	}
 
@@ -97,7 +102,7 @@ func issueManagedTLSWithLego(ctx context.Context, request managedTLSIssueRequest
 	if err := client.Challenge.SetDNS01Provider(providerInstance); err != nil {
 		return nil, fmt.Errorf("managed_tls_dns_provider_failed")
 	}
-	resource, err := client.Certificate.Obtain(certificate.ObtainRequest{Domains: []string{domain}, Bundle: true})
+	resource, err := client.Certificate.Obtain(certificate.ObtainRequest{Domains: domains, Bundle: true})
 	if err != nil {
 		return nil, fmt.Errorf("managed_tls_obtain_failed")
 	}
@@ -113,6 +118,27 @@ func issueManagedTLSWithLego(ctx context.Context, request managedTLSIssueRequest
 		PrivateKeyPEM: append([]byte(nil), resource.PrivateKey...),
 		ACMEAccount:   *account,
 	}, nil
+}
+
+func normalizeManagedTLSDomains(domains []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(domains))
+	normalized := make([]string, 0, len(domains))
+	for _, value := range domains {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+		if !validManagedTLSDomain(domain) {
+			return nil, fmt.Errorf("managed TLS domain invalid")
+		}
+		if _, exists := seen[domain]; exists {
+			continue
+		}
+		seen[domain] = struct{}{}
+		normalized = append(normalized, domain)
+	}
+	if len(normalized) < 1 || len(normalized) > 2 {
+		return nil, fmt.Errorf("managed TLS domain count invalid")
+	}
+	sort.Strings(normalized)
+	return normalized, nil
 }
 
 func newManagedTLSLegoUser(email string) (*User, error) {
