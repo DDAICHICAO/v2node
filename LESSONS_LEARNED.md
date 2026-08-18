@@ -428,3 +428,28 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 生产验证先看 `/etc/v2node/credentials/node-<NodeID>-<ApiHostHash>.json` 的权限和 NodeID，再看状态上报指纹、受管证书版本以及旧 ACME 日志是否停止。日志和文档不得记录明文凭证。
 - 相关文件：`api/v2board/managed_tls_credential.go`、`api/v2board/managed_tls.go`、`api/v2board/node.go`、`api/v2board/panel.go`、`node/managed_tls_manager.go`。
 - 对应实现提交：`e0321fe`。
+
+## 2026-08-18：托管 SNI 切换不能误触发全量 Xray 重载
+
+### 症状与影响链
+
+- 托管域名迁移门禁和真实入口探测均已通过，但执行入口切换后目标端口约 22 秒不可用。
+- systemd 的主 PID 和 `NRestarts` 都没有变化，服务日志却出现所有节点任务取消、目标端口消失以及 `Xray ... started` 再次出现。
+- 完整影响链为：v2board 切换作用域主域名 -> `/api/v2/server/config` ETag 变化 -> v2node `nodeInfoMonitor` 收到新 `NodeInfo` -> 全局 `ReloadCh` -> 同进程所有 Controller 和 Xray Core 重建。
+
+### 根因与修复
+
+- 原配置监控只区分“配置是否变化”，没有区分 managed TLS 的纯 SNI 元数据变化与真正影响入站监听器的运行时变化。
+- TLS 入站构造在 managed 模式下只使用已激活的证书/私钥路径和 `RejectUnknownSNI`，不会用 `TlsSettings.ServerName` 或 `ServerNames` 构造监听器；双 SAN 证书已经激活后，切换权威域名无需重建入站。
+- 新路径只接受严格的纯域名变化：当前和新配置都必须是同一 managed TLS 节点；忽略 `ServerName`、`ServerNames` 和派生 `CertDomain` 后，其余字段必须完全一致。
+- `managedTLSManager` 在串行边界内先验证当前本地证书的 scope、目标 SAN 和有效期，再保存新离线快照，最后提交权威域名。SAN 校验或快照保存失败时不改变管理器域名、控制器信息或当前运行时，并保留 pending 等待重试。
+- 端口、协议、NodeID、tag、证书作用域、证书模式、`RejectUnknownSNI` 或任何其他字段同时变化时，仍沿用原有的持久化后全量重载路径。
+
+### 验证与下次优先检查
+
+- 回归测试覆盖：纯域名变化不写 `ReloadCh`；其他配置变化仍写 `ReloadCh`；目标 SAN 缺失不落盘；快照保存失败不推进管理器或控制器状态；管理器在证书协调与域名提交之间使用同一串行边界。
+- `GOEXPERIMENT=jsonv2 go test ./... -count=1` 与 `go vet ./node ./core` 已通过。Windows 本机没有 `gcc`，`go test -race ./node` 因无法启用 cgo 未执行成功，需在带 CGO 工具链的 Linux CI 或构建机补跑。
+- 本地检查入口：`node/task.go` 的 `applyPendingNodeInfo`、`node/managed_tls_domain_switch.go` 的严格分类和原地应用、`node/managed_tls_manager.go` 的 `CommitDomain`、`cmd/server.go` 的全局 reload。
+- 上线验证不能只看 PID 和 `NRestarts`；还要连续检查目标端口、日志中是否再次出现 `Xray ... started`，并确认出现 `Managed TLS domain applied without global reload`。
+- 相关设计与计划：`docs/superpowers/specs/2026-08-18-managed-tls-runtime-activation-design.md`、`docs/superpowers/plans/2026-08-18-managed-tls-domain-switch-in-place.md`。
+- 对应实现提交：`b13cd1f`、`c20566d`、`336aec6`。
