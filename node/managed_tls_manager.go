@@ -60,15 +60,15 @@ type managedTLSManager struct {
 	scopeID uint64
 	domain  string
 
-	mu            sync.RWMutex
-	snapshot      managedTLSStatusSnapshot
-	cancel        context.CancelFunc
-	done          chan struct{}
-	started       bool
-	closed        bool
-	readyNotified bool
-	now           func() time.Time
-	jitter        func() time.Duration
+	mu               sync.RWMutex
+	snapshot         managedTLSStatusSnapshot
+	cancel           context.CancelFunc
+	done             chan struct{}
+	started          bool
+	closed           bool
+	activatedVersion uint64
+	now              func() time.Time
+	jitter           func() time.Duration
 }
 
 func newManagedTLSManager(client managedTLSAPI, store managedTLSStore, issuer managedTLSIssuer, scopeID uint64, domain string) *managedTLSManager {
@@ -450,10 +450,18 @@ func (m *managedTLSManager) setFromLocal(status managedTLSSyncStatus, local *man
 		if err == nil && local.Metadata.MigrationID > 0 && managedTLSDomainsContain(domains, m.domain) {
 			m.snapshot.MigrationID = local.Metadata.MigrationID
 			m.snapshot.PreparedVersion = local.Metadata.Version
-			m.snapshot.MigrationPrepared = status == managedTLSReady
 		}
 	}
+	m.refreshMigrationPreparedLocked()
 	m.mu.Unlock()
+}
+
+func (m *managedTLSManager) refreshMigrationPreparedLocked() {
+	m.snapshot.MigrationPrepared =
+		m.snapshot.Status == managedTLSReady &&
+			m.snapshot.MigrationID > 0 &&
+			m.snapshot.PreparedVersion == m.snapshot.Version &&
+			m.activatedVersion == m.snapshot.Version
 }
 
 func (m *managedTLSManager) setFailure(status managedTLSSyncStatus, code string, local *managedTLSLocalCertificate) {
@@ -484,17 +492,31 @@ func (m *managedTLSManager) notifyReady(ctx context.Context, callback func() err
 		return
 	}
 	m.mu.Lock()
-	if m.readyNotified || m.closed {
+	version := m.snapshot.Version
+	if version == 0 || m.activatedVersion == version || m.closed {
 		m.mu.Unlock()
 		return
 	}
 	m.mu.Unlock()
-	if ctx.Err() != nil || callback() != nil {
+	if ctx.Err() != nil {
+		return
+	}
+	if err := callback(); err != nil {
+		m.mu.Lock()
+		if !m.closed && m.snapshot.Version == version {
+			m.snapshot.Status = managedTLSDegraded
+			m.snapshot.LastErrorCode = "managed_tls_runtime_activation_failed"
+			m.refreshMigrationPreparedLocked()
+		}
+		m.mu.Unlock()
 		return
 	}
 	m.mu.Lock()
-	if !m.closed {
-		m.readyNotified = true
+	if !m.closed && m.snapshot.Version == version {
+		m.activatedVersion = version
+		m.snapshot.Status = managedTLSReady
+		m.snapshot.LastErrorCode = ""
+		m.refreshMigrationPreparedLocked()
 	}
 	m.mu.Unlock()
 }
