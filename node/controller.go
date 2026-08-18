@@ -40,6 +40,9 @@ type Controller struct {
 	managedTLSStatusPeriodic *task.Task
 	managedTLS               *managedTLSManager
 	managedTLSStatusMu       sync.Mutex
+	managedTLSActivationMu   sync.Mutex
+	managedTLSRuntimeVersion uint64
+	replaceManagedTLSInbound func(string, *panel.NodeInfo, []panel.UserInfo) error
 	runtime                  controllerRuntimeLifecycle
 	store                    *offlineStateStore
 	bootstrap                *offlineState
@@ -105,12 +108,13 @@ func (c *Controller) Start(x *core.V2Core) error {
 			if err := c.startRuntime(); err != nil {
 				return err
 			}
-			c.managedTLS.Start(context.Background(), c.startRuntimeAfterManagedTLSReady)
+			c.managedTLSRuntimeVersion = c.managedTLS.Snapshot().Version
+			c.managedTLS.Start(context.Background(), c.activateManagedTLSRuntime)
 			return nil
 		}
 
 		c.startManagedTLSStatusReporter()
-		c.managedTLS.Start(context.Background(), c.startRuntimeAfterManagedTLSReady)
+		c.managedTLS.Start(context.Background(), c.activateManagedTLSRuntime)
 		log.WithFields(log.Fields{
 			"tag":      c.tag,
 			"node_id":  c.conf.NodeID,
@@ -128,12 +132,58 @@ func (c *Controller) usesManagedTLS() bool {
 		strings.EqualFold(strings.TrimSpace(c.info.Common.CertInfo.CertMode), "managed")
 }
 
-func (c *Controller) startRuntimeAfterManagedTLSReady() error {
-	if err := c.startRuntime(); err != nil {
-		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Start node after managed TLS became ready failed")
-		return err
+func (c *Controller) activateManagedTLSRuntime() error {
+	if c.managedTLS == nil {
+		return errors.New("managed TLS manager is nil")
 	}
-	c.stopManagedTLSStatusReporter()
+	return c.activateManagedTLSRuntimeVersion(c.managedTLS.Snapshot().Version)
+}
+
+func (c *Controller) activateManagedTLSRuntimeVersion(version uint64) error {
+	if version == 0 {
+		return errors.New("managed TLS runtime version is empty")
+	}
+	c.managedTLSActivationMu.Lock()
+	defer c.managedTLSActivationMu.Unlock()
+
+	if !c.runtime.Started() {
+		if err := c.startRuntime(); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Start node after managed TLS became ready failed")
+			return err
+		}
+		c.managedTLSRuntimeVersion = version
+		c.stopManagedTLSStatusReporter()
+		return nil
+	}
+	if c.managedTLSRuntimeVersion == version {
+		return nil
+	}
+
+	c.stateMu.Lock()
+	users := append([]panel.UserInfo(nil), c.userList...)
+	replace := c.replaceManagedTLSInbound
+	if replace == nil {
+		replace = c.server.ReplaceNode
+	}
+	err := replace(c.tag, c.info, users)
+	c.stateMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("activate managed TLS runtime version %d: %w", version, err)
+	}
+	c.managedTLSRuntimeVersion = version
+
+	nodeID := 0
+	if c.conf != nil {
+		nodeID = c.conf.NodeID
+	}
+	scopeID := uint64(0)
+	if c.managedTLS != nil {
+		scopeID = c.managedTLS.Snapshot().ScopeID
+	}
+	log.WithFields(log.Fields{
+		"tag": c.tag, "node_id": nodeID,
+		"scope_id": scopeID, "version": version,
+	}).Info("Managed TLS runtime certificate activated")
 	return nil
 }
 
