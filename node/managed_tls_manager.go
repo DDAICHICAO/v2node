@@ -58,7 +58,9 @@ type managedTLSManager struct {
 	store   managedTLSStore
 	issuer  managedTLSIssuer
 	scopeID uint64
-	domain  string
+
+	operationMu sync.Mutex
+	domain      string
 
 	mu               sync.RWMutex
 	snapshot         managedTLSStatusSnapshot
@@ -69,6 +71,44 @@ type managedTLSManager struct {
 	activatedVersion uint64
 	now              func() time.Time
 	jitter           func() time.Duration
+}
+
+func (m *managedTLSManager) Domain() string {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	return m.domain
+}
+
+func (m *managedTLSManager) CommitDomain(
+	domain string,
+	now time.Time,
+	persist func() error,
+) error {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if !validManagedTLSDomain(domain) {
+		return errManagedTLSLocalCertificateInvalid
+	}
+
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	if sameManagedTLSDomain(m.domain, domain) {
+		return nil
+	}
+	if m.store == nil {
+		return errManagedTLSLocalCertificateInvalid
+	}
+	certificate, err := m.store.Current(m.scopeID, domain, now)
+	if err != nil || certificate == nil {
+		return errManagedTLSLocalCertificateInvalid
+	}
+	if persist != nil {
+		if err := persist(); err != nil {
+			return err
+		}
+	}
+	m.domain = domain
+	m.setFromLocal(managedTLSReady, certificate, "")
+	return nil
 }
 
 func newManagedTLSManager(client managedTLSAPI, store managedTLSStore, issuer managedTLSIssuer, scopeID uint64, domain string) *managedTLSManager {
@@ -90,6 +130,12 @@ func newManagedTLSManager(client managedTLSAPI, store managedTLSStore, issuer ma
 }
 
 func (m *managedTLSManager) Prepare(now time.Time) error {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	return m.prepare(now)
+}
+
+func (m *managedTLSManager) prepare(now time.Time) error {
 	if err := m.validateConfiguration(); err != nil {
 		m.setFailure(managedTLSBlocked, "managed_tls_config_invalid", nil)
 		return ErrManagedTLSPending
@@ -220,6 +266,12 @@ func (m *managedTLSManager) MarkSyncRequestReported(requestID string) {
 }
 
 func (m *managedTLSManager) reconcileOnce(ctx context.Context) (time.Duration, error) {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	return m.reconcileOnceLocked(ctx)
+}
+
+func (m *managedTLSManager) reconcileOnceLocked(ctx context.Context) (time.Duration, error) {
 	if err := m.validateConfiguration(); err != nil {
 		m.setFailure(managedTLSBlocked, "managed_tls_config_invalid", nil)
 		return time.Minute, ErrManagedTLSPending

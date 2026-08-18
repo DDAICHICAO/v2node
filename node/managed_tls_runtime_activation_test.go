@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
@@ -17,6 +18,104 @@ func migrationCertificateForActivationTest(version uint64) *managedTLSLocalCerti
 		Version:     version,
 		NotAfter:    2_000_000_000,
 	}}
+}
+
+type managedTLSDomainTestStore struct {
+	certificate *managedTLSLocalCertificate
+}
+
+func (s *managedTLSDomainTestStore) Current(
+	scopeID uint64,
+	domain string,
+	_ time.Time,
+) (*managedTLSLocalCertificate, error) {
+	if s.certificate == nil || s.certificate.Metadata.ScopeID != scopeID {
+		return nil, errManagedTLSLocalCertificateInvalid
+	}
+	domains, err := managedTLSMetadataDomains(s.certificate.Metadata)
+	if err != nil || !managedTLSDomainsContain(domains, domain) {
+		return nil, errManagedTLSLocalCertificateInvalid
+	}
+	return s.certificate, nil
+}
+
+func (s *managedTLSDomainTestStore) Install(managedTLSLocalCertificate) error { return nil }
+func (s *managedTLSDomainTestStore) Rollback() error                          { return nil }
+func (s *managedTLSDomainTestStore) CertFile() string                         { return "fullchain.pem" }
+func (s *managedTLSDomainTestStore) KeyFile() string                          { return "private.key" }
+
+func TestManagedTLSManagerCommitsAuthoritativeDomainCoveredByCurrentCertificate(t *testing.T) {
+	certificate := migrationCertificateForActivationTest(2)
+	m := &managedTLSManager{
+		store:            &managedTLSDomainTestStore{certificate: certificate},
+		scopeID:          1,
+		domain:           "old.example.com",
+		activatedVersion: 2,
+		snapshot:         managedTLSStatusSnapshot{Managed: true, ScopeID: 1},
+	}
+	m.setFromLocal(managedTLSReady, certificate, "")
+
+	persisted := false
+	if err := m.CommitDomain("new.example.com", time.Unix(1_800_000_000, 0), func() error {
+		persisted = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !persisted {
+		t.Fatal("domain commit skipped persistence")
+	}
+	if got := m.Domain(); got != "new.example.com" {
+		t.Fatalf("domain=%q want new.example.com", got)
+	}
+	if !m.Snapshot().MigrationPrepared {
+		t.Fatal("same activated dual-SAN version must remain prepared")
+	}
+}
+
+func TestManagedTLSManagerRejectsDomainMissingFromCurrentCertificateBeforePersistence(t *testing.T) {
+	certificate := migrationCertificateForActivationTest(2)
+	m := &managedTLSManager{
+		store:    &managedTLSDomainTestStore{certificate: certificate},
+		scopeID:  1,
+		domain:   "old.example.com",
+		snapshot: managedTLSStatusSnapshot{Managed: true, ScopeID: 1},
+	}
+
+	persisted := false
+	if err := m.CommitDomain("missing.example.com", time.Unix(1_800_000_000, 0), func() error {
+		persisted = true
+		return nil
+	}); err == nil {
+		t.Fatal("expected target SAN validation failure")
+	}
+	if persisted {
+		t.Fatal("invalid target domain was persisted")
+	}
+	if got := m.Domain(); got != "old.example.com" {
+		t.Fatalf("domain changed after rejection: %q", got)
+	}
+}
+
+func TestManagedTLSManagerKeepsDomainWhenPersistenceFails(t *testing.T) {
+	certificate := migrationCertificateForActivationTest(2)
+	m := &managedTLSManager{
+		store:    &managedTLSDomainTestStore{certificate: certificate},
+		scopeID:  1,
+		domain:   "old.example.com",
+		snapshot: managedTLSStatusSnapshot{Managed: true, ScopeID: 1},
+	}
+
+	persistErr := errors.New("persist failed")
+	err := m.CommitDomain("new.example.com", time.Unix(1_800_000_000, 0), func() error {
+		return persistErr
+	})
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("err=%v want persist failure", err)
+	}
+	if got := m.Domain(); got != "old.example.com" {
+		t.Fatalf("domain changed after persistence failure: %q", got)
+	}
 }
 
 func TestManagedTLSReadyNotificationTracksActivatedVersion(t *testing.T) {
