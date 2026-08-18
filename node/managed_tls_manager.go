@@ -29,6 +29,8 @@ const (
 
 var ErrManagedTLSPending = errors.New("managed TLS certificate is not ready")
 
+const managedTLSPendingRetryMaximum = 15 * time.Second
+
 type managedTLSAPI interface {
 	GetManagedTLSCertificate(context.Context, string, uint64) (*panel.ManagedTLSCertificate, error)
 	LeaseManagedTLSCertificate(context.Context, panel.ManagedTLSLeaseRequest) (*panel.ManagedTLSLeaseResponse, error)
@@ -288,7 +290,7 @@ func (m *managedTLSManager) reconcileOnceLocked(ctx context.Context) (time.Durat
 				return fiveMinuteMaximum(time.Minute), nil
 			}
 			m.setFailure(managedTLSBlocked, code, nil)
-			return time.Minute, getErr
+			return clampManagedTLSPendingRetry(0, 15), getErr
 		}
 	} else if certificate != nil {
 		switch certificate.Status {
@@ -336,6 +338,9 @@ func (m *managedTLSManager) reconcileOnceLocked(ctx context.Context) (time.Durat
 		} else {
 			m.setFailure(managedTLSBlocked, managedTLSErrorCode(err), nil)
 		}
+		if !localValid {
+			return clampManagedTLSPendingRetry(0, 15), err
+		}
 		return time.Minute, err
 	}
 	if lease == nil || (lease.ScopeID != 0 && lease.ScopeID != m.scopeID) {
@@ -345,9 +350,15 @@ func (m *managedTLSManager) reconcileOnceLocked(ctx context.Context) (time.Durat
 	switch lease.Status {
 	case "ready":
 		m.setWaiting(local, "")
+		if !localValid {
+			return clampManagedTLSPendingRetry(lease.RetryAfter, 5), nil
+		}
 		return clampManagedTLSRetry(lease.RetryAfter, 5), nil
 	case "waiting", "cooldown":
 		m.setWaiting(local, "")
+		if !localValid {
+			return clampManagedTLSPendingRetry(lease.RetryAfter, 5), nil
+		}
 		return clampManagedTLSRetry(lease.RetryAfter, 5), nil
 	case "acquired":
 		return m.issueWithLease(ctx, lease, local)
@@ -621,6 +632,14 @@ func clampManagedTLSRetry(seconds int, fallback int) time.Duration {
 		seconds = 300
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func clampManagedTLSPendingRetry(seconds int, fallback int) time.Duration {
+	delay := clampManagedTLSRetry(seconds, fallback)
+	if delay > managedTLSPendingRetryMaximum {
+		return managedTLSPendingRetryMaximum
+	}
+	return delay
 }
 
 func fiveMinuteMaximum(delay time.Duration) time.Duration {

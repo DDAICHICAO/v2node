@@ -24,6 +24,45 @@ type managedTLSDomainTestStore struct {
 	certificate *managedTLSLocalCertificate
 }
 
+type managedTLSPendingRetryAPI struct {
+	lease    *panel.ManagedTLSLeaseResponse
+	leaseErr error
+}
+
+func (a *managedTLSPendingRetryAPI) GetManagedTLSCertificate(
+	context.Context,
+	string,
+	uint64,
+) (*panel.ManagedTLSCertificate, error) {
+	return nil, &panel.ManagedTLSError{Code: "managed_tls_empty"}
+}
+
+func (a *managedTLSPendingRetryAPI) LeaseManagedTLSCertificate(
+	context.Context,
+	panel.ManagedTLSLeaseRequest,
+) (*panel.ManagedTLSLeaseResponse, error) {
+	return a.lease, a.leaseErr
+}
+
+func (a *managedTLSPendingRetryAPI) PublishManagedTLSCertificate(
+	context.Context,
+	panel.ManagedTLSPublishRequest,
+) error {
+	return nil
+}
+
+func (a *managedTLSPendingRetryAPI) FailManagedTLSCertificate(
+	context.Context,
+	panel.ManagedTLSFailRequest,
+) error {
+	return nil
+}
+
+func (a *managedTLSPendingRetryAPI) TLSCertificateTokenConfigured() bool { return true }
+func (a *managedTLSPendingRetryAPI) TLSCertificateTokenFingerprint() string {
+	return "fingerprint"
+}
+
 func (s *managedTLSDomainTestStore) Current(
 	scopeID uint64,
 	domain string,
@@ -43,6 +82,74 @@ func (s *managedTLSDomainTestStore) Install(managedTLSLocalCertificate) error { 
 func (s *managedTLSDomainTestStore) Rollback() error                          { return nil }
 func (s *managedTLSDomainTestStore) CertFile() string                         { return "fullchain.pem" }
 func (s *managedTLSDomainTestStore) KeyFile() string                          { return "private.key" }
+
+func TestManagedTLSPendingCertificateRetriesWaitingLeaseWithinFifteenSeconds(t *testing.T) {
+	api := &managedTLSPendingRetryAPI{lease: &panel.ManagedTLSLeaseResponse{
+		Status: "waiting", ScopeID: 1, RetryAfter: 900,
+	}}
+	manager := newManagedTLSManager(
+		api,
+		&managedTLSDomainTestStore{},
+		nil,
+		1,
+		"node.example.com",
+	)
+
+	delay, err := manager.reconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delay != 15*time.Second {
+		t.Fatalf("delay=%s want 15s", delay)
+	}
+}
+
+func TestManagedTLSPendingCertificateRetriesTransportFailureWithinFifteenSeconds(t *testing.T) {
+	api := &managedTLSPendingRetryAPI{leaseErr: &panel.ManagedTLSError{
+		Code: "managed_tls_transport_error",
+	}}
+	manager := newManagedTLSManager(
+		api,
+		&managedTLSDomainTestStore{},
+		nil,
+		1,
+		"node.example.com",
+	)
+
+	delay, err := manager.reconcileOnce(context.Background())
+	if managedTLSErrorCode(err) != "managed_tls_transport_error" {
+		t.Fatalf("err=%v want managed_tls_transport_error", err)
+	}
+	if delay != 15*time.Second {
+		t.Fatalf("delay=%s want 15s", delay)
+	}
+}
+
+func TestManagedTLSExistingCertificateKeepsNormalWaitingLeaseBackoff(t *testing.T) {
+	api := &managedTLSPendingRetryAPI{lease: &panel.ManagedTLSLeaseResponse{
+		Status: "waiting", ScopeID: 1, RetryAfter: 900,
+	}}
+	manager := newManagedTLSManager(
+		api,
+		&managedTLSDomainTestStore{certificate: &managedTLSLocalCertificate{
+			Metadata: managedTLSMetadata{
+				ScopeID: 1, Domain: "node.example.com", Version: 2, NotAfter: 2_000_000_000,
+			},
+		}},
+		nil,
+		1,
+		"node.example.com",
+	)
+	manager.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
+
+	delay, err := manager.reconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delay != 5*time.Minute {
+		t.Fatalf("delay=%s want 5m", delay)
+	}
+}
 
 func TestManagedTLSManagerCommitsAuthoritativeDomainCoveredByCurrentCertificate(t *testing.T) {
 	certificate := migrationCertificateForActivationTest(2)
