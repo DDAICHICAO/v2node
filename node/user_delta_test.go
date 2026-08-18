@@ -1060,6 +1060,127 @@ func TestNodeInfoMonitorPersistsNewConfigBeforeReload(t *testing.T) {
 	}
 }
 
+func managedTLSDomainSwitchController(t *testing.T) (*Controller, chan struct{}) {
+	t.Helper()
+	current := managedTLSDomainSwitchNode("old.example.com")
+	certificate := migrationCertificateForActivationTest(2)
+	reloadCh := make(chan struct{}, 1)
+	cfg := conf.NodeConfig{APIHost: "https://panel.example", NodeID: current.Id}
+	c := &Controller{
+		apiClient:      &panel.Client{},
+		conf:           &cfg,
+		store:          newOfflineStateStore(t.TempDir()),
+		info:           current,
+		tag:            current.Tag,
+		server:         &core.V2Core{ReloadCh: reloadCh},
+		userList:       []panel.UserInfo{},
+		aliveMap:       map[int]int{},
+		deviceAliveMap: map[int]int{},
+		managedTLS: &managedTLSManager{
+			store:            &managedTLSDomainTestStore{certificate: certificate},
+			scopeID:          1,
+			domain:           "old.example.com",
+			activatedVersion: 2,
+			snapshot:         managedTLSStatusSnapshot{Managed: true, ScopeID: 1},
+		},
+	}
+	c.managedTLS.setFromLocal(managedTLSReady, certificate, "")
+	return c, reloadCh
+}
+
+func TestApplyPendingNodeInfoUpdatesManagedTLSDomainWithoutReload(t *testing.T) {
+	c, reloadCh := managedTLSDomainSwitchController(t)
+	c.pendingNodeInfo = managedTLSDomainSwitchNode("new.example.com")
+	if err := c.applyPendingNodeInfo(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reloadCh:
+		t.Fatal("domain-only change queued a global reload")
+	default:
+	}
+	if got := c.info.Common.TlsSettings.PrimaryServerName(); got != "new.example.com" {
+		t.Fatalf("domain=%q", got)
+	}
+	if got := c.managedTLS.Domain(); got != "new.example.com" {
+		t.Fatalf("manager domain=%q", got)
+	}
+	if c.pendingNodeInfo != nil {
+		t.Fatal("pending node info was not cleared")
+	}
+	state, err := c.store.Load(*c.conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.NodeInfo.Common.TlsSettings.PrimaryServerName(); got != "new.example.com" {
+		t.Fatalf("persisted domain=%q", got)
+	}
+}
+
+func TestApplyPendingNodeInfoKeepsReloadForOtherConfigChanges(t *testing.T) {
+	c, reloadCh := managedTLSDomainSwitchController(t)
+	next := managedTLSDomainSwitchNode("new.example.com")
+	next.Common.ServerPort++
+	c.pendingNodeInfo = next
+	if err := c.applyPendingNodeInfo(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reloadCh:
+	default:
+		t.Fatal("runtime config change did not queue reload")
+	}
+}
+
+func TestApplyPendingNodeInfoFailsClosedWhenTargetSANIsMissing(t *testing.T) {
+	c, reloadCh := managedTLSDomainSwitchController(t)
+	c.pendingNodeInfo = managedTLSDomainSwitchNode("missing.example.com")
+	if err := c.applyPendingNodeInfo(); err == nil {
+		t.Fatal("expected target SAN failure")
+	}
+	select {
+	case <-reloadCh:
+		t.Fatal("invalid target SAN queued a global reload")
+	default:
+	}
+	if c.info.Common.TlsSettings.PrimaryServerName() != "old.example.com" {
+		t.Fatal("current runtime state changed")
+	}
+	if c.pendingNodeInfo == nil {
+		t.Fatal("failed change must remain pending for retry")
+	}
+	if _, err := c.store.Load(*c.conf); err == nil {
+		t.Fatal("invalid target domain was persisted")
+	}
+}
+
+func TestApplyPendingNodeInfoKeepsCurrentStateWhenPersistenceFails(t *testing.T) {
+	c, reloadCh := managedTLSDomainSwitchController(t)
+	notDirectory := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(notDirectory, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c.store = newOfflineStateStore(notDirectory)
+	c.pendingNodeInfo = managedTLSDomainSwitchNode("new.example.com")
+	if err := c.applyPendingNodeInfo(); err == nil {
+		t.Fatal("expected snapshot save failure")
+	}
+	select {
+	case <-reloadCh:
+		t.Fatal("persistence failure queued a global reload")
+	default:
+	}
+	if c.info.Common.TlsSettings.PrimaryServerName() != "old.example.com" {
+		t.Fatal("current runtime state changed")
+	}
+	if got := c.managedTLS.Domain(); got != "old.example.com" {
+		t.Fatalf("manager domain=%q", got)
+	}
+	if c.pendingNodeInfo == nil {
+		t.Fatal("failed change must remain pending for retry")
+	}
+}
+
 func TestUpdateTaskIsDowngrade(t *testing.T) {
 	cases := []struct {
 		name    string

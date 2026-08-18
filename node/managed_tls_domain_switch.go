@@ -1,11 +1,45 @@
 package node
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
+	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
+
+func (c *Controller) applyManagedTLSDomainChange(next *panel.NodeInfo) (bool, error) {
+	c.stateMu.Lock()
+	current := c.info
+	c.stateMu.Unlock()
+	target, ok := managedTLSDomainOnlyChange(current, next)
+	if !ok {
+		return false, nil
+	}
+	if c.managedTLS == nil {
+		return true, errors.New("managed TLS manager is nil")
+	}
+
+	c.managedTLSActivationMu.Lock()
+	defer c.managedTLSActivationMu.Unlock()
+	if err := c.managedTLS.CommitDomain(target, time.Now().UTC(), func() error {
+		return c.persistOfflineState(next)
+	}); err != nil {
+		return true, fmt.Errorf("apply managed TLS domain: %w", err)
+	}
+	c.stateMu.Lock()
+	c.info = next
+	c.stateMu.Unlock()
+	log.WithFields(log.Fields{
+		"tag":      c.tag,
+		"node_id":  next.Id,
+		"scope_id": next.Common.TlsSettings.CertificateScopeID,
+	}).Info("Managed TLS domain applied without global reload")
+	return true, nil
+}
 
 func managedTLSDomainOnlyChange(current, next *panel.NodeInfo) (string, bool) {
 	if current == nil || next == nil || current.Common == nil || next.Common == nil ||

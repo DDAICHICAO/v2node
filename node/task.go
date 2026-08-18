@@ -65,18 +65,13 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 
 func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if c.pendingNodeInfo != nil {
-		if err := c.persistOfflineState(c.pendingNodeInfo); err != nil {
+		if err := c.applyPendingNodeInfo(); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Error("Persist pending node configuration failed")
+			}).Error("Apply pending node configuration failed")
 			return err
 		}
-		if err := c.queueReload(); err != nil {
-			return err
-		}
-		c.pendingNodeInfo = nil
-		c.recordPanelSuccess("config")
 		return nil
 	}
 
@@ -89,25 +84,41 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if newN != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
-		}).Info("Got new node info; persist before reload")
+		}).Info("Got new node info; persist before apply")
 		c.pendingNodeInfo = newN
-		if err := c.persistOfflineState(newN); err != nil {
+		if err := c.applyPendingNodeInfo(); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Error("Persist new node configuration failed; reload deferred")
+			}).Error("Apply new node configuration failed; retry deferred")
 			return err
 		}
-		if err := c.queueReload(); err != nil {
-			return err
-		}
-		c.pendingNodeInfo = nil
-		c.recordPanelSuccess("config")
 		return nil
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 	c.checkUpdateTask(ctx)
 	c.checkStreamUnlockTask(ctx)
+	c.recordPanelSuccess("config")
+	return nil
+}
+
+func (c *Controller) applyPendingNodeInfo() error {
+	if c.pendingNodeInfo == nil {
+		return nil
+	}
+	applied, err := c.applyManagedTLSDomainChange(c.pendingNodeInfo)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		if err := c.persistOfflineState(c.pendingNodeInfo); err != nil {
+			return err
+		}
+		if err := c.queueReload(); err != nil {
+			return err
+		}
+	}
+	c.pendingNodeInfo = nil
 	c.recordPanelSuccess("config")
 	return nil
 }
