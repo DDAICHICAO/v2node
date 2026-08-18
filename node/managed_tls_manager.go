@@ -39,15 +39,18 @@ type managedTLSAPI interface {
 }
 
 type managedTLSStatusSnapshot struct {
-	Managed          bool
-	ScopeID          uint64
-	Version          uint64
-	NotAfter         int64
-	Status           managedTLSSyncStatus
-	TokenConfigured  bool
-	TokenFingerprint string
-	LastErrorCode    string
-	SyncRequestID    string
+	Managed           bool
+	ScopeID           uint64
+	Version           uint64
+	NotAfter          int64
+	Status            managedTLSSyncStatus
+	TokenConfigured   bool
+	TokenFingerprint  string
+	LastErrorCode     string
+	SyncRequestID     string
+	MigrationID       uint64
+	PreparedVersion   uint64
+	MigrationPrepared bool
 }
 
 type managedTLSManager struct {
@@ -305,6 +308,19 @@ func (m *managedTLSManager) issueWithLease(ctx context.Context, lease *panel.Man
 		m.setFailure(managedTLSBlocked, "managed_tls_lease_invalid", local)
 		return time.Minute, ErrManagedTLSPending
 	}
+	domains := lease.Domains
+	if len(domains) == 0 {
+		domains = []string{m.domain}
+	}
+	normalizedDomains, domainErr := normalizeManagedTLSDomains(domains)
+	purpose := strings.TrimSpace(lease.Purpose)
+	intentValid := (purpose == "" && lease.MigrationID == 0 && len(lease.Domains) == 0) ||
+		(purpose == "normal" && lease.MigrationID == 0 && len(normalizedDomains) == 1) ||
+		(purpose == "domain_migration" && lease.MigrationID > 0 && len(normalizedDomains) == 2)
+	if domainErr != nil || !managedTLSDomainsContain(normalizedDomains, m.domain) || !intentValid {
+		m.setFailure(managedTLSBlocked, "managed_tls_lease_invalid", local)
+		return time.Minute, ErrManagedTLSPending
+	}
 	m.setIssuing(local)
 	heartbeatContext, cancelHeartbeat := context.WithCancel(ctx)
 	heartbeatDone := make(chan struct{})
@@ -317,19 +333,25 @@ func (m *managedTLSManager) issueWithLease(ctx context.Context, lease *panel.Man
 			case <-heartbeatContext.Done():
 				return
 			case <-ticker.C:
-				_, _ = m.client.LeaseManagedTLSCertificate(heartbeatContext, panel.ManagedTLSLeaseRequest{Domain: m.domain, LeaseID: lease.LeaseID})
+				_, _ = m.client.LeaseManagedTLSCertificate(heartbeatContext, panel.ManagedTLSLeaseRequest{
+					Domain: m.domain, LeaseID: lease.LeaseID, Purpose: lease.Purpose,
+					MigrationID: lease.MigrationID, Domains: lease.Domains,
+				})
 			}
 		}
 	}()
 	result, issueErr := m.issuer.Issue(ctx, managedTLSIssueRequest{
-		ScopeID: m.scopeID, Domains: []string{m.domain}, Provider: lease.Provider,
+		ScopeID: m.scopeID, Domains: normalizedDomains, Provider: lease.Provider,
 		DNSEnv: lease.DNSEnv, ACMEAccount: lease.ACMEAccount,
 	})
 	cancelHeartbeat()
 	<-heartbeatDone
 	if issueErr != nil || result == nil {
 		code := "managed_tls_obtain_failed"
-		_ = m.client.FailManagedTLSCertificate(ctx, panel.ManagedTLSFailRequest{LeaseID: lease.LeaseID, Domain: m.domain, ErrorCode: code, Message: "managed TLS issuance failed"})
+		_ = m.client.FailManagedTLSCertificate(ctx, panel.ManagedTLSFailRequest{
+			LeaseID: lease.LeaseID, Domain: m.domain, ErrorCode: code, Message: "managed TLS issuance failed",
+			Purpose: lease.Purpose, MigrationID: lease.MigrationID, Domains: lease.Domains,
+		})
 		m.setFailure(statusWithLocal(local), code, local)
 		return time.Minute, issueErr
 	}
@@ -338,6 +360,7 @@ func (m *managedTLSManager) issueWithLease(ctx context.Context, lease *panel.Man
 		LeaseID: lease.LeaseID, Domain: m.domain,
 		FullchainPEM: string(result.FullchainPEM), PrivateKeyPEM: string(result.PrivateKeyPEM),
 		ACMEAccount: &account,
+		Purpose:     lease.Purpose, MigrationID: lease.MigrationID, Domains: lease.Domains,
 	}
 	publishErr := m.client.PublishManagedTLSCertificate(ctx, publishRequest)
 	issuedFingerprint, fingerprintErr := managedTLSCertificateFingerprint(result.FullchainPEM)
@@ -346,7 +369,10 @@ func (m *managedTLSManager) issueWithLease(ctx context.Context, lease *panel.Man
 		fingerprintErr == nil && strings.EqualFold(canonical.CertificateSHA256, issuedFingerprint)
 	if publishErr != nil && !committed {
 		code := managedTLSErrorCode(publishErr)
-		_ = m.client.FailManagedTLSCertificate(ctx, panel.ManagedTLSFailRequest{LeaseID: lease.LeaseID, Domain: m.domain, ErrorCode: code, Message: "managed TLS publish failed"})
+		_ = m.client.FailManagedTLSCertificate(ctx, panel.ManagedTLSFailRequest{
+			LeaseID: lease.LeaseID, Domain: m.domain, ErrorCode: code, Message: "managed TLS publish failed",
+			Purpose: lease.Purpose, MigrationID: lease.MigrationID, Domains: lease.Domains,
+		})
 		m.setFailure(statusWithLocal(local), code, local)
 		return time.Minute, publishErr
 	}
@@ -366,14 +392,25 @@ func (m *managedTLSManager) issueWithLease(ctx context.Context, lease *panel.Man
 }
 
 func (m *managedTLSManager) installPanelCertificate(certificate *panel.ManagedTLSCertificate, now time.Time) error {
-	if certificate == nil || certificate.Status != "ready" || certificate.ScopeID != m.scopeID || certificate.Version == 0 ||
-		!sameManagedTLSDomain(certificate.Domain, m.domain) || certificate.NotAfter <= now.Unix() ||
+	if certificate == nil {
+		return errManagedTLSLocalCertificateInvalid
+	}
+	domains := certificate.Domains
+	if len(domains) == 0 {
+		domains = []string{certificate.Domain}
+	}
+	normalizedDomains, domainErr := normalizeManagedTLSDomains(domains)
+	authoritativeDomain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(certificate.Domain)), ".")
+	if certificate.Status != "ready" || certificate.ScopeID != m.scopeID || certificate.Version == 0 ||
+		domainErr != nil || !managedTLSDomainsContain(normalizedDomains, authoritativeDomain) ||
+		!managedTLSDomainsContain(normalizedDomains, m.domain) || certificate.NotAfter <= now.Unix() ||
 		strings.TrimSpace(certificate.CertificateSHA256) == "" {
 		return errManagedTLSLocalCertificateInvalid
 	}
 	local := managedTLSLocalCertificate{
 		Metadata: managedTLSMetadata{
-			ScopeID: m.scopeID, Domain: m.domain, Version: certificate.Version,
+			ScopeID: m.scopeID, Domain: authoritativeDomain, Domains: normalizedDomains,
+			MigrationID: certificate.MigrationID, Version: certificate.Version,
 			CertificateSHA256: strings.ToLower(certificate.CertificateSHA256), NotAfter: certificate.NotAfter,
 		},
 		FullchainPEM: []byte(certificate.FullchainPEM), PrivateKeyPEM: []byte(certificate.PrivateKeyPEM),
@@ -403,9 +440,18 @@ func (m *managedTLSManager) setFromLocal(status managedTLSSyncStatus, local *man
 	m.mu.Lock()
 	m.snapshot.Status = status
 	m.snapshot.LastErrorCode = sanitizeManagedTLSErrorCode(errorCode)
+	m.snapshot.MigrationID = 0
+	m.snapshot.PreparedVersion = 0
+	m.snapshot.MigrationPrepared = false
 	if local != nil {
 		m.snapshot.Version = local.Metadata.Version
 		m.snapshot.NotAfter = local.Metadata.NotAfter
+		domains, err := managedTLSMetadataDomains(local.Metadata)
+		if err == nil && local.Metadata.MigrationID > 0 && managedTLSDomainsContain(domains, m.domain) {
+			m.snapshot.MigrationID = local.Metadata.MigrationID
+			m.snapshot.PreparedVersion = local.Metadata.Version
+			m.snapshot.MigrationPrepared = status == managedTLSReady
+		}
 	}
 	m.mu.Unlock()
 }

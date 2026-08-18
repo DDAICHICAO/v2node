@@ -316,6 +316,9 @@ func appendManagedTLSStatus(status *panel.NodeRuntimeStatus, snapshot managedTLS
 	status.TLSCertTokenFingerprint = snapshot.TokenFingerprint
 	status.TLSCertLastErrorCode = snapshot.LastErrorCode
 	status.TLSCertSyncRequestID = snapshot.SyncRequestID
+	status.TLSCertMigrationID = snapshot.MigrationID
+	status.TLSCertPreparedVersion = snapshot.PreparedVersion
+	status.TLSCertMigrationPrepared = snapshot.MigrationPrepared
 }
 
 func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeStatus) {

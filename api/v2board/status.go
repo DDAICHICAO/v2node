@@ -27,6 +27,9 @@ type NodeRuntimeStatus struct {
 	TLSCertTokenFingerprint              string   `json:"tls_cert_token_fingerprint,omitempty"`
 	TLSCertLastErrorCode                 string   `json:"tls_cert_last_error_code,omitempty"`
 	TLSCertSyncRequestID                 string   `json:"tls_cert_sync_request_id,omitempty"`
+	TLSCertMigrationID                   uint64   `json:"tls_cert_migration_id,omitempty"`
+	TLSCertPreparedVersion               uint64   `json:"tls_cert_prepared_version,omitempty"`
+	TLSCertMigrationPrepared             bool     `json:"tls_cert_migration_prepared"`
 	AccessAuditReported                  bool     `json:"access_audit_reported,omitempty"`
 	AccessAuditEnabled                   bool     `json:"access_audit_enabled"`
 	AccessAuditEndpoint                  string   `json:"access_audit_endpoint,omitempty"`

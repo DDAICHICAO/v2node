@@ -35,6 +35,7 @@ var deviceLimitCapabilities = []string{
 	"device_limit_event_report",
 	"managed_tls_certificate_v1",
 	managedTLSAutoCredentialCapability,
+	"managed_tls_domain_migration_v1",
 }
 
 type Client struct {
