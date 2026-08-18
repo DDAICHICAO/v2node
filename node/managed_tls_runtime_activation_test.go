@@ -118,6 +118,67 @@ func TestManagedTLSManagerKeepsDomainWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+func managedTLSDomainSwitchNode(domain string) *panel.NodeInfo {
+	return &panel.NodeInfo{
+		Id:           302,
+		Type:         "trojan",
+		Security:     panel.Tls,
+		PushInterval: time.Minute,
+		PullInterval: time.Minute,
+		Tag:          "node-302",
+		Common: &panel.CommonNode{
+			Protocol:   "trojan",
+			ServerPort: 15014,
+			BaseConfig: &panel.BaseConfig{},
+			Tls:        panel.Tls,
+			TlsSettings: panel.TlsSettings{
+				CertMode:           "managed",
+				CertificateScopeID: 1,
+				ServerName:         domain,
+				ServerNames:        []string{domain},
+			},
+			CertInfo: &panel.CertInfo{
+				CertMode:   "managed",
+				CertFile:   "fullchain.pem",
+				KeyFile:    "private.key",
+				CertDomain: domain,
+			},
+		},
+	}
+}
+
+func TestManagedTLSDomainOnlyChange(t *testing.T) {
+	current := managedTLSDomainSwitchNode("old.example.com")
+	target := managedTLSDomainSwitchNode("new.example.com")
+	domain, ok := managedTLSDomainOnlyChange(current, target)
+	if !ok || domain != "new.example.com" {
+		t.Fatalf("domain=%q ok=%v", domain, ok)
+	}
+
+	tests := []struct {
+		name   string
+		change func(*panel.NodeInfo)
+	}{
+		{name: "port", change: func(info *panel.NodeInfo) { info.Common.ServerPort++ }},
+		{name: "scope", change: func(info *panel.NodeInfo) { info.Common.TlsSettings.CertificateScopeID++ }},
+		{name: "protocol", change: func(info *panel.NodeInfo) { info.Common.Protocol = "vless" }},
+		{name: "node id", change: func(info *panel.NodeInfo) { info.Id++ }},
+		{name: "tag", change: func(info *panel.NodeInfo) { info.Tag = "other-tag" }},
+		{name: "tls mode", change: func(info *panel.NodeInfo) { info.Common.TlsSettings.CertMode = "file" }},
+		{name: "cert mode", change: func(info *panel.NodeInfo) { info.Common.CertInfo.CertMode = "file" }},
+		{name: "reject unknown sni", change: func(info *panel.NodeInfo) { info.Common.CertInfo.RejectUnknownSni = true }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := managedTLSDomainSwitchNode("new.example.com")
+			test.change(changed)
+			if _, ok := managedTLSDomainOnlyChange(current, changed); ok {
+				t.Fatal("non-domain change must retain the full reload path")
+			}
+		})
+	}
+}
+
 func TestManagedTLSReadyNotificationTracksActivatedVersion(t *testing.T) {
 	m := &managedTLSManager{
 		domain:   "old.example.com",
