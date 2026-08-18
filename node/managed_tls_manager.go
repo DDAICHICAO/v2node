@@ -158,7 +158,9 @@ func (m *managedTLSManager) Start(ctx context.Context, onReady func() error) {
 		for {
 			delay, _ := m.reconcileOnce(loopContext)
 			if m.Snapshot().Status == managedTLSReady {
-				m.notifyReady(loopContext, onReady)
+				if err := m.notifyReady(loopContext, onReady); err != nil && delay > time.Minute {
+					delay = time.Minute
+				}
 			}
 			if delay <= 0 {
 				delay = time.Minute
@@ -487,19 +489,19 @@ func (m *managedTLSManager) setSyncRequestID(requestID string) {
 	m.mu.Unlock()
 }
 
-func (m *managedTLSManager) notifyReady(ctx context.Context, callback func() error) {
+func (m *managedTLSManager) notifyReady(ctx context.Context, callback func() error) error {
 	if callback == nil || ctx.Err() != nil {
-		return
+		return nil
 	}
 	m.mu.Lock()
 	version := m.snapshot.Version
 	if version == 0 || m.activatedVersion == version || m.closed {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	m.mu.Unlock()
 	if ctx.Err() != nil {
-		return
+		return nil
 	}
 	if err := callback(); err != nil {
 		m.mu.Lock()
@@ -509,7 +511,7 @@ func (m *managedTLSManager) notifyReady(ctx context.Context, callback func() err
 			m.refreshMigrationPreparedLocked()
 		}
 		m.mu.Unlock()
-		return
+		return err
 	}
 	m.mu.Lock()
 	if !m.closed && m.snapshot.Version == version {
@@ -519,6 +521,7 @@ func (m *managedTLSManager) notifyReady(ctx context.Context, callback func() err
 		m.refreshMigrationPreparedLocked()
 	}
 	m.mu.Unlock()
+	return nil
 }
 
 func managedTLSLocalVersion(local *managedTLSLocalCertificate) uint64 {

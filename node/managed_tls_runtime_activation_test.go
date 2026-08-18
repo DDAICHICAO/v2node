@@ -63,10 +63,13 @@ func TestManagedTLSReadyNotificationRetriesFailedActivation(t *testing.T) {
 	m.setFromLocal(managedTLSReady, migrationCertificateForActivationTest(3), "")
 
 	attempts := 0
-	m.notifyReady(context.Background(), func() error {
+	err := m.notifyReady(context.Background(), func() error {
 		attempts++
 		return errors.New("activate failed")
 	})
+	if err == nil {
+		t.Fatal("failed activation must be returned to the reconcile loop")
+	}
 	if m.Snapshot().MigrationPrepared {
 		t.Fatal("failed activation must keep migration gate closed")
 	}
