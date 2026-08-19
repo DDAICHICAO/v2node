@@ -453,3 +453,13 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 上线验证不能只看 PID 和 `NRestarts`；还要连续检查目标端口、日志中是否再次出现 `Xray ... started`，并确认出现 `Managed TLS domain applied without global reload`。
 - 相关设计与计划：`docs/superpowers/specs/2026-08-18-managed-tls-runtime-activation-design.md`、`docs/superpowers/plans/2026-08-18-managed-tls-domain-switch-in-place.md`。
 - 对应实现提交：`b13cd1f`、`c20566d`、`336aec6`。
+
+## 2026-08-19：托管 TLS Cloudflare TXT 已创建但本地传播预检超时
+
+- 症状：作用域停在 v0 并显示 `managed_tls_obtain_failed`，节点日志先显示 Cloudflare `new record`，随后每 12 秒等待传播，两分钟后清理 challenge。
+- 影响链：v2board 作用域租约 -> v2node managed TLS issuer -> Cloudflare DNS API -> lego 本地传播预检 -> Let’s Encrypt DNS-01。
+- 根因：TXT 写入成功，但节点通过 `/etc/resolv.conf` 的 systemd-resolved stub 执行本地传播预检时无法完成，导致尚未进入 ACME 最终验证就超时。
+- 修复：Cloudflare managed TLS 使用公共递归 DNS，TXT 写入后固定等待 15 秒并跳过节点本地传播预检；最终权限校验仍由 Let’s Encrypt 完成；Obtain 原始错误写入节点日志。
+- 验证：运行 managed TLS 定向单元测试；部署后重新签发，确认不再等待本地传播两分钟并生成 v1 证书。
+- 下次先查：先区分 Cloudflare TXT 创建失败、本地传播预检失败和 Let’s Encrypt 最终验证失败；不要只根据面板通用错误码判断 Token 无效。
+- 相关文件：`node/managed_tls_issuer.go`、`node/managed_tls_issuer_test.go`。

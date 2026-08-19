@@ -10,16 +10,54 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/providers/dns"
 	"github.com/go-acme/lego/v4/registration"
+	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
 var managedTLSLegoMu sync.Mutex
+
+var managedTLSCloudflareRecursiveNameservers = []string{
+	"1.1.1.1:53",
+	"8.8.8.8:53",
+}
+
+type managedTLSDNS01Policy struct {
+	RecursiveNameservers []string
+	PropagationWait      time.Duration
+	SkipPropagationCheck bool
+}
+
+func managedTLSDNS01PolicyForProvider(provider string) (managedTLSDNS01Policy, bool) {
+	if !strings.EqualFold(strings.TrimSpace(provider), "cloudflare") {
+		return managedTLSDNS01Policy{}, false
+	}
+
+	return managedTLSDNS01Policy{
+		RecursiveNameservers: append([]string(nil), managedTLSCloudflareRecursiveNameservers...),
+		PropagationWait:      15 * time.Second,
+		SkipPropagationCheck: true,
+	}, true
+}
+
+func managedTLSDNS01ChallengeOptions(provider string) []dns01.ChallengeOption {
+	policy, ok := managedTLSDNS01PolicyForProvider(provider)
+	if !ok {
+		return nil
+	}
+
+	return []dns01.ChallengeOption{
+		dns01.AddRecursiveNameservers(policy.RecursiveNameservers),
+		dns01.PropagationWait(policy.PropagationWait, policy.SkipPropagationCheck),
+	}
+}
 
 type managedTLSIssueRequest struct {
 	ScopeID     uint64
@@ -99,12 +137,15 @@ func issueManagedTLSWithLego(ctx context.Context, request managedTLSIssueRequest
 	if err != nil {
 		return nil, fmt.Errorf("managed_tls_dns_provider_failed")
 	}
-	if err := client.Challenge.SetDNS01Provider(providerInstance); err != nil {
+	if err := client.Challenge.SetDNS01Provider(
+		providerInstance,
+		managedTLSDNS01ChallengeOptions(provider)...,
+	); err != nil {
 		return nil, fmt.Errorf("managed_tls_dns_provider_failed")
 	}
 	resource, err := client.Certificate.Obtain(certificate.ObtainRequest{Domains: domains, Bundle: true})
 	if err != nil {
-		return nil, fmt.Errorf("managed_tls_obtain_failed")
+		return nil, managedTLSObtainFailure(request.ScopeID, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("managed_tls_issue_cancelled")
@@ -118,6 +159,14 @@ func issueManagedTLSWithLego(ctx context.Context, request managedTLSIssueRequest
 		PrivateKeyPEM: append([]byte(nil), resource.PrivateKey...),
 		ACMEAccount:   *account,
 	}, nil
+}
+
+func managedTLSObtainFailure(scopeID uint64, cause error) error {
+	log.WithError(cause).
+		WithField("scope_id", scopeID).
+		Warn("Managed TLS certificate obtain failed")
+
+	return fmt.Errorf("managed_tls_obtain_failed")
 }
 
 func normalizeManagedTLSDomains(domains []string) ([]string, error) {
