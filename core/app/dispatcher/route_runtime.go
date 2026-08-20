@@ -34,6 +34,7 @@ type RouteRuntimeManager struct {
 	active   *routeRuntimeGeneration
 	registry map[uint64]*routeRuntimeGeneration
 	retired  map[uint64]*routeRuntimeGeneration
+	closed   bool
 }
 
 type RouteRuntimeLease struct {
@@ -90,6 +91,9 @@ func (m *RouteRuntimeManager) Acquire(ctx context.Context) (*RouteRuntimeLease, 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return nil, errors.New("route runtime manager is closed")
+	}
 
 	generation := m.active
 	if ctx != nil {
@@ -116,6 +120,10 @@ func (m *RouteRuntimeManager) Publish(next RouteRuntimeGeneration) error {
 	var cleanup func() error
 
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errors.New("route runtime manager is closed")
+	}
 	if m.active == nil {
 		m.mu.Unlock()
 		return errors.New("active route runtime generation is unavailable")
@@ -136,6 +144,34 @@ func (m *RouteRuntimeManager) Publish(next RouteRuntimeGeneration) error {
 	m.mu.Unlock()
 
 	runRouteRuntimeCleanup(old.ID, cleanup)
+	return nil
+}
+
+func (m *RouteRuntimeManager) Close() error {
+	if m == nil {
+		return nil
+	}
+	var generationID uint64
+	var cleanup func() error
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	if m.active != nil {
+		generation := m.active
+		generationID = generation.ID
+		generation.retired = true
+		generation.retiredAt = time.Now()
+		m.retired[generation.ID] = generation
+		m.active = nil
+		if generation.refs == 0 {
+			cleanup = m.detachRetiredLocked(generation)
+		}
+	}
+	m.mu.Unlock()
+	runRouteRuntimeCleanup(generationID, cleanup)
 	return nil
 }
 
