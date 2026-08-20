@@ -463,3 +463,28 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 验证：运行 managed TLS 定向单元测试；部署后重新签发，确认不再等待本地传播两分钟并生成 v1 证书。
 - 下次先查：先区分 Cloudflare TXT 创建失败、本地传播预检失败和 Let’s Encrypt 最终验证失败；不要只根据面板通用错误码判断 Token 无效。
 - 相关文件：`node/managed_tls_issuer.go`、`node/managed_tls_issuer_test.go`。
+
+## 2026-08-20：同机多 NodeID 的纯路由更新必须作为一个不可变运行代次发布
+
+### 症状与影响链
+
+- 管理员保存一条被多个节点引用的路由规则后，同一 v2node 进程内的相关 NodeID 会先后拉到新的 `/api/v2/server/config`；旧 `nodeInfoMonitor` 把每次变化都写入进程级 `ReloadCh`。
+- `cmd/server.go` 收到任意一次 reload 后会关闭全部 Controller 和整个 Xray Core，再重新拉取、编译和启动。于是 N 个 NodeID 既可能重复触发昂贵重载，也会让既有 TCP/UDP 连接和监听器真实中断。
+- 完整链路为：v2board 路由规则保存 -> 各 NodeID 配置正文和 ETag 变化 -> v2node retained pending -> 整机稳定向量协调 -> 严格编译候选 Router/DNS/Outbound -> 原子发布 generation -> 旧连接释放 lease 后回收旧资源。
+
+### 根因、修复与失败边界
+
+- 路由、DNS 和自定义 Outbound 原来只存在于 Core 启动配置中，没有独立的运行代次和引用生命周期；仅做 debounce 仍然必须重启 Core，无法满足零断线。
+- 新实现先严格区分 unchanged、managed TLS only、routes only 和 full reload。纯路由变化由单 worker 在 500ms 稳定窗口内并发刷新该机器全部 NodeID，两次配置版本向量一致且发布前 epoch 未变化时才整体应用一次。
+- 每个新连接只取得一个不可变 generation lease；normal、forced、default、DNS 和嵌套 detour 都使用同代 Router 与 Outbound。已建立连接继续持有旧代次，最后一个 lease 释放后才按 Remove -> Close 顺序回收不再共享的资源。
+- 候选编译、Outbound 启动、二次稳定、面板刷新或 Apply 任一步失败时保持旧代次，保留 observed pending，并以可被新 Notify 打断的指数退避重试；不能静默改走全局 reload。
+- Apply 成功后分别更新 Controller active 状态并原子保存整机 `route-runtime.json`。快照失败只重试提交/持久化，不重复发布 generation；离线启动只有在整机 NodeID/APIHost 身份完全匹配且严格编译通过时才覆盖旧 NodeInfo，用户、在线状态和同步序列仍来自单节点快照。
+- 防御性 NodeInfo 深拷贝必须保留 `NetworkSettings` 的 nil/raw 表示；把 nil 转为 JSON `null` 会让本来只变 Routes 的配置被误判为 full reload。
+
+### 验证、上线与下次检查
+
+- 单元和压力回归覆盖：严格编译冲突/循环/依赖传播、并发 Acquire/Publish、旧连接 lease 延迟回收、共享 Outbound 引用、候选失败不推进、N 节点只发布一次、向量变化重新稳定、304 后 retained pending 重试、Notify 打断退避、快照失败不重复发布，以及纯路由 pending 不写 `ReloadCh`。
+- Windows 本机完整 Go 回归使用 `GOEXPERIMENT=jsonv2`；`go test -race` 需要 CGO，当前环境没有 `gcc`，上线前必须在带 CGO 工具链的 Linux CI 或构建机补跑，并用持续 TCP/UDP 和并发新连接探针验证。
+- 生产先灰度一台配置多个 NodeID 的机器。检查日志只出现一次 route generation 发布，不出现 `收到重启信号`、Controller task stopped、端口消失或 Xray Core restarted；同时观察 active/retired generation、lease、Outbound pool、CPU、内存和 goroutine 是否回落。
+- 若变化还进入全局 reload，先查 `node/task.go` 的统一分类和协调器开关；若候选一直失败，查配置向量、严格编译错误和 retained pending，不要先删除快照或重启；若旧资源不回收，查 dispatcher Link 的双向结束/context 取消和 lease release-once。
+- 相关文件：`api/v2board/node.go`、`node/node_info_change.go`、`node/route_update_coordinator.go`、`node/route_runtime_state.go`、`node/task.go`、`core/route_compile.go`、`core/route_runtime.go`、`core/route_outbound_pool.go`、`core/app/dispatcher/route_runtime.go`、`core/app/dispatcher/route_link.go`。

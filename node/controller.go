@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -49,6 +50,11 @@ type Controller struct {
 	startedOffline           bool
 	offlineTracker           offlineTracker
 	pendingNodeInfo          *panel.NodeInfo
+	pendingNodeInfoVersion   string
+	activeNodeInfoVersion    string
+	routeCoordinator         *routeUpdateCoordinator
+	configFetchMu            sync.Mutex
+	nodeInfoApplyMu          sync.Mutex
 	userSyncMu               sync.Mutex
 	stateMu                  sync.Mutex
 	userSyncCancel           context.CancelFunc
@@ -62,15 +68,170 @@ type Controller struct {
 
 // NewController return a Node controller with default parameters.
 func NewController(api *panel.Client, conf *conf.NodeConfig, store *offlineStateStore, bootstrap *offlineState, startedOffline bool) *Controller {
+	activeVersion := ""
+	if api != nil {
+		activeVersion = api.NodeInfoVersion()
+	}
+	if activeVersion == "" && bootstrap != nil {
+		activeVersion = nodeInfoContentVersion(bootstrap.NodeInfo)
+	}
 	controller := &Controller{
-		apiClient:      api,
-		conf:           conf,
-		netSampler:     netstat.NewSampler(),
-		store:          store,
-		bootstrap:      bootstrap,
-		startedOffline: startedOffline,
+		apiClient:             api,
+		conf:                  conf,
+		netSampler:            netstat.NewSampler(),
+		store:                 store,
+		bootstrap:             bootstrap,
+		startedOffline:        startedOffline,
+		activeNodeInfoVersion: activeVersion,
 	}
 	return controller
+}
+
+func nodeInfoContentVersion(info *panel.NodeInfo) string {
+	if info == nil {
+		return ""
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (c *Controller) RefreshObserved(ctx context.Context) (routeObservedState, error) {
+	if c == nil || c.apiClient == nil {
+		return routeObservedState{}, errors.New("node configuration client is nil")
+	}
+	c.configFetchMu.Lock()
+	next, err := c.apiClient.GetNodeInfo(ctx)
+	version := c.apiClient.NodeInfoVersion()
+	c.configFetchMu.Unlock()
+	if err != nil {
+		return routeObservedState{}, err
+	}
+	if next != nil {
+		clone, cloneErr := cloneRouteRuntimeNodeInfo(next)
+		if cloneErr != nil {
+			return routeObservedState{}, fmt.Errorf("clone observed node configuration: %w", cloneErr)
+		}
+		if version == "" {
+			version = nodeInfoContentVersion(clone)
+		}
+		c.nodeInfoApplyMu.Lock()
+		c.pendingNodeInfo = clone
+		c.pendingNodeInfoVersion = version
+		c.nodeInfoApplyMu.Unlock()
+	}
+	return c.ObservedState(), nil
+}
+
+func (c *Controller) ObservedState() routeObservedState {
+	if c == nil {
+		return routeObservedState{}
+	}
+	c.nodeInfoApplyMu.Lock()
+	defer c.nodeInfoApplyMu.Unlock()
+	return c.observedStateLocked()
+}
+
+func (c *Controller) observedStateLocked() routeObservedState {
+	c.stateMu.Lock()
+	active := c.info
+	if active == nil && c.bootstrap != nil {
+		active = c.bootstrap.NodeInfo
+	}
+	activeClone, _ := cloneRouteRuntimeNodeInfo(active)
+	c.stateMu.Unlock()
+
+	observed := activeClone
+	version := strings.TrimSpace(c.activeNodeInfoVersion)
+	if c.pendingNodeInfo != nil {
+		observed, _ = cloneRouteRuntimeNodeInfo(c.pendingNodeInfo)
+		version = strings.TrimSpace(c.pendingNodeInfoVersion)
+	}
+	if version == "" {
+		version = nodeInfoContentVersion(observed)
+	}
+	nodeID := 0
+	apiHost := ""
+	if c.conf != nil {
+		nodeID = c.conf.NodeID
+		apiHost = c.conf.APIHost
+	} else if c.apiClient != nil {
+		nodeID = c.apiClient.NodeId
+		apiHost = c.apiClient.APIHost
+	}
+	if nodeID == 0 && observed != nil {
+		nodeID = observed.Id
+	}
+	return routeObservedState{
+		NodeID:   nodeID,
+		APIHost:  normalizeAPIHost(apiHost),
+		Version:  version,
+		Active:   activeClone,
+		Observed: observed,
+	}
+}
+
+func (c *Controller) CommitRouteNodeInfo(info *panel.NodeInfo, version string) error {
+	if c == nil || info == nil {
+		return errors.New("route node configuration is nil")
+	}
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return errors.New("route node configuration version is empty")
+	}
+	clone, err := cloneRouteRuntimeNodeInfo(info)
+	if err != nil {
+		return fmt.Errorf("clone route node configuration: %w", err)
+	}
+	if c.conf != nil && clone.Id != c.conf.NodeID {
+		return fmt.Errorf("route node identity mismatch: got %d, want %d", clone.Id, c.conf.NodeID)
+	}
+
+	c.nodeInfoApplyMu.Lock()
+	c.stateMu.Lock()
+	kind := classifyNodeInfoChange(c.info, clone)
+	if kind != nodeInfoUnchanged && kind != nodeInfoRoutesOnly {
+		c.stateMu.Unlock()
+		c.nodeInfoApplyMu.Unlock()
+		return errors.New("refuse to commit non-route configuration through route coordinator")
+	}
+	c.info = clone
+	c.activeNodeInfoVersion = version
+	c.stateMu.Unlock()
+
+	newerPending := false
+	if c.pendingNodeInfo != nil {
+		pendingVersion := strings.TrimSpace(c.pendingNodeInfoVersion)
+		if pendingVersion == version ||
+			(pendingVersion == "" && nodeInfoContentVersion(c.pendingNodeInfo) == nodeInfoContentVersion(clone)) {
+			c.pendingNodeInfo = nil
+			c.pendingNodeInfoVersion = ""
+		} else {
+			newerPending = true
+		}
+	}
+	c.nodeInfoApplyMu.Unlock()
+
+	if newerPending && c.routeCoordinator != nil {
+		c.routeCoordinator.Notify()
+	}
+	if err := c.persistOfflineState(clone); err != nil {
+		return err
+	}
+	c.recordPanelSuccess("config")
+	return nil
+}
+
+func (c *Controller) hasPendingNodeInfo() bool {
+	if c == nil {
+		return false
+	}
+	c.nodeInfoApplyMu.Lock()
+	defer c.nodeInfoApplyMu.Unlock()
+	return c.pendingNodeInfo != nil
 }
 
 // Start implement the Start() function of the service interface

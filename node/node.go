@@ -17,6 +17,7 @@ type Node struct {
 	NodeInfos         []*panel.NodeInfo
 	routeStateStore   *routeRuntimeStateStore
 	routeRuntimeState *routeRuntimeState
+	routeCoordinator  *routeUpdateCoordinator
 }
 
 func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
@@ -78,16 +79,38 @@ func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load node [%s-%d] bootstrap state: %w", node.APIHost, node.NodeID, err)
 		}
-		n.controllers[i] = NewController(p, &node, store, bootstrap, startedOffline)
+		controller := NewController(p, &node, store, bootstrap, startedOffline)
+		if p.NodeInfoVersion() == "" {
+			if entry, ok := runtimeEntries[routeRuntimeIdentity(node.APIHost, node.NodeID)]; ok {
+				controller.activeNodeInfoVersion = entry.ConfigVersion
+			}
+		}
+		n.controllers[i] = controller
 		n.NodeInfos[i] = bootstrap.NodeInfo
 	}
 	return n, nil
 }
 
-func (n *Node) Start(nodes []conf.NodeConfig, core *core.V2Core) error {
+func (n *Node) Start(nodes []conf.NodeConfig, v2core *core.V2Core) error {
+	targets := make([]routeUpdateTarget, len(n.controllers))
+	for index, controller := range n.controllers {
+		targets[index] = controller
+	}
+	coordinator := newRouteUpdateCoordinator(
+		targets,
+		v2core,
+		n.routeStateStore,
+		routeUpdateCoordinatorOptions{},
+	)
+	for _, controller := range n.controllers {
+		controller.routeCoordinator = coordinator
+	}
+	n.routeCoordinator = coordinator
+	coordinator.Start()
 	for i, node := range nodes {
-		err := n.controllers[i].Start(core)
+		err := n.controllers[i].Start(v2core)
 		if err != nil {
+			coordinator.Close()
 			return fmt.Errorf("start node controller [%s-%d] error: %s",
 				node.APIHost,
 				node.NodeID,
@@ -99,6 +122,10 @@ func (n *Node) Start(nodes []conf.NodeConfig, core *core.V2Core) error {
 
 func (n *Node) Close() error {
 	var err error
+	if n.routeCoordinator != nil {
+		n.routeCoordinator.Close()
+		n.routeCoordinator = nil
+	}
 	for _, c := range n.controllers {
 		if err = c.Close(); err != nil {
 			log.Errorf("close controller failed: %v", err)

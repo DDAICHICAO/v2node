@@ -1,0 +1,515 @@
+package node
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	log "github.com/sirupsen/logrus"
+	panel "github.com/wyx2685/v2node/api/v2board"
+)
+
+const (
+	defaultRouteStabilizationWindow = 500 * time.Millisecond
+	defaultRouteSweepInterval       = 250 * time.Millisecond
+	defaultRouteInitialBackoff      = time.Second
+	defaultRouteMaxBackoff          = 30 * time.Second
+	defaultRouteMaxConcurrency      = 4
+)
+
+var (
+	errRouteCoordinatorInterrupted = errors.New("route update coordination interrupted")
+	errRouteVectorChanged          = errors.New("route configuration vector changed during stabilization")
+)
+
+type routeObservedState struct {
+	NodeID   int
+	APIHost  string
+	Version  string
+	Active   *panel.NodeInfo
+	Observed *panel.NodeInfo
+}
+
+type routeUpdateTarget interface {
+	RefreshObserved(context.Context) (routeObservedState, error)
+	ObservedState() routeObservedState
+	CommitRouteNodeInfo(*panel.NodeInfo, string) error
+}
+
+type routeRuntimeApplier interface {
+	ApplyRouteRuntime([]*panel.NodeInfo) (uint64, error)
+}
+
+type routeRuntimeStateWriter interface {
+	Save(*routeRuntimeState) error
+}
+
+type routeUpdateCoordinatorOptions struct {
+	StabilizationWindow time.Duration
+	SweepInterval       time.Duration
+	InitialBackoff      time.Duration
+	MaxBackoff          time.Duration
+	MaxConcurrency      int
+	Jitter              func(time.Duration) time.Duration
+}
+
+type routePublishedBatch struct {
+	generation uint64
+	epoch      uint64
+	vectorHash string
+	states     []routeObservedState
+}
+
+type routeUpdateCoordinator struct {
+	targets []routeUpdateTarget
+	applier routeRuntimeApplier
+	writer  routeRuntimeStateWriter
+	options routeUpdateCoordinatorOptions
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	wake   chan struct{}
+	epoch  atomic.Uint64
+
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newRouteUpdateCoordinator(
+	targets []routeUpdateTarget,
+	applier routeRuntimeApplier,
+	writer routeRuntimeStateWriter,
+	options routeUpdateCoordinatorOptions,
+) *routeUpdateCoordinator {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &routeUpdateCoordinator{
+		targets: append([]routeUpdateTarget(nil), targets...),
+		applier: applier,
+		writer:  writer,
+		options: normalizeRouteUpdateCoordinatorOptions(options),
+		ctx:     ctx,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		wake:    make(chan struct{}, 1),
+	}
+}
+
+func normalizeRouteUpdateCoordinatorOptions(options routeUpdateCoordinatorOptions) routeUpdateCoordinatorOptions {
+	if options.StabilizationWindow <= 0 {
+		options.StabilizationWindow = defaultRouteStabilizationWindow
+	}
+	if options.SweepInterval <= 0 {
+		options.SweepInterval = defaultRouteSweepInterval
+	}
+	if options.InitialBackoff <= 0 {
+		options.InitialBackoff = defaultRouteInitialBackoff
+	}
+	if options.MaxBackoff <= 0 {
+		options.MaxBackoff = defaultRouteMaxBackoff
+	}
+	if options.InitialBackoff > options.MaxBackoff {
+		options.InitialBackoff = options.MaxBackoff
+	}
+	if options.MaxConcurrency <= 0 {
+		options.MaxConcurrency = defaultRouteMaxConcurrency
+	}
+	if options.Jitter == nil {
+		options.Jitter = func(delay time.Duration) time.Duration {
+			if delay <= 0 {
+				return 0
+			}
+			// Keep retries spread between 80% and 120% of the capped delay.
+			factor := 0.8 + rand.Float64()*0.4
+			return time.Duration(float64(delay) * factor)
+		}
+	}
+	return options
+}
+
+func (c *routeUpdateCoordinator) Start() {
+	if c == nil {
+		return
+	}
+	c.startOnce.Do(func() {
+		go c.run()
+	})
+}
+
+func (c *routeUpdateCoordinator) Notify() {
+	if c == nil {
+		return
+	}
+	c.epoch.Add(1)
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *routeUpdateCoordinator) Close() {
+	if c == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		c.cancel()
+		// Ensure done is eventually closed even when Close precedes Start.
+		c.Start()
+		<-c.done
+	})
+}
+
+func (c *routeUpdateCoordinator) run() {
+	defer close(c.done)
+	var published *routePublishedBatch
+	for {
+		if published == nil {
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-c.wake:
+			}
+			if !c.waitForQuietWindow() {
+				return
+			}
+		}
+
+		backoff := c.options.InitialBackoff
+		for {
+			var err error
+			if published != nil {
+				err = c.commitPublished(published)
+			} else {
+				published, err = c.reconcile()
+				if err == nil && published == nil {
+					break
+				}
+				if err == nil {
+					err = c.commitPublished(published)
+				}
+			}
+
+			if err == nil {
+				handledEpoch := published.epoch
+				log.WithFields(log.Fields{
+					"generation":  published.generation,
+					"nodes":       len(published.states),
+					"vector_hash": shortRouteVectorHash(published.vectorHash),
+				}).Info("Route runtime generation published")
+				published = nil
+				if c.epoch.Load() != handledEpoch {
+					if !c.waitForQuietWindow() {
+						return
+					}
+					backoff = c.options.InitialBackoff
+					continue
+				}
+				break
+			}
+
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			if errors.Is(err, errRouteCoordinatorInterrupted) || errors.Is(err, errRouteVectorChanged) {
+				if !c.waitForQuietWindow() {
+					return
+				}
+				backoff = c.options.InitialBackoff
+				continue
+			}
+			log.WithFields(log.Fields{
+				"err":     err,
+				"backoff": backoff,
+			}).Warning("Route runtime coordination failed; keeping active generation")
+			interrupted, ok := c.waitForRetry(backoff)
+			if !ok {
+				return
+			}
+			if interrupted && !c.waitForQuietWindow() {
+				return
+			}
+			backoff = nextRouteBackoff(backoff, c.options.MaxBackoff)
+		}
+	}
+}
+
+func (c *routeUpdateCoordinator) reconcile() (*routePublishedBatch, error) {
+	if len(c.targets) == 0 || c.applier == nil || c.writer == nil {
+		return nil, errors.New("route update coordinator dependencies are incomplete")
+	}
+	epoch := c.epoch.Load()
+	_, firstHash, err := c.refreshVector()
+	if err != nil {
+		return nil, err
+	}
+	if !c.waitForSweepInterval() {
+		return nil, errRouteCoordinatorInterrupted
+	}
+	second, secondHash, err := c.refreshVector()
+	if err != nil {
+		return nil, err
+	}
+	if firstHash != secondHash {
+		return nil, errRouteVectorChanged
+	}
+	if c.epoch.Load() != epoch {
+		return nil, errRouteCoordinatorInterrupted
+	}
+	current, currentHash, err := c.currentVector()
+	if err != nil {
+		return nil, err
+	}
+	if currentHash != secondHash {
+		return nil, errRouteVectorChanged
+	}
+	states := current
+	if len(states) != len(second) {
+		return nil, errRouteVectorChanged
+	}
+
+	hasRouteChange := false
+	infos := make([]*panel.NodeInfo, 0, len(states))
+	clonedStates := make([]routeObservedState, 0, len(states))
+	for _, state := range states {
+		kind := classifyNodeInfoChange(state.Active, state.Observed)
+		switch kind {
+		case nodeInfoUnchanged:
+		case nodeInfoRoutesOnly:
+			hasRouteChange = true
+		default:
+			return nil, fmt.Errorf("node %d has non-route configuration change", state.NodeID)
+		}
+		clone, cloneErr := cloneRouteRuntimeNodeInfo(state.Observed)
+		if cloneErr != nil {
+			return nil, fmt.Errorf("clone node %d route configuration: %w", state.NodeID, cloneErr)
+		}
+		state.Observed = clone
+		infos = append(infos, clone)
+		clonedStates = append(clonedStates, state)
+	}
+	if !hasRouteChange {
+		return nil, nil
+	}
+	if c.epoch.Load() != epoch {
+		return nil, errRouteCoordinatorInterrupted
+	}
+	generation, err := c.applier.ApplyRouteRuntime(infos)
+	if err != nil {
+		return nil, err
+	}
+	return &routePublishedBatch{
+		generation: generation,
+		epoch:      epoch,
+		vectorHash: currentHash,
+		states:     clonedStates,
+	}, nil
+}
+
+func (c *routeUpdateCoordinator) refreshVector() ([]routeObservedState, string, error) {
+	states := make([]routeObservedState, len(c.targets))
+	ctx, cancel := context.WithCancel(c.ctx)
+	defer cancel()
+	semaphore := make(chan struct{}, c.options.MaxConcurrency)
+	errCh := make(chan error, len(c.targets))
+	var wg sync.WaitGroup
+	for index, target := range c.targets {
+		wg.Add(1)
+		go func(index int, target routeUpdateTarget) {
+			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+			defer func() { <-semaphore }()
+			state, err := target.RefreshObserved(ctx)
+			if err != nil {
+				errCh <- fmt.Errorf("refresh route target: %w", err)
+				cancel()
+				return
+			}
+			states[index] = state
+		}(index, target)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	return normalizeRouteObservedVector(states)
+}
+
+func (c *routeUpdateCoordinator) currentVector() ([]routeObservedState, string, error) {
+	states := make([]routeObservedState, len(c.targets))
+	for index, target := range c.targets {
+		states[index] = target.ObservedState()
+	}
+	return normalizeRouteObservedVector(states)
+}
+
+func normalizeRouteObservedVector(states []routeObservedState) ([]routeObservedState, string, error) {
+	states = append([]routeObservedState(nil), states...)
+	sort.Slice(states, func(i, j int) bool {
+		if states[i].NodeID != states[j].NodeID {
+			return states[i].NodeID < states[j].NodeID
+		}
+		return normalizeAPIHost(states[i].APIHost) < normalizeAPIHost(states[j].APIHost)
+	})
+	hash := sha256.New()
+	seen := make(map[string]struct{}, len(states))
+	for index := range states {
+		state := &states[index]
+		state.APIHost = normalizeAPIHost(state.APIHost)
+		state.Version = strings.TrimSpace(state.Version)
+		if state.NodeID <= 0 || state.APIHost == "" || state.Version == "" || state.Active == nil || state.Observed == nil {
+			return nil, "", errors.New("route target observed state is incomplete")
+		}
+		identity := routeRuntimeIdentity(state.APIHost, state.NodeID)
+		if _, duplicate := seen[identity]; duplicate {
+			return nil, "", fmt.Errorf("duplicate route target identity %s", identity)
+		}
+		seen[identity] = struct{}{}
+		_, _ = hash.Write([]byte(strconv.Itoa(len(identity))))
+		_, _ = hash.Write([]byte{':'})
+		_, _ = hash.Write([]byte(identity))
+		_, _ = hash.Write([]byte(strconv.Itoa(len(state.Version))))
+		_, _ = hash.Write([]byte{':'})
+		_, _ = hash.Write([]byte(state.Version))
+	}
+	return states, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (c *routeUpdateCoordinator) commitPublished(batch *routePublishedBatch) error {
+	if batch == nil {
+		return errors.New("published route batch is nil")
+	}
+	entries := make([]routeRuntimeEntry, 0, len(batch.states))
+	for _, state := range batch.states {
+		if err := c.targetForState(state).CommitRouteNodeInfo(state.Observed, state.Version); err != nil {
+			return fmt.Errorf("commit node %d route configuration: %w", state.NodeID, err)
+		}
+		clone, err := cloneRouteRuntimeNodeInfo(state.Observed)
+		if err != nil {
+			return fmt.Errorf("clone committed node %d route configuration: %w", state.NodeID, err)
+		}
+		entries = append(entries, routeRuntimeEntry{
+			APIHost:       normalizeAPIHost(state.APIHost),
+			NodeID:        state.NodeID,
+			ConfigVersion: state.Version,
+			NodeInfo:      clone,
+		})
+	}
+	state := &routeRuntimeState{
+		Version:    routeRuntimeStateVersion,
+		Generation: batch.generation,
+		SavedAt:    time.Now().Unix(),
+		VectorHash: batch.vectorHash,
+		Entries:    entries,
+	}
+	if err := c.writer.Save(state); err != nil {
+		return fmt.Errorf("save whole-machine route runtime state: %w", err)
+	}
+	return nil
+}
+
+func (c *routeUpdateCoordinator) targetForState(state routeObservedState) routeUpdateTarget {
+	identity := routeRuntimeIdentity(state.APIHost, state.NodeID)
+	for _, target := range c.targets {
+		observed := target.ObservedState()
+		if routeRuntimeIdentity(observed.APIHost, observed.NodeID) == identity {
+			return target
+		}
+	}
+	return missingRouteUpdateTarget{identity: identity}
+}
+
+type missingRouteUpdateTarget struct {
+	identity string
+}
+
+func (m missingRouteUpdateTarget) RefreshObserved(context.Context) (routeObservedState, error) {
+	return routeObservedState{}, fmt.Errorf("route target %s is unavailable", m.identity)
+}
+
+func (m missingRouteUpdateTarget) ObservedState() routeObservedState { return routeObservedState{} }
+
+func (m missingRouteUpdateTarget) CommitRouteNodeInfo(*panel.NodeInfo, string) error {
+	return fmt.Errorf("route target %s is unavailable", m.identity)
+}
+
+func (c *routeUpdateCoordinator) waitForQuietWindow() bool {
+	timer := time.NewTimer(c.options.StabilizationWindow)
+	defer timer.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return false
+		case <-c.wake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(c.options.StabilizationWindow)
+		case <-timer.C:
+			return true
+		}
+	}
+}
+
+func (c *routeUpdateCoordinator) waitForSweepInterval() bool {
+	timer := time.NewTimer(c.options.SweepInterval)
+	defer timer.Stop()
+	select {
+	case <-c.ctx.Done():
+		return false
+	case <-c.wake:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (c *routeUpdateCoordinator) waitForRetry(delay time.Duration) (interrupted bool, ok bool) {
+	delay = c.options.Jitter(delay)
+	if delay < 0 {
+		delay = 0
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-c.ctx.Done():
+		return false, false
+	case <-c.wake:
+		return true, true
+	case <-timer.C:
+		return false, true
+	}
+}
+
+func nextRouteBackoff(current, maximum time.Duration) time.Duration {
+	if current >= maximum || current > maximum/2 {
+		return maximum
+	}
+	return current * 2
+}
+
+func shortRouteVectorHash(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
+}

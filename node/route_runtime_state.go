@@ -209,5 +209,14 @@ func cloneRouteRuntimeNodeInfo(info *panel.NodeInfo) (*panel.NodeInfo, error) {
 	if err := json.Unmarshal(data, &clone); err != nil {
 		return nil, err
 	}
+	if info.Common != nil && clone.Common != nil {
+		// A nil json.RawMessage is encoded as null. Restore the exact source
+		// representation so a defensive clone cannot turn a routes-only update
+		// into an apparent full configuration change.
+		clone.Common.NetworkSettings = append(clone.Common.NetworkSettings[:0], info.Common.NetworkSettings...)
+		if info.Common.NetworkSettings == nil {
+			clone.Common.NetworkSettings = nil
+		}
+	}
 	return &clone, nil
 }

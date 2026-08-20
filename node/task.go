@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -64,7 +65,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 }
 
 func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
-	if c.pendingNodeInfo != nil {
+	if c.hasPendingNodeInfo() {
 		if err := c.applyPendingNodeInfo(); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -76,16 +77,15 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	}
 
 	// get node info
-	newN, err := c.apiClient.GetNodeInfo(ctx)
+	_, err = c.RefreshObserved(ctx)
 	if err != nil {
 		c.recordPanelFailure("config", "get node info", err)
 		return fmt.Errorf("get node info: %w", err)
 	}
-	if newN != nil {
+	if c.hasPendingNodeInfo() {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 		}).Info("Got new node info; persist before apply")
-		c.pendingNodeInfo = newN
 		if err := c.applyPendingNodeInfo(); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -103,14 +103,39 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 }
 
 func (c *Controller) applyPendingNodeInfo() error {
+	c.nodeInfoApplyMu.Lock()
+	defer c.nodeInfoApplyMu.Unlock()
 	if c.pendingNodeInfo == nil {
 		return nil
 	}
-	applied, err := c.applyManagedTLSDomainChange(c.pendingNodeInfo)
-	if err != nil {
-		return err
+	pending := c.pendingNodeInfo
+	pendingVersion := strings.TrimSpace(c.pendingNodeInfoVersion)
+	if pendingVersion == "" {
+		pendingVersion = nodeInfoContentVersion(pending)
 	}
-	if !applied {
+	c.stateMu.Lock()
+	kind := classifyNodeInfoChange(c.info, pending)
+	c.stateMu.Unlock()
+
+	switch kind {
+	case nodeInfoUnchanged:
+		c.activeNodeInfoVersion = pendingVersion
+	case nodeInfoManagedTLSDomainOnly:
+		applied, err := c.applyManagedTLSDomainChange(pending)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return errors.New("managed TLS domain change was not applied")
+		}
+		c.activeNodeInfoVersion = pendingVersion
+	case nodeInfoRoutesOnly:
+		if c.routeCoordinator != nil {
+			c.routeCoordinator.Notify()
+			return nil
+		}
+		fallthrough
+	default:
 		if err := c.persistOfflineState(c.pendingNodeInfo); err != nil {
 			return err
 		}
@@ -119,6 +144,7 @@ func (c *Controller) applyPendingNodeInfo() error {
 		}
 	}
 	c.pendingNodeInfo = nil
+	c.pendingNodeInfoVersion = ""
 	c.recordPanelSuccess("config")
 	return nil
 }
