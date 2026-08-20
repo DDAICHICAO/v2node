@@ -207,6 +207,8 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if c.managedTLSCredentialRequired.Load() {
 		_ = c.EnsureManagedTLSCredential(ctx, false)
 	}
+	c.nodeInfoMu.Lock()
+	defer c.nodeInfoMu.Unlock()
 
 	const path = "/api/v2/server/config"
 	r, err := c.client.
@@ -221,6 +223,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if r == nil {
 		return nil, fmt.Errorf("received nil response")
 	}
+	if r.RawBody() != nil {
+		defer r.RawBody().Close()
+	}
 
 	if r.StatusCode() == 304 {
 		return nil, nil
@@ -231,18 +236,8 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	hash := sha256.Sum256(r.Body())
 	newBodyHash := hex.EncodeToString(hash[:])
 	if c.responseBodyHash == newBodyHash {
+		c.nodeEtag = r.Header().Get("ETag")
 		return nil, nil
-	}
-	c.responseBodyHash = newBodyHash
-	c.nodeEtag = r.Header().Get("ETag")
-	if r != nil {
-		defer func() {
-			if r.RawBody() != nil {
-				r.RawBody().Close()
-			}
-		}()
-	} else {
-		return nil, fmt.Errorf("received nil response")
 	}
 	node = &NodeInfo{
 		Id: c.NodeId,
@@ -311,6 +306,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
 
 	node.Common = cm
+	c.responseBodyHash = newBodyHash
+	c.nodeEtag = r.Header().Get("ETag")
+	c.nodeConfigVersion = newBodyHash
 
 	return node, nil
 }

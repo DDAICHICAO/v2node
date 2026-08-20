@@ -45,7 +45,9 @@ type Client struct {
 	Token                        string
 	AppTransportTokenSecret      string
 	NodeId                       int
+	nodeInfoMu                   sync.Mutex
 	nodeEtag                     string
+	nodeConfigVersion            string
 	userEtag                     string
 	userSyncMu                   sync.RWMutex
 	userSyncSeq                  int64
@@ -149,4 +151,13 @@ func (c *Client) InstanceID() string {
 		return ""
 	}
 	return c.instanceID
+}
+
+func (c *Client) NodeInfoVersion() string {
+	if c == nil {
+		return ""
+	}
+	c.nodeInfoMu.Lock()
+	defer c.nodeInfoMu.Unlock()
+	return c.nodeConfigVersion
 }
