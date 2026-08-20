@@ -13,11 +13,12 @@ const DefaultNodeTimeout = 15
 const DefaultStatePath = "/etc/v2node/offline-state"
 
 type Conf struct {
-	LogConfig         LogConfig         `mapstructure:"Log"`
-	AccessAuditConfig AccessAuditConfig `mapstructure:"AccessAudit"`
-	NodeConfigs       []NodeConfig      `mapstructure:"Nodes"`
-	StatePath         string            `mapstructure:"StatePath"`
-	PprofPort         int               `mapstructure:"PprofPort"`
+	LogConfig            LogConfig         `mapstructure:"Log"`
+	AccessAuditConfig    AccessAuditConfig `mapstructure:"AccessAudit"`
+	NodeConfigs          []NodeConfig      `mapstructure:"Nodes"`
+	StatePath            string            `mapstructure:"StatePath"`
+	EnableRouteHotReload bool              `mapstructure:"EnableRouteHotReload"`
+	PprofPort            int               `mapstructure:"PprofPort"`
 }
 
 type LogConfig struct {
@@ -52,7 +53,8 @@ func New() *Conf {
 			FlushInterval: DefaultAccessAuditFlushInterval,
 			Timeout:       DefaultAccessAuditTimeout,
 		},
-		StatePath: DefaultStatePath,
+		StatePath:            DefaultStatePath,
+		EnableRouteHotReload: true,
 	}
 }
 
@@ -64,6 +66,7 @@ func (p *Conf) LoadFromPath(filePath string) error {
 	defer f.Close()
 	v := viper.New()
 	v.SetConfigFile(filePath)
+	v.SetDefault("EnableRouteHotReload", true)
 	if err := v.ReadInConfig(); err != nil {
 		return fmt.Errorf("read config file error: %s", err)
 	}

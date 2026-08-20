@@ -121,6 +121,46 @@ func TestRouteRuntimeAcquirePublishSeesCompleteGeneration(t *testing.T) {
 	}
 }
 
+func TestRouteRuntimeStatsConcurrentWithAcquireAndPublish(t *testing.T) {
+	manager := NewRouteRuntimeManager(RouteRuntimeGeneration{ID: 1, Router: &fakeRuntimeRouter{id: 1}})
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				stats := manager.Stats()
+				if stats.ActiveGeneration == 0 || stats.ActiveLeases < 0 || stats.Retired < 0 {
+					failed.Store(true)
+					return
+				}
+			}
+		}()
+	}
+	for id := uint64(2); id <= 100; id++ {
+		lease, err := manager.Acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.Publish(RouteRuntimeGeneration{ID: id, Router: &fakeRuntimeRouter{id: id}}); err != nil {
+			t.Fatal(err)
+		}
+		lease.Release()
+	}
+	close(stop)
+	wg.Wait()
+	if failed.Load() {
+		t.Fatal("concurrent Stats observed an invalid runtime snapshot")
+	}
+}
+
 func TestRouteRuntimeRejectsNonMonotonicGeneration(t *testing.T) {
 	manager := NewRouteRuntimeManager(RouteRuntimeGeneration{ID: 2})
 	for _, id := range []uint64{2, 1} {

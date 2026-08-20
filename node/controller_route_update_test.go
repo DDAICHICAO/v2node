@@ -46,6 +46,44 @@ func TestApplyPendingNodeInfoDefersRoutesOnlyToCoordinator(t *testing.T) {
 	}
 }
 
+func TestRouteHotReloadDisabledKeepsGlobalReloadFallback(t *testing.T) {
+	current := testOfflineNodeInfo(1)
+	next, err := cloneRouteRuntimeNodeInfo(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Common.Routes = []panel.Route{{Id: 2, Action: "block", Match: []string{"domain:new.test"}}}
+	cfg := conf.NodeConfig{APIHost: "https://panel.example", NodeID: 1}
+	reloadCh := make(chan struct{}, 1)
+	v2core := &core.V2Core{
+		Config:   &conf.Conf{EnableRouteHotReload: false},
+		ReloadCh: reloadCh,
+	}
+	if routeHotReloadEnabled(v2core) {
+		t.Fatal("disabled config would start the route coordinator")
+	}
+	c := &Controller{
+		apiClient:       &panel.Client{},
+		conf:            &cfg,
+		store:           newOfflineStateStore(t.TempDir()),
+		server:          v2core,
+		info:            current,
+		pendingNodeInfo: next,
+		userList:        []panel.UserInfo{},
+		aliveMap:        map[int]int{},
+		deviceAliveMap:  map[int]int{},
+	}
+
+	if err := c.applyPendingNodeInfo(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reloadCh:
+	default:
+		t.Fatal("disabled hot reload did not use the existing global reload path")
+	}
+}
+
 func TestCommitRouteNodeInfoKeepsNewerPendingVersion(t *testing.T) {
 	cfg := conf.NodeConfig{APIHost: "https://panel.example", NodeID: 1}
 	current := testOfflineNodeInfo(1)

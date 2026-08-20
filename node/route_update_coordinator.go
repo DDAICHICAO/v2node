@@ -67,6 +67,16 @@ type routePublishedBatch struct {
 	epoch      uint64
 	vectorHash string
 	states     []routeObservedState
+	startedAt  time.Time
+}
+
+type routeUpdateCoordinatorStats struct {
+	Triggered uint64
+	Coalesced uint64
+	Attempts  uint64
+	Successes uint64
+	Failures  uint64
+	Stale     uint64
 }
 
 type routeUpdateCoordinator struct {
@@ -75,11 +85,17 @@ type routeUpdateCoordinator struct {
 	writer  routeRuntimeStateWriter
 	options routeUpdateCoordinatorOptions
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	wake   chan struct{}
-	epoch  atomic.Uint64
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	wake      chan struct{}
+	epoch     atomic.Uint64
+	triggered atomic.Uint64
+	coalesced atomic.Uint64
+	attempts  atomic.Uint64
+	successes atomic.Uint64
+	failures  atomic.Uint64
+	stale     atomic.Uint64
 
 	startOnce sync.Once
 	closeOnce sync.Once
@@ -150,9 +166,25 @@ func (c *routeUpdateCoordinator) Notify() {
 		return
 	}
 	c.epoch.Add(1)
+	c.triggered.Add(1)
 	select {
 	case c.wake <- struct{}{}:
 	default:
+		c.coalesced.Add(1)
+	}
+}
+
+func (c *routeUpdateCoordinator) Stats() routeUpdateCoordinatorStats {
+	if c == nil {
+		return routeUpdateCoordinatorStats{}
+	}
+	return routeUpdateCoordinatorStats{
+		Triggered: c.triggered.Load(),
+		Coalesced: c.coalesced.Load(),
+		Attempts:  c.attempts.Load(),
+		Successes: c.successes.Load(),
+		Failures:  c.failures.Load(),
+		Stale:     c.stale.Load(),
 	}
 }
 
@@ -204,6 +236,7 @@ func (c *routeUpdateCoordinator) run() {
 					"generation":  published.generation,
 					"nodes":       len(published.states),
 					"vector_hash": shortRouteVectorHash(published.vectorHash),
+					"duration":    time.Since(published.startedAt).Round(time.Millisecond),
 				}).Info("Route runtime generation published")
 				published = nil
 				if c.epoch.Load() != handledEpoch {
@@ -220,16 +253,26 @@ func (c *routeUpdateCoordinator) run() {
 				return
 			}
 			if errors.Is(err, errRouteCoordinatorInterrupted) || errors.Is(err, errRouteVectorChanged) {
+				c.stale.Add(1)
 				if !c.waitForQuietWindow() {
 					return
 				}
 				backoff = c.options.InitialBackoff
 				continue
 			}
-			log.WithFields(log.Fields{
-				"err":     err,
-				"backoff": backoff,
-			}).Warning("Route runtime coordination failed; keeping active generation")
+			c.failures.Add(1)
+			fields := log.Fields{
+				"err":      err,
+				"backoff":  backoff,
+				"attempts": c.attempts.Load(),
+			}
+			if published != nil {
+				fields["generation"] = published.generation
+				fields["nodes"] = len(published.states)
+				fields["vector_hash"] = shortRouteVectorHash(published.vectorHash)
+				fields["duration"] = time.Since(published.startedAt).Round(time.Millisecond)
+			}
+			log.WithFields(fields).Warning("Route runtime coordination failed; keeping active generation")
 			interrupted, ok := c.waitForRetry(backoff)
 			if !ok {
 				return
@@ -243,6 +286,8 @@ func (c *routeUpdateCoordinator) run() {
 }
 
 func (c *routeUpdateCoordinator) reconcile() (*routePublishedBatch, error) {
+	startedAt := time.Now()
+	c.attempts.Add(1)
 	if len(c.targets) == 0 || c.applier == nil || c.writer == nil {
 		return nil, errors.New("route update coordinator dependencies are incomplete")
 	}
@@ -306,11 +351,13 @@ func (c *routeUpdateCoordinator) reconcile() (*routePublishedBatch, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.successes.Add(1)
 	return &routePublishedBatch{
 		generation: generation,
 		epoch:      epoch,
 		vectorHash: currentHash,
 		states:     clonedStates,
+		startedAt:  startedAt,
 	}, nil
 }
 

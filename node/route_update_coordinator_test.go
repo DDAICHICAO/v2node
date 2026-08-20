@@ -118,6 +118,44 @@ func TestRouteUpdateCoordinatorRetriesSnapshotWithoutRepublishing(t *testing.T) 
 	}
 }
 
+func TestRouteUpdateCoordinatorStatsCountCoalescedNotifications(t *testing.T) {
+	coordinator := newTestRouteUpdateCoordinator(
+		[]*fakeRouteUpdateTarget{newFakeRouteTarget(1, "v1", "v2")},
+		&recordingRouteApplier{},
+		&recordingRouteStateWriter{},
+	)
+	coordinator.Notify()
+	coordinator.Notify()
+	coordinator.Notify()
+	stats := coordinator.Stats()
+	if stats.Triggered != 3 || stats.Coalesced != 2 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	coordinator.Close()
+}
+
+func TestRouteUpdateCoordinatorStatsTrackFailureAndSuccess(t *testing.T) {
+	applier := &recordingRouteApplier{failures: 1}
+	coordinator := newTestRouteUpdateCoordinator(
+		[]*fakeRouteUpdateTarget{newFakeRouteTarget(1, "v1", "v2")},
+		applier,
+		&recordingRouteStateWriter{},
+	)
+	coordinator.Start()
+	defer coordinator.Close()
+	coordinator.Notify()
+	waitForRouteApplyCount(t, applier, 2)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stats := coordinator.Stats()
+		if stats.Attempts >= 2 && stats.Failures >= 1 && stats.Successes == 1 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("stats=%+v", coordinator.Stats())
+}
+
 func newTestRouteUpdateCoordinator[T interface{ routeUpdateTarget }](targets []T, applier routeRuntimeApplier, writer routeRuntimeStateWriter) *routeUpdateCoordinator {
 	converted := make([]routeUpdateTarget, len(targets))
 	for index := range targets {

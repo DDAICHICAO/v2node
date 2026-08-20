@@ -92,25 +92,33 @@ func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 }
 
 func (n *Node) Start(nodes []conf.NodeConfig, v2core *core.V2Core) error {
-	targets := make([]routeUpdateTarget, len(n.controllers))
-	for index, controller := range n.controllers {
-		targets[index] = controller
-	}
-	coordinator := newRouteUpdateCoordinator(
-		targets,
-		v2core,
-		n.routeStateStore,
-		routeUpdateCoordinatorOptions{},
-	)
 	for _, controller := range n.controllers {
-		controller.routeCoordinator = coordinator
+		controller.routeCoordinator = nil
+	}
+	var coordinator *routeUpdateCoordinator
+	if routeHotReloadEnabled(v2core) {
+		targets := make([]routeUpdateTarget, len(n.controllers))
+		for index, controller := range n.controllers {
+			targets[index] = controller
+		}
+		coordinator = newRouteUpdateCoordinator(
+			targets,
+			v2core,
+			n.routeStateStore,
+			routeUpdateCoordinatorOptions{},
+		)
+		for _, controller := range n.controllers {
+			controller.routeCoordinator = coordinator
+		}
+		coordinator.Start()
 	}
 	n.routeCoordinator = coordinator
-	coordinator.Start()
 	for i, node := range nodes {
 		err := n.controllers[i].Start(v2core)
 		if err != nil {
-			coordinator.Close()
+			if coordinator != nil {
+				coordinator.Close()
+			}
 			return fmt.Errorf("start node controller [%s-%d] error: %s",
 				node.APIHost,
 				node.NodeID,
@@ -118,6 +126,10 @@ func (n *Node) Start(nodes []conf.NodeConfig, v2core *core.V2Core) error {
 		}
 	}
 	return nil
+}
+
+func routeHotReloadEnabled(v2core *core.V2Core) bool {
+	return v2core != nil && v2core.Config != nil && v2core.Config.EnableRouteHotReload
 }
 
 func (n *Node) Close() error {
