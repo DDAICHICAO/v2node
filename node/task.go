@@ -47,7 +47,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	log.WithField("tag", c.tag).Info("Start report node status")
 	_ = c.userReportPeriodic.Start(false)
 	if node.Security == panel.Tls {
-		switch c.info.Common.CertInfo.CertMode {
+		switch node.Common.CertInfo.CertMode {
 		case "none", "", "file", "self", "managed":
 		default:
 			c.renewCertPeriodic = &task.Task{
@@ -113,9 +113,9 @@ func (c *Controller) applyPendingNodeInfo() error {
 	if pendingVersion == "" {
 		pendingVersion = nodeInfoContentVersion(pending)
 	}
-	c.stateMu.Lock()
+	c.stateMu.RLock()
 	kind := classifyNodeInfoChange(c.info, pending)
-	c.stateMu.Unlock()
+	c.stateMu.RUnlock()
 
 	switch kind {
 	case nodeInfoUnchanged:
@@ -131,7 +131,10 @@ func (c *Controller) applyPendingNodeInfo() error {
 		c.activeNodeInfoVersion = pendingVersion
 	case nodeInfoRoutesOnly:
 		if c.routeCoordinator != nil {
-			c.routeCoordinator.Notify()
+			if c.routeNotifiedVersion != pendingVersion {
+				c.routeNotifiedVersion = pendingVersion
+				c.routeCoordinator.Notify()
+			}
 			return nil
 		}
 		fallthrough
@@ -145,6 +148,7 @@ func (c *Controller) applyPendingNodeInfo() error {
 	}
 	c.pendingNodeInfo = nil
 	c.pendingNodeInfoVersion = ""
+	c.routeNotifiedVersion = ""
 	c.recordPanelSuccess("config")
 	return nil
 }
@@ -412,8 +416,9 @@ func (c *Controller) syncUserState(
 
 func (c *Controller) aliveStateRefreshInterval() time.Duration {
 	const minInterval = 30 * time.Second
-	if c.info != nil && c.info.PullInterval > minInterval {
-		return c.info.PullInterval
+	info := c.currentNodeInfo()
+	if info != nil && info.PullInterval > minInterval {
+		return info.PullInterval
 	}
 	return minInterval
 }
@@ -461,7 +466,7 @@ func (c *Controller) refreshAliveStateTask(ctx context.Context) error {
 		c.recordPanelFailure("alive", "refresh alive state", err)
 		return err
 	}
-	if err := c.persistOfflineState(c.info); err != nil {
+	if err := c.persistOfflineState(c.currentNodeInfo()); err != nil {
 		c.recordPanelFailure("alive", "persist alive state", err)
 		return err
 	}

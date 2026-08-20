@@ -19,9 +19,10 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) error {
 	var reportErr error
 	var reportmin = 0
 	var devicemin = 0
-	if c.info.Common.BaseConfig != nil {
-		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
-		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
+	info := c.currentNodeInfo()
+	if info != nil && info.Common != nil && info.Common.BaseConfig != nil {
+		reportmin = info.Common.BaseConfig.NodeReportMinTraffic
+		devicemin = info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
 	var userTraffic []panel.UserTraffic
 	var userDeviceTraffic []panel.UserDeviceTraffic
@@ -390,11 +391,15 @@ func (c *Controller) appendAccessAuditRuntimeStatus(status *panel.NodeRuntimeSta
 }
 
 func (c *Controller) appendTLSRuntimeStatus(status *panel.NodeRuntimeStatus) {
-	if c == nil || status == nil || c.info == nil || c.info.Security != panel.Tls || c.info.Common == nil || c.info.Common.CertInfo == nil {
+	if c == nil || status == nil {
+		return
+	}
+	info := c.currentNodeInfo()
+	if info == nil || info.Security != panel.Tls || info.Common == nil || info.Common.CertInfo == nil {
 		return
 	}
 
-	certFile := strings.TrimSpace(c.info.Common.CertInfo.CertFile)
+	certFile := strings.TrimSpace(info.Common.CertInfo.CertFile)
 	if certFile == "" {
 		return
 	}
@@ -411,9 +416,9 @@ func (c *Controller) appendTLSRuntimeStatus(status *panel.NodeRuntimeStatus) {
 
 	status.TLSCertSHA256 = fingerprint
 	status.TLSCertFile = certFile
-	verifyName := strings.TrimSpace(c.info.Common.TlsSettings.PrimaryServerName())
+	verifyName := strings.TrimSpace(info.Common.TlsSettings.PrimaryServerName())
 	if verifyName == "" {
-		verifyName = strings.TrimSpace(c.info.Common.CertInfo.CertDomain)
+		verifyName = strings.TrimSpace(info.Common.CertInfo.CertDomain)
 	}
 	status.TLSVerifyPeerCertByName = verifyName
 }

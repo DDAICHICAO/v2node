@@ -1,6 +1,10 @@
 package node
 
 import (
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -43,6 +47,12 @@ func TestApplyPendingNodeInfoDefersRoutesOnlyToCoordinator(t *testing.T) {
 	}
 	if got := coordinator.epoch.Load(); got != 1 {
 		t.Fatalf("coordinator epoch=%d, want 1", got)
+	}
+	if err := c.applyPendingNodeInfo(); err != nil {
+		t.Fatal(err)
+	}
+	if got := coordinator.epoch.Load(); got != 1 {
+		t.Fatalf("same pending version notified coordinator repeatedly: epoch=%d", got)
 	}
 }
 
@@ -164,5 +174,56 @@ func TestCommitRouteNodeInfoDoesNotDiscardNewerEquivalentVersion(t *testing.T) {
 	}
 	if got := coordinator.epoch.Load(); got != 1 {
 		t.Fatalf("newer equivalent version did not notify coordinator: epoch=%d", got)
+	}
+}
+
+func TestCommitRouteNodeInfoIsSafeWithConcurrentRuntimeReaders(t *testing.T) {
+	cfg := conf.NodeConfig{APIHost: "https://panel.example", NodeID: 1}
+	current := testOfflineNodeInfo(1)
+	c := &Controller{
+		apiClient:             &panel.Client{},
+		conf:                  &cfg,
+		store:                 newOfflineStateStore(t.TempDir()),
+		info:                  current,
+		activeNodeInfoVersion: "v1",
+		userList:              []panel.UserInfo{},
+		aliveMap:              map[int]int{},
+		deviceAliveMap:        map[int]int{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wait sync.WaitGroup
+	var invalid atomic.Bool
+	for range 4 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for ctx.Err() == nil {
+				if c.currentNodeInfo() == nil || c.ObservedState().Active == nil {
+					invalid.Store(true)
+					return
+				}
+				_ = c.supportsDeviceLimitByUUID()
+				_ = c.supportsDeviceAliveReport()
+				_ = c.supportsDeviceTrafficReport()
+				_ = c.aliveStateRefreshInterval()
+			}
+		}()
+	}
+	for version := 2; version <= 25; version++ {
+		next, err := cloneRouteRuntimeNodeInfo(current)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next.Common.Routes = []panel.Route{{Id: version, Action: "block", Match: []string{"domain:concurrent.test"}}}
+		if err := c.CommitRouteNodeInfo(next, fmt.Sprintf("v%d", version)); err != nil {
+			t.Fatal(err)
+		}
+		current = next
+	}
+	cancel()
+	wait.Wait()
+	if invalid.Load() {
+		t.Fatal("runtime reader observed incomplete node info")
 	}
 }

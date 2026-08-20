@@ -52,11 +52,12 @@ type Controller struct {
 	pendingNodeInfo          *panel.NodeInfo
 	pendingNodeInfoVersion   string
 	activeNodeInfoVersion    string
+	routeNotifiedVersion     string
 	routeCoordinator         *routeUpdateCoordinator
 	configFetchMu            sync.Mutex
 	nodeInfoApplyMu          sync.Mutex
 	userSyncMu               sync.Mutex
-	stateMu                  sync.Mutex
+	stateMu                  sync.RWMutex
 	userSyncCancel           context.CancelFunc
 	userSyncDone             chan struct{}
 	userSyncRuntime          *userSyncRuntime
@@ -119,6 +120,9 @@ func (c *Controller) RefreshObserved(ctx context.Context) (routeObservedState, e
 			version = nodeInfoContentVersion(clone)
 		}
 		c.nodeInfoApplyMu.Lock()
+		if c.pendingNodeInfoVersion != version {
+			c.routeNotifiedVersion = ""
+		}
 		c.pendingNodeInfo = clone
 		c.pendingNodeInfoVersion = version
 		c.nodeInfoApplyMu.Unlock()
@@ -136,13 +140,13 @@ func (c *Controller) ObservedState() routeObservedState {
 }
 
 func (c *Controller) observedStateLocked() routeObservedState {
-	c.stateMu.Lock()
+	c.stateMu.RLock()
 	active := c.info
 	if active == nil && c.bootstrap != nil {
 		active = c.bootstrap.NodeInfo
 	}
 	activeClone, _ := cloneRouteRuntimeNodeInfo(active)
-	c.stateMu.Unlock()
+	c.stateMu.RUnlock()
 
 	observed := activeClone
 	version := strings.TrimSpace(c.activeNodeInfoVersion)
@@ -209,8 +213,10 @@ func (c *Controller) CommitRouteNodeInfo(info *panel.NodeInfo, version string) e
 			(pendingVersion == "" && nodeInfoContentVersion(c.pendingNodeInfo) == nodeInfoContentVersion(clone)) {
 			c.pendingNodeInfo = nil
 			c.pendingNodeInfoVersion = ""
+			c.routeNotifiedVersion = ""
 		} else {
 			newerPending = true
+			c.routeNotifiedVersion = pendingVersion
 		}
 	}
 	c.nodeInfoApplyMu.Unlock()
@@ -232,6 +238,16 @@ func (c *Controller) hasPendingNodeInfo() bool {
 	c.nodeInfoApplyMu.Lock()
 	defer c.nodeInfoApplyMu.Unlock()
 	return c.pendingNodeInfo != nil
+}
+
+func (c *Controller) currentNodeInfo() *panel.NodeInfo {
+	if c == nil {
+		return nil
+	}
+	c.stateMu.RLock()
+	info := c.info
+	c.stateMu.RUnlock()
+	return info
 }
 
 // Start implement the Start() function of the service interface
@@ -288,9 +304,10 @@ func (c *Controller) Start(x *core.V2Core) error {
 }
 
 func (c *Controller) usesManagedTLS() bool {
-	return c != nil && c.info != nil && c.info.Security == panel.Tls &&
-		c.info.Common != nil && c.info.Common.CertInfo != nil &&
-		strings.EqualFold(strings.TrimSpace(c.info.Common.CertInfo.CertMode), "managed")
+	info := c.currentNodeInfo()
+	return info != nil && info.Security == panel.Tls &&
+		info.Common != nil && info.Common.CertInfo != nil &&
+		strings.EqualFold(strings.TrimSpace(info.Common.CertInfo.CertMode), "managed")
 }
 
 func (c *Controller) activateManagedTLSRuntime() error {
@@ -350,11 +367,11 @@ func (c *Controller) activateManagedTLSRuntimeVersion(version uint64) error {
 
 func (c *Controller) startRuntime() error {
 	return c.runtime.Start(func() error {
-		node := c.info
+		node := c.currentNodeInfo()
 
 		// add limiter
-		l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap, c.deviceAliveMap, c.supportsDeviceLimitByUUID())
-		l.UpdateUUIDIPFanoutConfig(uuidIPFanoutLimiterConfig(c.info.Common.BaseConfig.UUIDIPFanoutGuard))
+		l := limiter.AddLimiter(node.Type, c.tag, c.userList, c.aliveMap, c.deviceAliveMap, nodeSupportsDeviceLimitByUUID(node))
+		l.UpdateUUIDIPFanoutConfig(uuidIPFanoutLimiterConfig(node.Common.BaseConfig.UUIDIPFanoutGuard))
 		l.UpdateUUIDIPFanoutGlobal(uuidIPFanoutLimiterGlobal(c.uuidIPFanoutGlobal), time.Now())
 		c.limiter = l
 		c.installUUIDIPFanoutReservation(l)
@@ -477,24 +494,24 @@ func (c *Controller) persistOfflineStateAtLocked(
 }
 
 func (c *Controller) supportsDeviceLimitByUUID() bool {
-	return c.info != nil &&
-		c.info.Common != nil &&
-		c.info.Common.BaseConfig != nil &&
-		c.info.Common.BaseConfig.DeviceLimitByUUID
+	return nodeSupportsDeviceLimitByUUID(c.currentNodeInfo())
 }
 
 func (c *Controller) supportsDeviceAliveReport() bool {
-	return c.info != nil &&
-		c.info.Common != nil &&
-		c.info.Common.BaseConfig != nil &&
-		c.info.Common.BaseConfig.DeviceAliveReport
+	info := c.currentNodeInfo()
+	return info != nil && info.Common != nil && info.Common.BaseConfig != nil &&
+		info.Common.BaseConfig.DeviceAliveReport
 }
 
 func (c *Controller) supportsDeviceTrafficReport() bool {
-	return c.info != nil &&
-		c.info.Common != nil &&
-		c.info.Common.BaseConfig != nil &&
-		c.info.Common.BaseConfig.DeviceTrafficReport
+	info := c.currentNodeInfo()
+	return info != nil && info.Common != nil && info.Common.BaseConfig != nil &&
+		info.Common.BaseConfig.DeviceTrafficReport
+}
+
+func nodeSupportsDeviceLimitByUUID(info *panel.NodeInfo) bool {
+	return info != nil && info.Common != nil && info.Common.BaseConfig != nil &&
+		info.Common.BaseConfig.DeviceLimitByUUID
 }
 
 func uuidIPFanoutLimiterConfig(config *panel.UUIDIPFanoutConfig) limiter.UUIDIPFanoutConfig {

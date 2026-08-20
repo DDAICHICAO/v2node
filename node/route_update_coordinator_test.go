@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,9 @@ func TestRouteUpdateCoordinatorCoalescesAllNodeIDs(t *testing.T) {
 	coordinator.Notify()
 	coordinator.Notify()
 	waitForRouteApplyCount(t, applier, 1)
+	for _, target := range targets {
+		waitForRouteTargetVersion(t, target, "v2")
+	}
 	if got := applier.LastNodeIDs(); !slices.Equal(got, []int{1, 2}) {
 		t.Fatalf("published node ids=%v", got)
 	}
@@ -48,6 +52,7 @@ func TestRouteUpdateCoordinatorRestabilizesChangedVector(t *testing.T) {
 	defer coordinator.Close()
 	coordinator.Notify()
 	waitForRouteApplyCount(t, applier, 1)
+	waitForRouteTargetVersion(t, first, "v3")
 	if first.ActiveVersion() != "v3" {
 		t.Fatalf("unstable intermediate version was committed: %q", first.ActiveVersion())
 	}
@@ -68,6 +73,7 @@ func TestRouteUpdateCoordinatorRetriesRetainedPendingAfterApplyFailureAnd304(t *
 	coordinator.Notify()
 	waitForRouteApplyCount(t, applier, 2)
 	for _, target := range targets {
+		waitForRouteTargetVersion(t, target, "v2")
 		if target.ActiveVersion() != "v2" || target.HasPending() {
 			t.Fatalf("retained pending was not committed: %+v", target)
 		}
@@ -101,6 +107,22 @@ func TestRouteUpdateCoordinatorNewNotifyInterruptsBackoff(t *testing.T) {
 	}
 }
 
+func TestRouteUpdateCoordinatorJitterCannotExceedMaximumBackoff(t *testing.T) {
+	options := testRouteCoordinatorOptions()
+	options.MaxBackoff = 5 * time.Millisecond
+	options.Jitter = func(time.Duration) time.Duration { return time.Second }
+	coordinator := newRouteUpdateCoordinator(nil, nil, nil, options)
+	defer coordinator.Close()
+	started := time.Now()
+	interrupted, ok := coordinator.waitForRetry(options.MaxBackoff)
+	if !ok || interrupted {
+		t.Fatalf("interrupted=%v ok=%v", interrupted, ok)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("retry exceeded capped backoff: %v", elapsed)
+	}
+}
+
 func TestRouteUpdateCoordinatorRetriesSnapshotWithoutRepublishing(t *testing.T) {
 	target := newFakeRouteTarget(1, "v1", "v2")
 	applier := &recordingRouteApplier{}
@@ -110,11 +132,30 @@ func TestRouteUpdateCoordinatorRetriesSnapshotWithoutRepublishing(t *testing.T) 
 	defer coordinator.Close()
 	coordinator.Notify()
 	waitForRouteStateSaveCount(t, writer, 2)
+	waitForRouteTargetVersion(t, target, "v2")
 	if got := applier.Count(); got != 1 {
 		t.Fatalf("snapshot retry republished generation %d times", got)
 	}
-	if target.ActiveVersion() != "v2" || target.CommitCount() < 2 {
+	if target.ActiveVersion() != "v2" || target.CommitCount() == 0 {
 		t.Fatalf("persistence retry did not retain committed state: %+v", target)
+	}
+}
+
+func TestRouteUpdateCoordinatorDoesNotPartiallyCommitBeforeWholeSnapshot(t *testing.T) {
+	targets := []*fakeRouteUpdateTarget{
+		newFakeRouteTarget(1, "v1", "v2"),
+		newFakeRouteTarget(2, "v1", "v2"),
+	}
+	writer := &recordingRouteStateWriter{failures: 1000}
+	coordinator := newTestRouteUpdateCoordinator(targets, &recordingRouteApplier{}, writer)
+	coordinator.Start()
+	defer coordinator.Close()
+	coordinator.Notify()
+	waitForRouteStateSaveCount(t, writer, 1)
+	for _, target := range targets {
+		if target.CommitCount() != 0 || target.ActiveVersion() != "v1" {
+			t.Fatalf("target advanced before atomic whole-machine snapshot: %+v", target)
+		}
 	}
 }
 
@@ -156,6 +197,48 @@ func TestRouteUpdateCoordinatorStatsTrackFailureAndSuccess(t *testing.T) {
 	t.Fatalf("stats=%+v", coordinator.Stats())
 }
 
+func TestRouteUpdateCoordinatorRecoversExternalBoundaryPanic(t *testing.T) {
+	target := &panicOnceRouteUpdateTarget{target: newFakeRouteTarget(1, "v1", "v2")}
+	applier := &recordingRouteApplier{}
+	coordinator := newRouteUpdateCoordinator(
+		[]routeUpdateTarget{target},
+		applier,
+		&recordingRouteStateWriter{},
+		testRouteCoordinatorOptions(),
+	)
+	coordinator.Start()
+	defer coordinator.Close()
+	coordinator.Notify()
+	waitForRouteApplyCount(t, applier, 1)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stats := coordinator.Stats()
+		if stats.Failures > 0 && stats.Successes == 1 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("stats=%+v", coordinator.Stats())
+}
+
+func TestRouteUpdateCoordinatorDoesNotExitOnTargetContextError(t *testing.T) {
+	target := newFakeRouteTarget(1, "v1", "v2")
+	target.replaceQueue([]fakeRouteRefresh{
+		{err: context.Canceled},
+		{version: "v2", info: routeCoordinatorInfo(1, 2)},
+	})
+	applier := &recordingRouteApplier{}
+	coordinator := newTestRouteUpdateCoordinator(
+		[]*fakeRouteUpdateTarget{target},
+		applier,
+		&recordingRouteStateWriter{},
+	)
+	coordinator.Start()
+	defer coordinator.Close()
+	coordinator.Notify()
+	waitForRouteApplyCount(t, applier, 1)
+}
+
 func newTestRouteUpdateCoordinator[T interface{ routeUpdateTarget }](targets []T, applier routeRuntimeApplier, writer routeRuntimeStateWriter) *routeUpdateCoordinator {
 	converted := make([]routeUpdateTarget, len(targets))
 	for index := range targets {
@@ -179,6 +262,26 @@ type fakeRouteRefresh struct {
 	version string
 	info    *panel.NodeInfo
 	err     error
+}
+
+type panicOnceRouteUpdateTarget struct {
+	target routeUpdateTarget
+	done   atomic.Bool
+}
+
+func (t *panicOnceRouteUpdateTarget) RefreshObserved(ctx context.Context) (routeObservedState, error) {
+	if t.done.CompareAndSwap(false, true) {
+		panic("route target panic must not escape coordinator")
+	}
+	return t.target.RefreshObserved(ctx)
+}
+
+func (t *panicOnceRouteUpdateTarget) ObservedState() routeObservedState {
+	return t.target.ObservedState()
+}
+
+func (t *panicOnceRouteUpdateTarget) CommitRouteNodeInfo(info *panel.NodeInfo, version string) error {
+	return t.target.CommitRouteNodeInfo(info, version)
 }
 
 type fakeRouteUpdateTarget struct {
@@ -385,4 +488,16 @@ func waitForRouteStateSaveCount(t *testing.T, writer *recordingRouteStateWriter,
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("save count=%d, want at least %d", writer.Count(), want)
+}
+
+func waitForRouteTargetVersion(t *testing.T, target *fakeRouteUpdateTarget, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if target.ActiveVersion() == want && !target.HasPending() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("active version=%q pending=%v, want version %q committed", target.ActiveVersion(), target.HasPending(), want)
 }

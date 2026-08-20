@@ -12,9 +12,9 @@ import (
 )
 
 func (c *Controller) applyManagedTLSDomainChange(next *panel.NodeInfo) (bool, error) {
-	c.stateMu.Lock()
+	c.stateMu.RLock()
 	current := c.info
-	c.stateMu.Unlock()
+	c.stateMu.RUnlock()
 	target, ok := managedTLSDomainOnlyChange(current, next)
 	if !ok {
 		return false, nil

@@ -19,7 +19,11 @@ import (
 )
 
 func (c *Controller) renewCertTask(_ context.Context) error {
-	l, err := NewLego(c.info.Common.CertInfo)
+	info := c.currentNodeInfo()
+	if info == nil || info.Common == nil {
+		return fmt.Errorf("node info is incomplete")
+	}
+	l, err := NewLego(info.Common.CertInfo)
 	if err != nil {
 		log.WithField("tag", c.tag).Info("new lego error: ", err)
 		return nil
@@ -33,7 +37,11 @@ func (c *Controller) renewCertTask(_ context.Context) error {
 }
 
 func (c *Controller) requestCert() error {
-	cert := c.info.Common.CertInfo
+	info := c.currentNodeInfo()
+	if info == nil || info.Common == nil {
+		return fmt.Errorf("node info is incomplete")
+	}
+	cert := info.Common.CertInfo
 	switch cert.CertMode {
 	case "none", "":
 	case "file":

@@ -63,11 +63,12 @@ type routeUpdateCoordinatorOptions struct {
 }
 
 type routePublishedBatch struct {
-	generation uint64
-	epoch      uint64
-	vectorHash string
-	states     []routeObservedState
-	startedAt  time.Time
+	generation    uint64
+	epoch         uint64
+	vectorHash    string
+	states        []routeObservedState
+	startedAt     time.Time
+	snapshotSaved bool
 }
 
 type routeUpdateCoordinatorStats struct {
@@ -249,7 +250,7 @@ func (c *routeUpdateCoordinator) run() {
 				break
 			}
 
-			if errors.Is(err, context.Canceled) {
+			if c.ctx.Err() != nil {
 				return
 			}
 			if errors.Is(err, errRouteCoordinatorInterrupted) || errors.Is(err, errRouteVectorChanged) {
@@ -347,7 +348,7 @@ func (c *routeUpdateCoordinator) reconcile() (*routePublishedBatch, error) {
 	if c.epoch.Load() != epoch {
 		return nil, errRouteCoordinatorInterrupted
 	}
-	generation, err := c.applier.ApplyRouteRuntime(infos)
+	generation, err := safeApplyRouteRuntime(c.applier, infos)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +380,7 @@ func (c *routeUpdateCoordinator) refreshVector() ([]routeObservedState, string, 
 				return
 			}
 			defer func() { <-semaphore }()
-			state, err := target.RefreshObserved(ctx)
+			state, err := safeRefreshRouteTarget(ctx, target)
 			if err != nil {
 				errCh <- fmt.Errorf("refresh route target: %w", err)
 				cancel()
@@ -401,7 +402,11 @@ func (c *routeUpdateCoordinator) refreshVector() ([]routeObservedState, string, 
 func (c *routeUpdateCoordinator) currentVector() ([]routeObservedState, string, error) {
 	states := make([]routeObservedState, len(c.targets))
 	for index, target := range c.targets {
-		states[index] = target.ObservedState()
+		state, err := safeObservedRouteTarget(target)
+		if err != nil {
+			return nil, "", err
+		}
+		states[index] = state
 	}
 	return normalizeRouteObservedVector(states)
 }
@@ -442,58 +447,115 @@ func (c *routeUpdateCoordinator) commitPublished(batch *routePublishedBatch) err
 	if batch == nil {
 		return errors.New("published route batch is nil")
 	}
-	entries := make([]routeRuntimeEntry, 0, len(batch.states))
-	for _, state := range batch.states {
-		if err := c.targetForState(state).CommitRouteNodeInfo(state.Observed, state.Version); err != nil {
-			return fmt.Errorf("commit node %d route configuration: %w", state.NodeID, err)
+	if !batch.snapshotSaved {
+		entries := make([]routeRuntimeEntry, 0, len(batch.states))
+		for _, observed := range batch.states {
+			clone, err := cloneRouteRuntimeNodeInfo(observed.Observed)
+			if err != nil {
+				return fmt.Errorf("clone published node %d route configuration: %w", observed.NodeID, err)
+			}
+			entries = append(entries, routeRuntimeEntry{
+				APIHost:       normalizeAPIHost(observed.APIHost),
+				NodeID:        observed.NodeID,
+				ConfigVersion: observed.Version,
+				NodeInfo:      clone,
+			})
 		}
-		clone, err := cloneRouteRuntimeNodeInfo(state.Observed)
-		if err != nil {
-			return fmt.Errorf("clone committed node %d route configuration: %w", state.NodeID, err)
+		state := &routeRuntimeState{
+			Version:    routeRuntimeStateVersion,
+			Generation: batch.generation,
+			SavedAt:    time.Now().Unix(),
+			VectorHash: batch.vectorHash,
+			Entries:    entries,
 		}
-		entries = append(entries, routeRuntimeEntry{
-			APIHost:       normalizeAPIHost(state.APIHost),
-			NodeID:        state.NodeID,
-			ConfigVersion: state.Version,
-			NodeInfo:      clone,
-		})
+		if err := safeSaveRouteRuntimeState(c.writer, state); err != nil {
+			return fmt.Errorf("save whole-machine route runtime state: %w", err)
+		}
+		batch.snapshotSaved = true
 	}
-	state := &routeRuntimeState{
-		Version:    routeRuntimeStateVersion,
-		Generation: batch.generation,
-		SavedAt:    time.Now().Unix(),
-		VectorHash: batch.vectorHash,
-		Entries:    entries,
+
+	targets, err := c.targetsByIdentity()
+	if err != nil {
+		return err
 	}
-	if err := c.writer.Save(state); err != nil {
-		return fmt.Errorf("save whole-machine route runtime state: %w", err)
+	for _, observed := range batch.states {
+		identity := routeRuntimeIdentity(observed.APIHost, observed.NodeID)
+		target := targets[identity]
+		if target == nil {
+			return fmt.Errorf("route target %s is unavailable", identity)
+		}
+		if err := safeCommitRouteTarget(target, observed.Observed, observed.Version); err != nil {
+			return fmt.Errorf("commit node %d route configuration: %w", observed.NodeID, err)
+		}
 	}
 	return nil
 }
 
-func (c *routeUpdateCoordinator) targetForState(state routeObservedState) routeUpdateTarget {
-	identity := routeRuntimeIdentity(state.APIHost, state.NodeID)
+func (c *routeUpdateCoordinator) targetsByIdentity() (map[string]routeUpdateTarget, error) {
+	targets := make(map[string]routeUpdateTarget, len(c.targets))
 	for _, target := range c.targets {
-		observed := target.ObservedState()
-		if routeRuntimeIdentity(observed.APIHost, observed.NodeID) == identity {
-			return target
+		observed, err := safeObservedRouteTarget(target)
+		if err != nil {
+			return nil, err
 		}
+		if observed.NodeID <= 0 || normalizeAPIHost(observed.APIHost) == "" {
+			return nil, errors.New("route target identity is incomplete")
+		}
+		identity := routeRuntimeIdentity(observed.APIHost, observed.NodeID)
+		if targets[identity] != nil {
+			return nil, fmt.Errorf("duplicate route target identity %s", identity)
+		}
+		targets[identity] = target
 	}
-	return missingRouteUpdateTarget{identity: identity}
+	return targets, nil
 }
 
-type missingRouteUpdateTarget struct {
-	identity string
+func safeRefreshRouteTarget(ctx context.Context, target routeUpdateTarget) (state routeObservedState, err error) {
+	defer func() {
+		if recover() != nil {
+			state = routeObservedState{}
+			err = errors.New("route target refresh panicked")
+		}
+	}()
+	return target.RefreshObserved(ctx)
 }
 
-func (m missingRouteUpdateTarget) RefreshObserved(context.Context) (routeObservedState, error) {
-	return routeObservedState{}, fmt.Errorf("route target %s is unavailable", m.identity)
+func safeObservedRouteTarget(target routeUpdateTarget) (state routeObservedState, err error) {
+	defer func() {
+		if recover() != nil {
+			state = routeObservedState{}
+			err = errors.New("route target state read panicked")
+		}
+	}()
+	return target.ObservedState(), nil
 }
 
-func (m missingRouteUpdateTarget) ObservedState() routeObservedState { return routeObservedState{} }
+func safeCommitRouteTarget(target routeUpdateTarget, info *panel.NodeInfo, version string) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("route target commit panicked")
+		}
+	}()
+	return target.CommitRouteNodeInfo(info, version)
+}
 
-func (m missingRouteUpdateTarget) CommitRouteNodeInfo(*panel.NodeInfo, string) error {
-	return fmt.Errorf("route target %s is unavailable", m.identity)
+func safeApplyRouteRuntime(applier routeRuntimeApplier, infos []*panel.NodeInfo) (generation uint64, err error) {
+	defer func() {
+		if recover() != nil {
+			generation = 0
+			err = errors.New("route runtime apply panicked")
+		}
+	}()
+	return applier.ApplyRouteRuntime(infos)
+}
+
+func safeSaveRouteRuntimeState(writer routeRuntimeStateWriter, state *routeRuntimeState) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("route runtime state save panicked")
+		}
+	}()
+	return writer.Save(state)
 }
 
 func (c *routeUpdateCoordinator) waitForQuietWindow() bool {
@@ -534,6 +596,9 @@ func (c *routeUpdateCoordinator) waitForRetry(delay time.Duration) (interrupted 
 	delay = c.options.Jitter(delay)
 	if delay < 0 {
 		delay = 0
+	}
+	if delay > c.options.MaxBackoff {
+		delay = c.options.MaxBackoff
 	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
