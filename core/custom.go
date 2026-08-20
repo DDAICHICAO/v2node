@@ -181,186 +181,23 @@ func applyDNSRouteConfig(coreDnsConfig *coreConf.DNSConfig, route panel.Route) {
 }
 
 func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
-	//dns
-	queryStrategy := "UseIPv4v6"
-	if !hasPublicIPv6() {
-		queryStrategy = "UseIPv4"
-	}
-	coreDnsConfig := &coreConf.DNSConfig{
-		Servers: []*coreConf.NameServerConfig{
-			{
-				Address: &coreConf.Address{
-					Address: xnet.ParseAddress("localhost"),
-				},
-			},
-		},
-		QueryStrategy: queryStrategy,
-	}
-	//outbound
-	defaultoutbound, _ := buildDefaultOutbound()
-	coreOutboundConfig := append([]*core.OutboundHandlerConfig{}, defaultoutbound)
-	block, _ := buildBlockOutbound()
-	coreOutboundConfig = append(coreOutboundConfig, block)
-	dns, _ := buildDnsOutbound()
-	coreOutboundConfig = append(coreOutboundConfig, dns)
-
-	//route
-	domainStrategy := "AsIs"
-	dnsRule, _ := json.Marshal(map[string]interface{}{
-		"port":        "53",
-		"network":     "udp",
-		"outboundTag": "dns_out",
-	})
-	coreRouterConfig := &coreConf.RouterConfig{
-		RuleList:       []json.RawMessage{dnsRule},
-		DomainStrategy: &domainStrategy,
-	}
-
-	for _, info := range infos {
-		if len(info.Common.Routes) == 0 {
-			continue
-		}
-		for _, route := range info.Common.Routes {
-			switch route.Action {
-			case "dns":
-				applyDNSRouteConfig(coreDnsConfig, route)
-			case "block":
-				rule := map[string]interface{}{
-					"inboundTag":  routeInboundTags(info.Tag),
-					"domain":      route.Match,
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "block_ip":
-				rule := map[string]interface{}{
-					"inboundTag":  routeInboundTags(info.Tag),
-					"ip":          route.Match,
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "block_port":
-				rule := map[string]interface{}{
-					"inboundTag":  routeInboundTags(info.Tag),
-					"port":        strings.Join(route.Match, ","),
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "protocol":
-				rule := map[string]interface{}{
-					"inboundTag":  routeInboundTags(info.Tag),
-					"protocol":    route.Match,
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "route":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  routeInboundTags(info.Tag),
-					"domain":      route.Match,
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
-			case "route_ip":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  routeInboundTags(info.Tag),
-					"ip":          route.Match,
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
-			case "default_out":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  routeInboundTags(info.Tag),
-					"network":     "tcp,udp",
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
-			default:
-				continue
-			}
-		}
-	}
-	DnsConfig, err := coreDnsConfig.Build()
+	compiled, err := compileRouteRuntime(infos, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	RouterConfig, err := coreRouterConfig.Build()
+	defaultOutbound, err := buildDefaultOutbound()
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return DnsConfig, coreOutboundConfig, RouterConfig, nil
+	blockOutbound, err := buildBlockOutbound()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dnsOutbound, err := buildDnsOutbound()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	outbounds := []*core.OutboundHandlerConfig{defaultOutbound, blockOutbound, dnsOutbound}
+	outbounds = append(outbounds, compiled.CustomOutbounds...)
+	return compiled.DNSConfig, outbounds, compiled.RouterConfig, nil
 }
