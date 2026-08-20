@@ -127,11 +127,19 @@ func (r *cachedReader) Interrupt() {
 type DefaultDispatcher struct {
 	ohm          outbound.Manager
 	router       routing.Router
+	runtime      *RouteRuntimeManager
 	policy       policy.Manager
 	stats        stats.Manager
 	fdns         dns.FakeDNSEngine
 	Counter      sync.Map
 	LinkRegistry *LinkRegistry
+}
+
+func (d *DefaultDispatcher) BindRouteRuntime(manager *RouteRuntimeManager) {
+	if d == nil {
+		return
+	}
+	d.runtime = manager
 }
 
 func init() {
@@ -645,6 +653,35 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 }
 
 func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
+	var runtimeLease *RouteRuntimeLease
+	if d.runtime != nil {
+		lease, err := d.runtime.Acquire(ctx)
+		if err != nil {
+			errors.LogError(ctx, "acquire route runtime generation: ", err)
+			common.Close(link.Writer)
+			common.Interrupt(link.Reader)
+			return
+		}
+		runtimeLease = lease
+		ctx = lease.Context(ctx)
+	}
+	releaseRuntimeLease := func() {
+		if runtimeLease != nil {
+			runtimeLease.Release()
+			runtimeLease = nil
+		}
+	}
+	resolveHandler := func(tag string) outbound.Handler {
+		if runtimeLease != nil {
+			return runtimeLease.Handler(tag)
+		}
+		return d.ohm.GetHandler(tag)
+	}
+	routeRouter := d.router
+	if runtimeLease != nil {
+		routeRouter = runtimeLease.Router()
+	}
+
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 
@@ -655,20 +692,21 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	isPickRoute := 0
 	if forcedOutboundTag := session.GetForcedOutboundTagFromContext(ctx); forcedOutboundTag != "" {
 		ctx = session.SetForcedOutboundTagToContext(ctx, "")
-		if h := d.ohm.GetHandler(forcedOutboundTag); h != nil {
+		if h := resolveHandler(forcedOutboundTag); h != nil {
 			isPickRoute = 1
 			errors.LogInfo(ctx, "taking platform initialized detour [", forcedOutboundTag, "] for [", destination, "]")
 			handler = h
 		} else {
 			errors.LogError(ctx, "non existing tag for platform initialized detour: ", forcedOutboundTag)
+			releaseRuntimeLease()
 			common.Close(link.Writer)
 			common.Interrupt(link.Reader)
 			return
 		}
-	} else if d.router != nil {
-		if route, err := d.router.PickRoute(routingLink); err == nil {
+	} else if routeRouter != nil {
+		if route, err := routeRouter.PickRoute(routingLink); err == nil {
 			outTag := route.GetOutboundTag()
-			if h := d.ohm.GetHandler(outTag); h != nil {
+			if h := resolveHandler(outTag); h != nil {
 				isPickRoute = 2
 				if route.GetRuleTag() == "" {
 					errors.LogInfo(ctx, "taking detour [", outTag, "] for [", destination, "]")
@@ -678,6 +716,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 				handler = h
 			} else {
 				errors.LogWarning(ctx, "non existing outTag: ", outTag)
+				releaseRuntimeLease()
 				common.Close(link.Writer)
 				common.Interrupt(link.Reader)
 				return // DO NOT CHANGE: the traffic shouldn't be processed by default outbound if the specified outbound tag doesn't exist (yet), e.g., VLESS Reverse Proxy
@@ -688,11 +727,16 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	if handler == nil {
-		handler = d.ohm.GetDefaultHandler()
+		if runtimeLease != nil {
+			handler = runtimeLease.DefaultHandler()
+		} else {
+			handler = d.ohm.GetDefaultHandler()
+		}
 	}
 
 	if handler == nil {
 		errors.LogInfo(ctx, "default outbound handler not exist")
+		releaseRuntimeLease()
 		common.Close(link.Writer)
 		common.Interrupt(link.Reader)
 		return
@@ -716,6 +760,10 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	flowSession := newRoutedFlowTrafficSession(ctx, destination, handler.Tag())
+	if runtimeLease != nil {
+		link = newRouteTrackedLink(ctx, link, runtimeLease)
+		runtimeLease = nil
+	}
 	if flowSession != nil {
 		link = flowSession.wrapLink(link)
 	}

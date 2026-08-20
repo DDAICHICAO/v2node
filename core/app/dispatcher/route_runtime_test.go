@@ -131,15 +131,28 @@ func TestRouteRuntimeRejectsNonMonotonicGeneration(t *testing.T) {
 }
 
 type fakeRuntimeRouter struct {
-	id uint64
+	id       uint64
+	routeTag string
 }
 
 func (*fakeRuntimeRouter) Type() interface{} { return routing.RouterType() }
 func (*fakeRuntimeRouter) Start() error      { return nil }
 func (*fakeRuntimeRouter) Close() error      { return nil }
-func (*fakeRuntimeRouter) PickRoute(routing.Context) (routing.Route, error) {
-	return nil, fmt.Errorf("no route")
+func (r *fakeRuntimeRouter) PickRoute(ctx routing.Context) (routing.Route, error) {
+	if r.routeTag == "" {
+		return nil, fmt.Errorf("no route")
+	}
+	return &fakeRuntimeRoute{Context: ctx, tag: r.routeTag}, nil
 }
 func (*fakeRuntimeRouter) AddRule(*serial.TypedMessage, bool) error { return nil }
 func (*fakeRuntimeRouter) RemoveRule(string) error                  { return nil }
 func (*fakeRuntimeRouter) ListRule() []routing.Route                { return nil }
+
+type fakeRuntimeRoute struct {
+	routing.Context
+	tag string
+}
+
+func (*fakeRuntimeRoute) GetOutboundGroupTags() []string { return nil }
+func (r *fakeRuntimeRoute) GetOutboundTag() string       { return r.tag }
+func (*fakeRuntimeRoute) GetRuleTag() string             { return "test-rule" }
