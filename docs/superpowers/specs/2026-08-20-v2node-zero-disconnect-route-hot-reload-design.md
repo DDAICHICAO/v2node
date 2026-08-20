@@ -154,6 +154,8 @@ DNS 后端切换和 active 运行代次发布由同一个 Runtime Manager 临界
 
 Xray 的 `dns.Client.LookupIP` 接口不携带连接 context，系统拨号器因此无法在不修改外部 Xray fork 的前提下，把后续 DNS 查询强制固定到该 Link 最初取得的 generation。本设计明确采用两层线性化边界：Router 和 Outbound 以 Link 为单位固定代次，系统 DNS 以每次 Lookup 为单位取得当前完整后端。这不会产生缺失窗口或连接建立失败，但不宣称旧 Link 在切换后发起的系统 DNS 查询仍必然使用旧 DNS。DNS Outbound 自身仍属于版本化 handler，已经建立的 DNS Link 会继续使用它持有的旧 handler。
 
+实现校准：稳定的 `RuntimeDNSClient` 在每次 `LookupIP` 开始时取得一次 generation lease，并在该次查询返回后释放；因此一次查询只能看到完整旧后端或完整新后端，不会看到 nil、已回收后端或切换到一半的配置。这个保证不能扩大解释为“普通旧 Link 后续发起的所有系统 DNS 查询永久固定旧 generation”。
+
 ## Dispatcher 原子发布
 
 自定义 Dispatcher 不再直接持有可变的 `router` 和裸 Outbound Manager 作为路由决策来源，而是通过 `RouteRuntimeManager` 获取代次 lease。
@@ -177,8 +179,9 @@ Xray 的 `dns.Client.LookupIP` 接口不携带连接 context，系统拨号器�
 3. 再次确认配置向量和 dirty epoch 未过期；
 4. 在 Runtime Manager 写临界区内同时切换 active generation 和 active DNS 后端；
 5. 将旧 generation 标记为 retired；
-6. 更新所有 Controller 的 active NodeInfo；
-7. 异步持久化整机最后可用快照并尝试回收旧代次。
+6. 原子持久化包含全部 NodeID 的整机最后可用快照；
+7. 整机快照成功后更新所有 Controller 的 active NodeInfo 和单节点离线快照；
+8. 按 lease 生命周期尝试回收旧代次。
 
 发布临界区内不关闭任何资源。新连接在临界区前取得旧代次，或在临界区后取得新代次，不会看到“新 Router + 缺失 Outbound”的中间状态。
 
@@ -217,7 +220,7 @@ Xray 的 `dns.Client.LookupIP` 接口不携带连接 context，系统拨号器�
 - 整体配置向量哈希；
 - 成功发布时间。
 
-快照通过临时文件、刷盘和原子重命名写入，不覆盖现有文件到一半。只有候选已经成功发布后才把它提升为最后可用快照。若发布成功但持久化失败，运行时继续使用新代次并将持久化标记为 degraded，后台重试；不能为了磁盘错误回滚或断开连接。
+快照通过临时文件、刷盘和原子重命名写入，不覆盖现有文件到一半。只有候选已经成功发布后才把它提升为最后可用快照，而且整机快照必须先于各 Controller active 状态和单节点离线快照提交；这样即使进程在分节点提交中途退出，重启时也能用完整整机向量覆盖旧单节点 NodeInfo。若发布成功但整机持久化失败，运行时继续使用新代次并将持久化标记为 degraded，只重试持久化和状态提交，不重复发布 generation，也不能为了磁盘错误回滚或断开连接。
 
 NodeInfo 中的自定义 Outbound 可能包含代理凭据。快照必须沿用现有离线配置目录的限制权限，在类 Unix 系统上使用仅服务账户可读写的文件模式，并在 Windows 上保留受限 ACL；不得把快照内容写入日志、错误信息或指标标签。
 

@@ -478,8 +478,10 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 新实现先严格区分 unchanged、managed TLS only、routes only 和 full reload。纯路由变化由单 worker 在 500ms 稳定窗口内并发刷新该机器全部 NodeID，两次配置版本向量一致且发布前 epoch 未变化时才整体应用一次。
 - 每个新连接只取得一个不可变 generation lease；normal、forced、default、DNS 和嵌套 detour 都使用同代 Router 与 Outbound。已建立连接继续持有旧代次，最后一个 lease 释放后才按 Remove -> Close 顺序回收不再共享的资源。
 - 候选编译、Outbound 启动、二次稳定、面板刷新或 Apply 任一步失败时保持旧代次，保留 observed pending，并以可被新 Notify 打断的指数退避重试；不能静默改走全局 reload。
-- Apply 成功后分别更新 Controller active 状态并原子保存整机 `route-runtime.json`。快照失败只重试提交/持久化，不重复发布 generation；离线启动只有在整机 NodeID/APIHost 身份完全匹配且严格编译通过时才覆盖旧 NodeInfo，用户、在线状态和同步序列仍来自单节点快照。
+- 协调器的最大退避必须在抖动之后再次封顶；同一 pending 版本只 Notify 一次，避免短轮询不断重置 500ms 稳定窗口；目标刷新、状态读取、Apply、Controller commit 和快照保存等外部边界要把 panic 转为可重试失败，不能让后台热更新异常退出整个进程。
+- Apply 成功后必须先原子保存整机 `route-runtime.json`，成功后才能分别更新 Controller active 状态和单节点快照；否则首次发布中途退出会留下半旧半新的恢复向量。整机快照失败只重试持久化和状态提交，不重复发布 generation；离线启动只有在整机 NodeID/APIHost 身份完全匹配且严格编译通过时才覆盖旧 NodeInfo，用户、在线状态和同步序列仍来自单节点快照。
 - 防御性 NodeInfo 深拷贝必须保留 `NetworkSettings` 的 nil/raw 表示；把 nil 转为 JSON `null` 会让本来只变 Routes 的配置被误判为 full reload。
+- `Controller.info` 在热更新后不再是启动期常量；流量上报、证书状态、在线状态间隔和其他运行任务必须通过 `stateMu` 读锁取得不可变指针快照，否则 Linux race 检查会暴露发布写入与旧读取路径的竞争。
 
 ### 验证、上线与下次检查
 
@@ -488,3 +490,4 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 生产先灰度一台配置多个 NodeID 的机器。检查日志只出现一次 route generation 发布，不出现 `收到重启信号`、Controller task stopped、端口消失或 Xray Core restarted；同时观察 active/retired generation、lease、Outbound pool、CPU、内存和 goroutine 是否回落。
 - 若变化还进入全局 reload，先查 `node/task.go` 的统一分类和协调器开关；若候选一直失败，查配置向量、严格编译错误和 retained pending，不要先删除快照或重启；若旧资源不回收，查 dispatcher Link 的双向结束/context 取消和 lease release-once。
 - 相关文件：`api/v2board/node.go`、`node/node_info_change.go`、`node/route_update_coordinator.go`、`node/route_runtime_state.go`、`node/task.go`、`core/route_compile.go`、`core/route_runtime.go`、`core/route_outbound_pool.go`、`core/app/dispatcher/route_runtime.go`、`core/app/dispatcher/route_link.go`。
+- 设计与实施入口：`docs/superpowers/specs/2026-08-20-v2node-zero-disconnect-route-hot-reload-design.md`、`docs/superpowers/plans/2026-08-20-v2node-zero-disconnect-route-hot-reload.md`。实现提交依次为 `9b52acb`、`231c1d7`、`774db97`、`a75370e`、`282879b`、`cd18a4b`、`b8f4796`、`1afb5d2` 和 `903b9f3`。
