@@ -45,6 +45,7 @@ type Event struct {
 	UID         uint64    `json:"uid"`
 	UUID        string    `json:"uuid"`
 	SourceIP    string    `json:"source_ip"`
+	EntryIP     string    `json:"entry_ip,omitempty"`
 	TargetHost  string    `json:"target_host"`
 	TargetPort  uint16    `json:"target_port"`
 	Network     string    `json:"network"`
@@ -59,6 +60,7 @@ type wireEvent struct {
 	UID         uint64 `json:"uid"`
 	UUID        string `json:"uuid"`
 	SourceIP    string `json:"source_ip"`
+	EntryIP     string `json:"entry_ip,omitempty"`
 	TargetHost  string `json:"target_host"`
 	TargetPort  uint16 `json:"target_port"`
 	Network     string `json:"network"`
@@ -704,6 +706,7 @@ func normalizeAccessEvent(event *Event, now time.Time) error {
 	event.NodeTag = strings.TrimSpace(event.NodeTag)
 	event.UUID = strings.TrimSpace(event.UUID)
 	event.SourceIP = strings.TrimSpace(event.SourceIP)
+	event.EntryIP = strings.TrimSpace(event.EntryIP)
 	event.TargetHost = strings.TrimSpace(event.TargetHost)
 	event.Network = strings.ToLower(strings.TrimSpace(event.Network))
 	event.InboundTag = strings.TrimSpace(event.InboundTag)
@@ -745,6 +748,7 @@ func (e Event) toWire(now time.Time) (wireEvent, error) {
 		UID:         e.UID,
 		UUID:        strings.TrimSpace(e.UUID),
 		SourceIP:    strings.TrimSpace(e.SourceIP),
+		EntryIP:     strings.TrimSpace(e.EntryIP),
 		TargetHost:  strings.TrimSpace(e.TargetHost),
 		TargetPort:  e.TargetPort,
 		Network:     e.Network,

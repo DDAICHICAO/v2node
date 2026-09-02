@@ -9,15 +9,41 @@ import (
 
 	"github.com/wyx2685/v2node/common/accessaudit"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/transport"
 )
+
+func TestAccessAuditEntryIP(t *testing.T) {
+	tests := []struct {
+		name    string
+		inbound *session.Inbound
+		want    string
+	}{
+		{name: "missing inbound", inbound: nil, want: ""},
+		{name: "ipv4", inbound: &session.Inbound{Local: net.TCPDestination(net.ParseAddress("203.0.113.10"), 443)}, want: "203.0.113.10"},
+		{name: "mapped ipv4", inbound: &session.Inbound{Local: net.TCPDestination(net.ParseAddress("::ffff:203.0.113.10"), 443)}, want: "203.0.113.10"},
+		{name: "ipv6", inbound: &session.Inbound{Local: net.TCPDestination(net.ParseAddress("2001:db8::10"), 443)}, want: "2001:db8::10"},
+		{name: "unspecified ipv4", inbound: &session.Inbound{Local: net.TCPDestination(net.ParseAddress("0.0.0.0"), 443)}, want: ""},
+		{name: "unspecified ipv6", inbound: &session.Inbound{Local: net.TCPDestination(net.ParseAddress("::"), 443)}, want: ""},
+		{name: "domain is not an entry ip", inbound: &session.Inbound{Local: net.TCPDestination(net.ParseAddress("entry.example.com"), 443)}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := accessAuditEntryIP(tt.inbound); got != tt.want {
+				t.Fatalf("accessAuditEntryIP()=%q want=%q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestFlowTrafficCountsDirectionsAndEmitsFinalOnce(t *testing.T) {
 	startedAt := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	now := startedAt.Add(time.Minute)
 	reporter := newFlowReporterForTest()
 	session := newFlowTrafficSession(flowTrafficMetadata{
-		nodeID: 42, nodeTag: "node:42", uid: 145817, uuid: "device-a", sourceIP: "192.0.2.1",
+		nodeID: 42, nodeTag: "node:42", uid: 145817, uuid: "device-a", sourceIP: "192.0.2.1", entryIP: "203.0.113.10",
 		targetHost: "video.example", targetPort: 443, network: "tcp", inboundTag: "node:42", outboundTag: "proxy-a",
 	}, reporter, startedAt, func() time.Time { return now })
 	reader := &flowReaderForTest{batches: []buf.MultiBuffer{{buf.FromBytes(make([]byte, 10))}}}
@@ -45,7 +71,7 @@ func TestFlowTrafficCountsDirectionsAndEmitsFinalOnce(t *testing.T) {
 	if event.SampleType != accessaudit.FlowSampleFinal || event.UploadBytes != 10 || event.DownloadBytes != 20 {
 		t.Fatalf("unexpected final event: %#v", event)
 	}
-	if event.NodeID != 42 || event.UID != 145817 || event.TargetHost != "video.example" || event.OutboundTag != "proxy-a" {
+	if event.NodeID != 42 || event.UID != 145817 || event.EntryIP != "203.0.113.10" || event.TargetHost != "video.example" || event.OutboundTag != "proxy-a" {
 		t.Fatalf("missing routed metadata: %#v", event)
 	}
 	session.Finish(now.Add(time.Minute))

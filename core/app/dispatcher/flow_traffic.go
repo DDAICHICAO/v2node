@@ -34,6 +34,7 @@ type flowTrafficMetadata struct {
 	uid         uint64
 	uuid        string
 	sourceIP    string
+	entryIP     string
 	targetHost  string
 	targetPort  uint16
 	network     string
@@ -108,6 +109,7 @@ func newRoutedFlowTrafficSession(ctx context.Context, destination net.Destinatio
 		uid:         uint64(uid),
 		uuid:        uuid,
 		sourceIP:    stringsTrimMappedIP(inbound.Source.Address.IP().String()),
+		entryIP:     accessAuditEntryIP(inbound),
 		targetHost:  destination.Address.String(),
 		targetPort:  uint16(destination.Port),
 		network:     network,
@@ -206,6 +208,7 @@ func (s *flowTrafficSession) emit(at time.Time, sampleType string, includeZero b
 		UID:               s.metadata.uid,
 		UUID:              s.metadata.uuid,
 		SourceIP:          s.metadata.sourceIP,
+		EntryIP:           s.metadata.entryIP,
 		TargetHost:        s.metadata.targetHost,
 		TargetPort:        s.metadata.targetPort,
 		Network:           s.metadata.network,

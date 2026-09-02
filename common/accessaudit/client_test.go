@@ -101,6 +101,9 @@ func TestFlowTrafficClientSendsHomogeneousSignedPayloadAndAcks(t *testing.T) {
 	if payload.Events[0].EventID != "9:session-a:00000001" || payload.Events[0].UploadBytes != 10 || payload.Events[0].DownloadBytes != 20 {
 		t.Fatalf("unexpected flow event: %#v", payload.Events[0])
 	}
+	if payload.Events[0].EntryIP != "203.0.113.20" {
+		t.Fatalf("flow event missing entry ip: %#v", payload.Events[0])
+	}
 	stats, err := spool.Stats()
 	if err != nil {
 		t.Fatalf("stats: %v", err)
@@ -589,6 +592,7 @@ func flowEventForTest(sequence uint32, eventTime time.Time) FlowEvent {
 		IntervalStartedAt: eventTime.Add(-time.Minute),
 		NodeID:            9,
 		UID:               145817,
+		EntryIP:           "203.0.113.20",
 		TargetHost:        "example.com",
 		TargetPort:        443,
 		Network:           "tcp",
@@ -730,6 +734,7 @@ func TestClientFlushesSignedBatch(t *testing.T) {
 		UID:         145817,
 		UUID:        "device-a",
 		SourceIP:    "1.2.3.4",
+		EntryIP:     "203.0.113.20",
 		TargetHost:  "example.com",
 		TargetPort:  443,
 		Network:     "tcp",
@@ -767,6 +772,7 @@ func TestClientFlushesSignedBatch(t *testing.T) {
 		`"event_time":"2026-05-26T17:00:00.123+08:00"`,
 		`"node_id":1`,
 		`"uid":145817`,
+		`"entry_ip":"203.0.113.20"`,
 		`"target_host":"example.com"`,
 		`"outbound_tag":"test-outbound"`,
 	} {

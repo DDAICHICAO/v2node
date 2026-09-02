@@ -5,6 +5,7 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	stdnet "net"
 	"strconv"
 	"strings"
 	"sync"
@@ -222,11 +223,13 @@ func logSntpUserAccess(ctx context.Context, destination net.Destination, outboun
 		}
 	}
 	sourceIP := strings.TrimPrefix(sessionInbound.Source.Address.IP().String(), "::ffff:")
+	entryIP := accessAuditEntryIP(sessionInbound)
 	if sntpAccessLogEnabled.Load() {
-		writeSntpAccessLog(fmt.Sprintf("SNTP user access uid=%d uuid=%s source_ip=%s target=%s inbound_tag=%s outbound_tag=%s",
+		writeSntpAccessLog(fmt.Sprintf("SNTP user access uid=%d uuid=%s source_ip=%s entry_ip=%s target=%s inbound_tag=%s outbound_tag=%s",
 			uid,
 			uuid,
 			sourceIP,
+			entryIP,
 			destination.NetAddr(),
 			sessionInbound.Tag,
 			outboundTag,
@@ -242,6 +245,7 @@ func logSntpUserAccess(ctx context.Context, destination net.Destination, outboun
 			UID:         uint64(uid),
 			UUID:        uuid,
 			SourceIP:    sourceIP,
+			EntryIP:     entryIP,
 			TargetHost:  destination.Address.String(),
 			TargetPort:  uint16(destination.Port),
 			Network:     network,
@@ -249,6 +253,22 @@ func logSntpUserAccess(ctx context.Context, destination net.Destination, outboun
 			OutboundTag: outboundTag,
 		})
 	}
+}
+
+func accessAuditEntryIP(inbound *session.Inbound) string {
+	if inbound == nil || !inbound.Local.IsValid() || !inbound.Local.Address.Family().IsIP() {
+		return ""
+	}
+
+	value := stringsTrimMappedIP(inbound.Local.Address.IP().String())
+	parsed := stdnet.ParseIP(value)
+	if parsed == nil || parsed.IsUnspecified() {
+		return ""
+	}
+	if ipv4 := parsed.To4(); ipv4 != nil {
+		return ipv4.String()
+	}
+	return parsed.String()
 }
 
 func writeSntpAccessLog(message string) {

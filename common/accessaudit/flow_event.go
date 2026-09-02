@@ -29,6 +29,7 @@ type FlowEvent struct {
 	UID               uint64    `json:"uid"`
 	UUID              string    `json:"uuid,omitempty"`
 	SourceIP          string    `json:"source_ip,omitempty"`
+	EntryIP           string    `json:"entry_ip,omitempty"`
 	TargetHost        string    `json:"target_host"`
 	TargetPort        uint16    `json:"target_port"`
 	Network           string    `json:"network"`
@@ -49,6 +50,7 @@ func (e *FlowEvent) Normalize(now time.Time) error {
 	}
 
 	e.SessionID = strings.TrimSpace(e.SessionID)
+	e.EntryIP = strings.TrimSpace(e.EntryIP)
 	if e.NodeID == 0 {
 		return errors.New("node_id is required")
 	}
