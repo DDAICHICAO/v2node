@@ -1,6 +1,8 @@
 package limiter
 
 import (
+	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +42,46 @@ func TestCheckLimitAppliesUUIDIPFanoutBeforeOnlineState(t *testing.T) {
 func newTestLimiter(tag string, users []panel.UserInfo, alive map[int]int, deviceAlive map[int]int, useDeviceLimitByUUID bool) *Limiter {
 	Init()
 	return AddLimiter("v2ray", tag, users, alive, deviceAlive, useDeviceLimitByUUID)
+}
+
+func TestOnlineDeviceStateCarriesEntryIPsAcrossRefresh(t *testing.T) {
+	const tag = "entry-ip-refresh"
+	const uuid = "device-a"
+	l := newTestLimiter(tag, []panel.UserInfo{{Id: 12, Uuid: uuid}}, nil, nil, true)
+	taguuid := format.UserTag(tag, uuid)
+	if _, reject, _ := l.CheckLimit(taguuid, "198.51.100.10", true); reject {
+		t.Fatal("connection rejected")
+	}
+	l.RecordOnlineEntryIP(taguuid, "198.51.100.10", "203.0.113.20")
+	l.RecordOnlineEntryIP(taguuid, "198.51.100.10", "203.0.113.21")
+	l.RecordOnlineEntryIP(taguuid, "198.51.100.10", "203.0.113.20")
+
+	assertEntries := func(devices []panel.OnlineDevice) {
+		t.Helper()
+		got := make([]string, 0, len(devices))
+		for _, device := range devices {
+			got = append(got, device.EntryIP)
+		}
+		sort.Strings(got)
+		if !reflect.DeepEqual(got, []string{"203.0.113.20", "203.0.113.21"}) {
+			t.Fatalf("entry IPs=%v", got)
+		}
+	}
+
+	_, devices, err := l.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEntries(*devices)
+
+	if refreshed := l.RefreshOnlineUIDsFromLastSnapshot([]int{12}); refreshed != 1 {
+		t.Fatalf("refreshed=%d", refreshed)
+	}
+	_, devices, err = l.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEntries(*devices)
 }
 
 func TestCheckLimitRejectsUnknownUser(t *testing.T) {

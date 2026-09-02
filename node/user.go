@@ -119,8 +119,9 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) error {
 					"ip":   online.IP,
 				}).Info("SNTP online device heartbeat")
 				deviceData[online.UID] = append(deviceData[online.UID], panel.OnlineDeviceReportItem{
-					UUID: online.UUID,
-					IP:   online.IP,
+					UUID:    online.UUID,
+					IP:      online.IP,
+					EntryIP: online.EntryIP,
 				})
 			}
 			if len(deviceData) != 0 {

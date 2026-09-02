@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -457,6 +458,34 @@ func TestAliveStateRequestsReturnPanelErrors(t *testing.T) {
 	}
 	if _, err := c.GetUserDeviceAlive(context.Background()); err == nil {
 		t.Fatal("GetUserDeviceAlive hid panel error")
+	}
+}
+
+func TestReportNodeOnlineDevicesIncludesEntryIP(t *testing.T) {
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/server/UniProxy/aliveDevices" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = string(payload)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":true}`))
+	}))
+	defer server.Close()
+
+	c := &Client{client: resty.New().SetBaseURL(server.URL)}
+	data := map[int][]OnlineDeviceReportItem{
+		1: {{UUID: "device", IP: "198.51.100.10", EntryIP: "203.0.113.20"}},
+	}
+	if err := c.ReportNodeOnlineDevices(context.Background(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, `"entry_ip":"203.0.113.20"`) {
+		t.Fatalf("body missing entry_ip: %s", body)
 	}
 }
 

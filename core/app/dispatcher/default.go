@@ -271,6 +271,13 @@ func accessAuditEntryIP(inbound *session.Inbound) string {
 	return parsed.String()
 }
 
+func recordOnlineEntryIP(limit *limiter.Limiter, userEmail, sourceIP string, inbound *session.Inbound) {
+	if limit == nil {
+		return
+	}
+	limit.RecordOnlineEntryIP(userEmail, sourceIP, accessAuditEntryIP(inbound))
+}
+
 func writeSntpAccessLog(message string) {
 	sntpAccessLogMu.Lock()
 	defer sntpAccessLogMu.Unlock()
@@ -363,6 +370,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			common.Interrupt(inboundLink.Reader)
 			return nil, nil, nil, errors.New(rejectMessage)
 		}
+		recordOnlineEntryIP(limit, user.Email, sourceIP, sessionInbound)
 		managedWriter, registerErr := d.registerUserLink(
 			user.Email,
 			uplinkWriter,
@@ -546,6 +554,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			common.Interrupt(outbound.Reader)
 			return errors.New(rejectMessage)
 		}
+		recordOnlineEntryIP(limit, user.Email, sourceIP, sessionInbound)
 		managedWriter, registerErr := d.registerUserLink(
 			user.Email,
 			outbound.Writer,

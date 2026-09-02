@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/accessaudit"
+	"github.com/wyx2685/v2node/common/format"
+	"github.com/wyx2685/v2node/limiter"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
@@ -35,6 +38,28 @@ func TestAccessAuditEntryIP(t *testing.T) {
 				t.Fatalf("accessAuditEntryIP()=%q want=%q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRecordOnlineEntryIPUsesInboundLocalAddress(t *testing.T) {
+	const tag = "v2node42"
+	const uuid = "device-a"
+	limiter.Init()
+	limit := limiter.AddLimiter("v2ray", tag, []panel.UserInfo{{Id: 12, Uuid: uuid}}, nil, nil, true)
+	userEmail := format.UserTag(tag, uuid)
+	if _, reject, _ := limit.CheckLimit(userEmail, "198.51.100.10", true); reject {
+		t.Fatal("connection rejected")
+	}
+
+	recordOnlineEntryIP(limit, userEmail, "198.51.100.10", &session.Inbound{
+		Local: net.TCPDestination(net.ParseAddress("203.0.113.20"), 443),
+	})
+	_, devices, err := limit.GetOnlineDeviceState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*devices) != 1 || (*devices)[0].EntryIP != "203.0.113.20" {
+		t.Fatalf("online devices=%+v", *devices)
 	}
 }
 

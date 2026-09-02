@@ -3,6 +3,8 @@ package limiter
 import (
 	"context"
 	"errors"
+	stdnet "net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,8 @@ type Limiter struct {
 	OldUserOnline          *sync.Map      // Key: Ip, value: Uid
 	OldUserOnlineDevice    *sync.Map      // Key: TagUUID, value: Uid
 	OldUserOnlineDeviceIPs *sync.Map      // Key: TagUUID, value: []Ip from last reported snapshot
+	UserOnlineEntryIP      *sync.Map      // Key: TagUUID, value: source IP -> entry IP set
+	OldUserOnlineEntryIP   *sync.Map      // Previous entry IP snapshot for long-lived traffic refresh
 	UUIDtoUID              map[string]int // Key: UUID, value: Uid
 	stateMu                sync.RWMutex
 	UserLimitInfo          *sync.Map   // Key: TagUUID value: UserLimitInfo
@@ -93,6 +97,8 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 		OldUserOnline:          new(sync.Map),
 		OldUserOnlineDevice:    new(sync.Map),
 		OldUserOnlineDeviceIPs: new(sync.Map),
+		UserOnlineEntryIP:      new(sync.Map),
+		OldUserOnlineEntryIP:   new(sync.Map),
 		UUIDIPFanout:           NewUUIDIPFanoutTracker(UUIDIPFanoutConfig{}),
 		DeviceLimitEvents:      NewDeviceLimitEventQueue(defaultDeviceLimitEventCooldown, defaultDeviceLimitEventMaxItems),
 	}
@@ -141,6 +147,8 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		l.UserOnlineIP.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.OldUserOnlineDevice.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.OldUserOnlineDeviceIPs.Delete(format.UserTag(tag, deleted[i].Uuid))
+		l.UserOnlineEntryIP.Delete(format.UserTag(tag, deleted[i].Uuid))
+		l.OldUserOnlineEntryIP.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.SpeedLimiter.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.UUIDIPFanout.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.stateMu.Lock()
@@ -503,6 +511,9 @@ func (l *Limiter) RefreshOnlineUIDsFromLastSnapshot(uids []int) int {
 				})
 			}
 		}
+		for _, ip := range ips {
+			l.copyOnlineEntryIPs(l.OldUserOnlineEntryIP, l.UserOnlineEntryIP, taguuid, normalizeIP(ip))
+		}
 		refreshed++
 		return true
 	})
@@ -516,6 +527,7 @@ func (l *Limiter) GetOnlineDeviceState() (*[]panel.OnlineUser, *[]panel.OnlineDe
 	oldUserOnline := new(sync.Map)
 	oldUserOnlineDevice := new(sync.Map)
 	oldUserOnlineDeviceIPs := new(sync.Map)
+	oldUserOnlineEntryIP := new(sync.Map)
 	l.UserOnlineIP.Range(func(key, value interface{}) bool {
 		taguuid := key.(string)
 		ipMap := value.(*sync.Map)
@@ -535,20 +547,87 @@ func (l *Limiter) GetOnlineDeviceState() (*[]panel.OnlineUser, *[]panel.OnlineDe
 				deviceSeen = true
 			}
 			onlineUser = append(onlineUser, panel.OnlineUser{UID: uid, IP: ip})
-			onlineDevice = append(onlineDevice, panel.OnlineDevice{UID: uid, UUID: deviceUUID, IP: ip})
+			entryIPs := l.onlineEntryIPs(l.UserOnlineEntryIP, taguuid, ip)
+			if len(entryIPs) == 0 {
+				onlineDevice = append(onlineDevice, panel.OnlineDevice{UID: uid, UUID: deviceUUID, IP: ip})
+			} else {
+				for _, entryIP := range entryIPs {
+					onlineDevice = append(onlineDevice, panel.OnlineDevice{UID: uid, UUID: deviceUUID, IP: ip, EntryIP: entryIP})
+					l.storeOnlineEntryIP(oldUserOnlineEntryIP, taguuid, ip, entryIP)
+				}
+			}
 			return true
 		})
 		if len(deviceIPs) > 0 {
 			oldUserOnlineDeviceIPs.Store(taguuid, deviceIPs)
 		}
 		l.UserOnlineIP.Delete(taguuid) // Reset online device
+		l.UserOnlineEntryIP.Delete(taguuid)
 		return true
 	})
 	l.OldUserOnline = oldUserOnline
 	l.OldUserOnlineDevice = oldUserOnlineDevice
 	l.OldUserOnlineDeviceIPs = oldUserOnlineDeviceIPs
+	l.OldUserOnlineEntryIP = oldUserOnlineEntryIP
 
 	return &onlineUser, &onlineDevice, nil
+}
+
+func (l *Limiter) RecordOnlineEntryIP(taguuid, sourceIP, entryIP string) {
+	if l == nil || l.UserOnlineEntryIP == nil {
+		return
+	}
+	taguuid = strings.TrimSpace(taguuid)
+	sourceIP = normalizeIP(sourceIP)
+	entryIP = normalizeIP(entryIP)
+	parsed := stdnet.ParseIP(entryIP)
+	if taguuid == "" || sourceIP == "" || parsed == nil || parsed.IsUnspecified() {
+		return
+	}
+	if ipv4 := parsed.To4(); ipv4 != nil {
+		entryIP = ipv4.String()
+	} else {
+		entryIP = parsed.String()
+	}
+	l.storeOnlineEntryIP(l.UserOnlineEntryIP, taguuid, sourceIP, entryIP)
+}
+
+func (l *Limiter) storeOnlineEntryIP(root *sync.Map, taguuid, sourceIP, entryIP string) {
+	if root == nil || taguuid == "" || sourceIP == "" || entryIP == "" {
+		return
+	}
+	sourceMaps, _ := root.LoadOrStore(taguuid, new(sync.Map))
+	entryMaps, _ := sourceMaps.(*sync.Map).LoadOrStore(sourceIP, new(sync.Map))
+	entryMaps.(*sync.Map).Store(entryIP, struct{}{})
+}
+
+func (l *Limiter) onlineEntryIPs(root *sync.Map, taguuid, sourceIP string) []string {
+	if root == nil {
+		return nil
+	}
+	sourceMaps, ok := root.Load(taguuid)
+	if !ok {
+		return nil
+	}
+	entryMaps, ok := sourceMaps.(*sync.Map).Load(sourceIP)
+	if !ok {
+		return nil
+	}
+	entries := make([]string, 0)
+	entryMaps.(*sync.Map).Range(func(key, _ interface{}) bool {
+		if entryIP, ok := key.(string); ok && entryIP != "" {
+			entries = append(entries, entryIP)
+		}
+		return true
+	})
+	sort.Strings(entries)
+	return entries
+}
+
+func (l *Limiter) copyOnlineEntryIPs(from, to *sync.Map, taguuid, sourceIP string) {
+	for _, entryIP := range l.onlineEntryIPs(from, taguuid, sourceIP) {
+		l.storeOnlineEntryIP(to, taguuid, sourceIP, entryIP)
+	}
 }
 
 func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {

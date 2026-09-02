@@ -21,14 +21,16 @@ type OnlineUser struct {
 }
 
 type OnlineDevice struct {
-	UID  int
-	UUID string
-	IP   string
+	UID     int
+	UUID    string
+	IP      string
+	EntryIP string
 }
 
 type OnlineDeviceReportItem struct {
-	UUID string `json:"uuid"`
-	IP   string `json:"ip"`
+	UUID    string `json:"uuid"`
+	IP      string `json:"ip"`
+	EntryIP string `json:"entry_ip,omitempty"`
 }
 
 type UserInfo struct {
