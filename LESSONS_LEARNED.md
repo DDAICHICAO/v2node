@@ -1,5 +1,15 @@
 # LESSONS LEARNED
 
+## 2026-10-07：账户到期必须撤销同用户的全部设备凭据
+
+- 症状：网站套餐过期数小时后，后台仍有设备心跳；用户未确认重新连接仍可用，目标节点运行快照尚未取得。
+- 影响链：v2board `ServerService::getAvailableUsers/expandUsersWithDeviceUuids` → UniProxy 全量响应/缓存 → `api/v2board.UserInfo.ExpiredAt` → `node/user_expiry.go` / `node/user_delta.go::removeExpiredUsers` → `Controller.applyUserList` → `V2Core.DelUsers` → `LinkRegistry.DeactivateUser`。
+- 根因：后端全量设备展开 helper 漏掉 `expired_at`，节点解码为 `0`；旧过滤仅按单条 UUID 的时间移除，带时间的主 UUID 到期后，无时间的设备仍留下。增量 upsert 会保留设备到期时间，空增量不会补旧字段。0 倍率只是面板不入账计费流量，与时间授权无关。
+- 修改：面板已改为克隆用户并替换设备 UUID，完整继承到期字段。节点先收集已到期的正整数 UID，再撤销该 UID 全部记录，复用已有定时器和连接回收链；保留真正不限时用户及不同 UID 隔离，不把无效 UID 合并删除。续费 upsert 整体替换所有凭据后再判到期，避免沿用旧时间。
+- 验证：临时混合凭据回归先失败后通过；PHP 8 个场景全部通过，真实 JSON/msgpack 响应到节点解码/到期过滤 16 个组合通过。`GOEXPERIMENT=jsonv2 go test ./node ./core ./core/app/dispatcher -run 'Test(ExpiryRegressionTemp|RemoveExpiredUsers|NextUserExpiry|LocalExpiry|ApplyUserList|DeactivateUsers|LinkRegistry|CommitUserState|SyncUserState)' -count=1` 通过；Go 格式、两仓库 diff 和后端 PHP 语法检查通过。`ExpiryRegressionTemp` 为本次临时测试，结束前删除，不保留新增测试文件或合成响应。
+- 后续：部署后端并刷新常驻 Worker，更新实际 v2node 二进制；定向刷新相关每节点/共享缓存，并让节点获取完整授权状态。若所有凭据都缺时间或主 UUID 已被旧逻辑删除，节点兜底无法恢复未知时间，必须同步，不能把所有 0 时间用户当过期。现场只汇总凭据数量/到期时间并检查实际版本、时钟、到期删除及数据面停用日志。
+- 范围/入口：本次修复按后续授权单独提交；未修改数据库、计费倍率或离线保活政策，未新增周期全量任务，未打包或部署。完整部署边界见 v2board `docs/uniproxy-node-troubleshooting-runbook.md` 同日章节；未保存真实用户身份、UUID、IP、凭据或私密快照。
+
 ## 2026-08-17：用户失效时的连接回收必须和新连接登记使用同一生命周期门闩
 
 ### 症状与影响链

@@ -167,10 +167,20 @@ func removeExpiredUsers(users []panel.UserInfo, nowUnix int64) ([]panel.UserInfo
 		return users, false
 	}
 
+	// Expiry belongs to the account. Older full snapshots may omit the
+	// timestamp on device UUIDs, so revoke every credential for an expired UID.
+	expiredUserIDs := make(map[int]struct{})
+	for _, user := range users {
+		if user.Id > 0 && user.ExpiredAt > 0 && user.ExpiredAt <= nowUnix {
+			expiredUserIDs[user.Id] = struct{}{}
+		}
+	}
+
 	next := make([]panel.UserInfo, 0, len(users))
 	changed := false
 	for _, user := range users {
-		if user.ExpiredAt > 0 && user.ExpiredAt <= nowUnix {
+		_, accountExpired := expiredUserIDs[user.Id]
+		if accountExpired || (user.ExpiredAt > 0 && user.ExpiredAt <= nowUnix) {
 			changed = true
 			continue
 		}
