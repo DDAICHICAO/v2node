@@ -1,5 +1,23 @@
 # LESSONS LEARNED
 
+## 2026-10-08：self Trojan 只换 SNI 不重建整个代理核心（源码完成）
+
+- 症状/根因：后台批量替换 SNI 使 self Trojan 进入 `nodeInfoFullReload`，整进程所有节点和核心关闭重建；已有免重载分支仅覆盖 managed TLS。self 证书文件复用，允许任意 SNI 的普通 Trojan TLS 不使用域名字段构造入站，纯名称变化无需重建。
+- 改动/链路：`node/node_info_change.go` 新增 `nodeInfoSelfTrojanSNIOnly`；只在当前和新配置均为 Trojan/普通 TLS/self、无托管作用域、证书/私钥路径非空、允许陌生 SNI时，忽略 Common.ServerName、TlsSettings.ServerName/ServerNames 与 CertInfo.CertDomain 的差异，严格比较其余所有字段。
+- 新行为：`node/task.go::applyPendingNodeInfo` 在同一 stateMu 写锁内先落离线快照，再更新 info 与 active version；成功清 pending，不向 ReloadCh 发信号，日志 `Self Trojan SNI applied without global reload`。保存失败保留旧状态和 pending；重复观察同一配置不重载，随后真正运行字段变更仍可重载。不改用户状态、证书文件、订阅验签或 managed SAN 验证。
+- 验证：在已有 `node/node_info_change_test.go` 先复现错误重载，再通过域名/空值/IP、失败重试、快照及版本一致、重复观察、后续端口重载和 19 种保护边界。`GOEXPERIMENT=jsonv2 go test ./node ./core -run '^Test(SelfTrojanSNIChange|ClassifyNodeInfoChange|ApplyPendingNodeInfo|NodeInfoMonitorPersists|ManagedTLSDomainOnlyChange|CommitRouteNodeInfo|RouteHotReloadDisabled|RouteHotReloadKeepsExistingAndNewConnectionsOnline|SwapPreparedInbound)' -count=1` 通过；含现有 managed/route/inbound 定向回归。Go 格式、差异检查通过，Windows CGO=0 未做 race；无新增测试文件。
+- 边界/下次查：仅优化 self Trojan，file/dns/http/managed/REALITY 或拒绝未知 SNI不进入新分支；路由、端口、协议、证书路径或规则同时变化仍走原流程。先查分类条件、pending/version、离线快照写入错误和免重载日志，再看全局 reload 日志。节点不解码客户端 allow_insecure，本次不依赖该客户端开关判断服务器行为。
+- 文件/部署：修改上述三个 Go 文件及本记录，后台手册在 v2board `docs/uniproxy-node-troubleshooting-runbook.md` 同日补充；保留其他未提交修改，未提交、构建发行包、部署、改证书或重启线上服务。必须更新节点二进制后才生效，线上批量替换及原故障网络未验收；不持久化完整 IP、用户凭据或证书指纹。
+
+## 2026-10-08：Trojan self 证书与当前 SNI 不同，仍可握手不代表客户端验证了证书
+
+- 症状/链路：用户发现任意 SNI 仍可连接；面板 `v2_server_v2node.tls_settings` → 订阅 `skip-cert-verify` → `api/v2board/node.go::CertInfo` → `core/inbound.go` → 实际 TLS 握手。
+- 现场：HK Trojan #114/#208/#352 的 `cert_mode=self`、`reject_unknown_sni=0`，快照 `RejectUnknownSni=false`；面板 `allow_insecure=1`，部署机订阅生成函数输出 `skip-cert-verify: true`。配置 SNI 为 `vercel.com`，实际证书 CN/SAN 仍是 `live.bilibili.com`；`node/cert.go::requestCert()` 在 self 模式复用已存在的证书/私钥，修改 SNI 不会自动重签。
+- 验证：入站 10011/12001/16001 均要求 PROXY Protocol；先发送基于本地 socket 的 PROXY v1 头，再以配置 SNI、`sni-check.invalid`、无 SNI测试 TLS，9/9 成功并返回对应磁盘证书。系统默认信任库严格验签 3/3 失败，错误 18 `self-signed certificate`。未测试用户认证或实际代理流量。
+- 处理/边界：此次只读核实，没有换证、改配置、重启或提交。若后续恢复正常验签，先处理可信链及验证名称匹配；不能将 TLS 成功误读成证书已受信任、Trojan 无需密码或线路不会阻断。
+- 同日批量替换 SNI 诊断：优化前分类器只为 managed 域名变化免重载，self 的 server_name/CertDomain 变化仍走全局 reload；成功时进程不退出，日志“重启成功”指进程内重载。诊断阶段未改代码或触发线上替换，未确认线上二进制与源码一致；随后经用户授权完成 self Trojan 纯 SNI 免重载源码优化，边界和回归见上一条，尚未部署。用 PID/启动时间与相关日志区分两类重启。
+- 下次查：`/etc/v2node/offline-state/node-*.json` 的 TLS 指定字段、实际 `.cer`、`api/v2board/node.go`、`core/inbound.go`、`node/cert.go`，以及后台实际订阅配置。完整方法见 v2board `docs/uniproxy-node-troubleshooting-runbook.md` 同日章节；不输出含用户凭据的整份快照，不保存完整 IP、口令或证书指纹。原故障网络的间歇断连及公网中转尚未复测。
+
 ## 2026-10-07：账户到期必须撤销同用户的全部设备凭据
 
 - 症状：网站套餐过期数小时后，后台仍有设备心跳；用户未确认重新连接仍可用，目标节点运行快照尚未取得。

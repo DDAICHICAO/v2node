@@ -129,6 +129,23 @@ func (c *Controller) applyPendingNodeInfo() error {
 			return errors.New("managed TLS domain change was not applied")
 		}
 		c.activeNodeInfoVersion = pendingVersion
+	case nodeInfoSelfTrojanSNIOnly:
+		// Persist and publish under the same lock so user-state snapshots cannot
+		// overwrite the new SNI with the previously active metadata.
+		c.stateMu.Lock()
+		err := c.persistOfflineStateAtLocked(pending, c.userList, c.apiClient.UserSyncSeq())
+		if err == nil {
+			c.info = pending
+			c.activeNodeInfoVersion = pendingVersion
+		}
+		c.stateMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("persist self Trojan SNI change: %w", err)
+		}
+		log.WithFields(log.Fields{
+			"tag":     c.tag,
+			"node_id": pending.Id,
+		}).Info("Self Trojan SNI applied without global reload")
 	case nodeInfoRoutesOnly:
 		if c.routeCoordinator != nil {
 			if c.routeNotifiedVersion != pendingVersion {
