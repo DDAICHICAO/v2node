@@ -21,6 +21,9 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 			return err
 		}
 		v.eclipse[tag] = server
+		if server.v3 != nil {
+			v.titanV3Runtimes.Store(tag, server.v3)
+		}
 		return nil
 	}
 	if isMieruNode(info) {
@@ -47,6 +50,7 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 
 func (v *V2Core) DelNode(tag string) error {
 	if server, ok := v.eclipse[tag]; ok {
+		v.titanV3Runtimes.Delete(tag)
 		delete(v.eclipse, tag)
 		return server.Close()
 	}
@@ -62,7 +66,14 @@ func (v *V2Core) DelNode(tag string) error {
 }
 
 func (v *V2Core) ReplaceNode(tag string, info *panel.NodeInfo, users []panel.UserInfo) error {
-	if isSntpEclipseNode(info) || isMieruNode(info) {
+	if isSntpEclipseNode(info) {
+		server := v.eclipse[tag]
+		if server == nil || server.v3 == nil {
+			return errors.New("TLS replacement requires an active Titan V3 node")
+		}
+		return server.v3.updateCertificate(info)
+	}
+	if isMieruNode(info) {
 		return errors.New("managed TLS runtime replacement is unsupported for this node type")
 	}
 	rollbackConfig, err := v.currentInboundSnapshot(tag)
@@ -88,4 +99,14 @@ func (v *V2Core) ReplaceNode(tag string, info *panel.NodeInfo, users []panel.Use
 			return handler.Close()
 		},
 	})
+}
+
+// TitanV3Ready reads the actual listener state without accessing the mutable
+// ingress map from concurrent status reporters.
+func (v *V2Core) TitanV3Ready(tag string) bool {
+	if v == nil {
+		return false
+	}
+	value, ok := v.titanV3Runtimes.Load(tag)
+	return ok && value.(*eclipseV3Runtime).listening.Load()
 }

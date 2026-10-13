@@ -181,11 +181,14 @@ type CertInfo struct {
 }
 
 type EncSettings struct {
-	Mode          string `json:"mode"`
-	Ticket        string `json:"ticket"`
-	ServerPadding string `json:"server_padding"`
-	PrivateKey    string `json:"private_key"`
-	PublicKey     string `json:"public_key"`
+	ResumeWindow      int    `json:"resume_window"`
+	ResumeBufferBytes int    `json:"resume_buffer_bytes"`
+	MaxSessions       int    `json:"max_sessions"`
+	Mode              string `json:"mode"`
+	Ticket            string `json:"ticket"`
+	ServerPadding     string `json:"server_padding"`
+	PrivateKey        string `json:"private_key"`
+	PublicKey         string `json:"public_key"`
 }
 
 func (e *EncSettings) UnmarshalJSON(data []byte) error {

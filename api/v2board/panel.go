@@ -22,6 +22,7 @@ import (
 // Panel is the interface for different panel's api.
 
 var deviceLimitCapabilities = []string{
+	"titan_v3_resume_v1",
 	"device_uuid_users",
 	"uid_traffic_aggregate",
 	"device_traffic_report",

@@ -519,3 +519,12 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 若变化还进入全局 reload，先查 `node/task.go` 的统一分类和协调器开关；若候选一直失败，查配置向量、严格编译错误和 retained pending，不要先删除快照或重启；若旧资源不回收，查 dispatcher Link 的双向结束/context 取消和 lease release-once。
 - 相关文件：`api/v2board/node.go`、`node/node_info_change.go`、`node/route_update_coordinator.go`、`node/route_runtime_state.go`、`node/task.go`、`core/route_compile.go`、`core/route_runtime.go`、`core/route_outbound_pool.go`、`core/app/dispatcher/route_runtime.go`、`core/app/dispatcher/route_link.go`。
 - 设计与实施入口：`docs/superpowers/specs/2026-08-20-v2node-zero-disconnect-route-hot-reload-design.md`、`docs/superpowers/plans/2026-08-20-v2node-zero-disconnect-route-hot-reload.md`。实现提交依次为 `9b52acb`、`231c1d7`、`774db97`、`a75370e`、`282879b`、`cd18a4b`、`b8f4796`、`1afb5d2` 和 `903b9f3`。
+
+## 2026-10-14 Titan V3 WSS 与原会话恢复
+
+- 目标/链路：api/v2board config/capability → core/sntp_eclipse_v3.go TLS/WSS → common/sntpv3 稳定 Conn → 原 Titan V2 cipher / Dispatcher / limiter / 明文计费。
+- 修复：独立 resume key、challenge/epoch/进度 proof、原密文重传去重；Ready 丢失可持钥恢复，目标启动 sync.Once；新连接及恢复查授权，恢复 proof 验证后再按当前物理来源执行 limiter 策略，原连接仍在正式 LinkRegistry 内。证书原子替换，身份或其他配置变化拒绝热替换。
+- 资源/易错点：共享发送/接收各 64 MiB 有效 payload，而非每会话预留；默认 256 会话、64 待认证、物理 max_sessions+64。正常末尾响应直到读完仍计入额度；Abort/Close 释放。TLS 的 lazy PROXY 解析不能清除 net/http 设置的握手 deadline；Serve 退出必须清 ready 并关闭逻辑会话。
+- 验证：共享恢复包十轮 race；真实客户端/节点的 TLS/WSS、双 IP 2.76 MB 回传、生产 Dispatcher 目标只一次且计费无重复、换新证书和新旧连接、错 SNI、Ready 丢失及正式 V2Core.DelUsers 立即关闭逻辑流验证通过。core/api/node 常规回归与 Linux 二进制编译通过。旧 bbolt 1.3.2 在 Go1.26.2 race 的 checkptr 中崩溃；仅该依赖关闭 checkptr 后继续 node 并发检查，未为本任务升级它。
+- 后续/边界：原进程是活 socket 所有者；同密钥的独立进程不能恢复原 socket，重启也不能。地区实网、物理路由归属仍需发版灰度。临时测试已备份并在结束前清理，见 v2board docs/titan-v3-release.md 的命令与发布顺序。
+- 并发补查：窗口过期快照与新 wire 接入并发时，必须确认 finishIf 真正关闭后再退出收发循环；确定性调度测试先失败、修复后通过，双端源码同步。测试调度 hook 仅临时验证，未进入提交。

@@ -48,6 +48,7 @@ type V2Core struct {
 	routeDegraded     bool
 	routeHealthReason string
 	eclipse           map[string]*SntpEclipseServer
+	titanV3Runtimes   sync.Map
 	mieru             map[string]*MieruServer
 }
 
