@@ -48,6 +48,8 @@ func inboundUserManager(handler inbound.Handler, tag string) (proxy.UserManager,
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
+	vc.nodeAccess.RLock()
+	defer vc.nodeAccess.RUnlock()
 	vc.deactivateUsers(users, tag)
 
 	if server, ok := vc.eclipse[tag]; ok {
@@ -160,6 +162,8 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 }
 
 func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.UserTraffic, []panel.UserDeviceTraffic, error) {
+	vc.nodeAccess.RLock()
+	defer vc.nodeAccess.RUnlock()
 	report := newTrafficCounterReport()
 	vc.users.mapLock.RLock()
 	defer vc.users.mapLock.RUnlock()
@@ -198,6 +202,8 @@ func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.User
 }
 
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
+	v.nodeAccess.RLock()
+	defer v.nodeAccess.RUnlock()
 	if server, ok := v.eclipse[p.Tag]; ok {
 		server.AddUsers(p.Users)
 		v.commitUserUIDs(p.Tag, p.Users)
@@ -560,4 +566,23 @@ func buildAnyTLSUser(tag string, userInfo *panel.UserInfo) (user *protocol.User)
 		Email:   format.UserTag(tag, userInfo.Uuid),
 		Account: serial.ToTypedMessage(anyTLSAccount),
 	}
+}
+
+// ForgetNodeUsers closes data-plane links before a listener is replaced or removed.
+func (v *V2Core) ForgetNodeUsers(tag string, users []panel.UserInfo) {
+	closed := 0
+	for _, user := range users {
+		if v.dispatcher != nil && v.dispatcher.LinkRegistry != nil {
+			closed += v.dispatcher.LinkRegistry.DeactivateUser(format.UserTag(tag, user.Uuid))
+		}
+	}
+	v.users.mapLock.Lock()
+	for _, user := range users {
+		delete(v.users.uidMap, format.UserTag(tag, user.Uuid))
+	}
+	v.users.mapLock.Unlock()
+	if v.dispatcher != nil {
+		v.dispatcher.Counter.Delete(tag)
+	}
+	log.WithFields(log.Fields{"tag": tag, "users": len(users), "closed": closed}).Info("Node user data plane closed")
 }

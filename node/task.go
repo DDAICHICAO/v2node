@@ -305,7 +305,13 @@ func (c *Controller) commitFetchedUserState(
 		snapshot.SyncSeq,
 		c.applyUserList,
 		func(users []panel.UserInfo, seq int64) error {
-			return c.persistOfflineStateAtLocked(c.info, users, seq)
+			previousReady := c.fastSyncReady
+			c.fastSyncReady = true
+			err := c.persistOfflineStateAtLocked(c.info, users, seq)
+			if err != nil {
+				c.fastSyncReady = previousReady
+			}
+			return err
 		},
 		func(int64) {
 			c.apiClient.CommitUserListSnapshot(snapshot)
@@ -355,6 +361,9 @@ func (c *Controller) syncUserState(
 			}
 			if !changed && delta.LatestSeq == currentSeq {
 				log.WithField("tag", c.tag).Debug("User delta no applicable change")
+				if err := c.checkpointOfflineState(); err != nil {
+					return currentSeq, err
+				}
 				return currentSeq, nil
 			}
 			if err := c.commitUserState(newU, delta.LatestSeq); err != nil {

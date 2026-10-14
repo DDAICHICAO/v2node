@@ -5,6 +5,7 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"io"
 	stdnet "net"
 	"strconv"
 	"strings"
@@ -168,8 +169,8 @@ func (d *DefaultDispatcher) Init(config *Config, om outbound.Manager, router rou
 	return nil
 }
 
-func (d *DefaultDispatcher) registerUserLink(user string, writer buf.Writer, reader buf.Reader, source string) (*ManagedWriter, error) {
-	managed, ok := d.LinkRegistry.RegisterLink(user, writer, reader, source)
+func (d *DefaultDispatcher) registerUserLink(user string, writer buf.Writer, reader buf.Reader, source string, connection ...io.Closer) (*ManagedWriter, error) {
+	managed, ok := d.LinkRegistry.RegisterLink(user, writer, reader, source, connection...)
 	if !ok {
 		return nil, errors.New("user connection lifecycle is inactive")
 	}
@@ -376,6 +377,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			uplinkWriter,
 			outboundLink.Reader,
 			sourceIP,
+			tcpInboundConnection(sessionInbound),
 		)
 		if registerErr != nil {
 			_ = common.Close(outboundLink.Writer)
@@ -560,6 +562,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			outbound.Writer,
 			outbound.Reader,
 			sourceIP,
+			tcpInboundConnection(sessionInbound),
 		)
 		if registerErr != nil {
 			return registerErr
@@ -799,4 +802,12 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	dispatchWithFlowTraffic(ctx, link, flowSession, func(trackedLink *transport.Link) {
 		handler.Dispatch(ctx, trackedLink)
 	})
+}
+
+// UDP may share its socket across users. Only close per-stream TCP connections.
+func tcpInboundConnection(inbound *session.Inbound) io.Closer {
+	if inbound == nil || inbound.Source.Network != net.Network_TCP || inbound.Conn == nil {
+		return nil
+	}
+	return inbound.Conn
 }

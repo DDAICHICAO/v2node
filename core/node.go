@@ -9,6 +9,8 @@ import (
 )
 
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
+	v.nodeAccess.Lock()
+	defer v.nodeAccess.Unlock()
 	if isSntpEclipseNode(info) {
 		if v.eclipse == nil {
 			v.eclipse = make(map[string]*SntpEclipseServer)
@@ -18,6 +20,7 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 			return err
 		}
 		if err := server.Start(); err != nil {
+			_ = server.Close()
 			return err
 		}
 		v.eclipse[tag] = server
@@ -46,6 +49,8 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 }
 
 func (v *V2Core) DelNode(tag string) error {
+	v.nodeAccess.Lock()
+	defer v.nodeAccess.Unlock()
 	if server, ok := v.eclipse[tag]; ok {
 		delete(v.eclipse, tag)
 		return server.Close()

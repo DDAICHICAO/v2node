@@ -58,6 +58,8 @@ type Controller struct {
 	nodeInfoApplyMu          sync.Mutex
 	userSyncMu               sync.Mutex
 	stateMu                  sync.RWMutex
+	fastSyncReady            bool
+	lastSnapshotCheckpoint   time.Time // protected by stateMu
 	userSyncCancel           context.CancelFunc
 	userSyncDone             chan struct{}
 	userSyncRuntime          *userSyncRuntime
@@ -83,6 +85,7 @@ func NewController(api *panel.Client, conf *conf.NodeConfig, store *offlineState
 		store:                 store,
 		bootstrap:             bootstrap,
 		startedOffline:        startedOffline,
+		fastSyncReady:         bootstrap != nil && bootstrap.FastSyncReady,
 		activeNodeInfoVersion: activeVersion,
 	}
 	return controller
@@ -502,18 +505,23 @@ func (c *Controller) persistOfflineStateAtLocked(
 		return errors.New("offline state store is nil")
 	}
 	state := &offlineState{
-		Version:      offlineStateVersion,
-		APIHost:      normalizeAPIHost(c.conf.APIHost),
-		NodeID:       c.conf.NodeID,
-		SavedAt:      time.Now().Unix(),
-		NodeInfo:     info,
-		Users:        append([]panel.UserInfo{}, users...),
-		Alive:        cloneIntMap(c.aliveMap),
-		DeviceAlive:  cloneIntMap(c.deviceAliveMap),
-		UUIDIPFanout: cloneUUIDIPFanoutGlobalState(c.uuidIPFanoutGlobal),
-		UserSyncSeq:  seq,
+		Version:       offlineStateVersion,
+		FastSyncReady: c.fastSyncReady,
+		APIHost:       normalizeAPIHost(c.conf.APIHost),
+		NodeID:        c.conf.NodeID,
+		SavedAt:       time.Now().Unix(),
+		NodeInfo:      info,
+		Users:         append([]panel.UserInfo{}, users...),
+		Alive:         cloneIntMap(c.aliveMap),
+		DeviceAlive:   cloneIntMap(c.deviceAliveMap),
+		UUIDIPFanout:  cloneUUIDIPFanoutGlobalState(c.uuidIPFanoutGlobal),
+		UserSyncSeq:   seq,
 	}
-	return c.store.Save(*c.conf, state)
+	if err := c.store.Save(*c.conf, state); err != nil {
+		return err
+	}
+	c.lastSnapshotCheckpoint = time.Now()
+	return nil
 }
 
 func (c *Controller) supportsDeviceLimitByUUID() bool {
@@ -691,6 +699,7 @@ func (c *Controller) Close() error {
 	c.closeUserSyncRuntime()
 	c.waitUserExpiryScheduler()
 	return c.runtime.Close(func() error {
+		c.server.ForgetNodeUsers(c.tag, c.userList)
 		limiter.DeleteLimiter(c.tag)
 		c.limiter = nil
 		if err := c.server.DelNode(c.tag); err != nil {
@@ -743,4 +752,14 @@ func (l *controllerRuntimeLifecycle) Close(stop func() error) error {
 	}
 	l.started = false
 	return nil
+}
+
+// checkpointOfflineState limits unchanged-delta snapshots to once per minute.
+func (c *Controller) checkpointOfflineState() error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if time.Since(c.lastSnapshotCheckpoint) < time.Minute {
+		return nil
+	}
+	return c.persistOfflineStateAtLocked(c.info, c.userList, c.apiClient.UserSyncSeq())
 }

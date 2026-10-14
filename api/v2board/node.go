@@ -234,6 +234,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if r.StatusCode() == 304 {
 		return nil, nil
 	}
+	if r.StatusCode() == 401 || r.StatusCode() == 403 {
+		return nil, &ValidationError{Operation: "get node info", StatusCode: r.StatusCode(), Message: "node authorization rejected"}
+	}
 	if r.StatusCode() >= 400 {
 		return nil, fmt.Errorf("get node info http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
 	}

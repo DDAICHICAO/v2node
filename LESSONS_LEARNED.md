@@ -564,3 +564,16 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 验证：临时回归先复现直连/转发 Local 缺失和 LOCAL 残留，再验证 PROXY v1/v2、IPv4/IPv6/mapped、TLV、禁用转发、缺失/非法/截断首部及 TCP/UDP 上下文。GOEXPERIMENT=jsonv2 go test ./core ./core/app/dispatcher ./common/accessaudit ./limiter ./api/v2board ./node -count=1 -timeout 60s 六包通过；git diff --check 通过。临时用例移至仓库外，不提交新测试文件。
 - 下一处/边界：需重编并发布节点后，以新连接 entry_ip → aliveDevices → 后台实时入口、审计 → ingest → ClickHouse 历史逐段验收；本次未部署、未改 SQL，也未处理同机 Trojan 空字段的独立原因。“客户端上报入口”由 /user/app/entry/report 独立提供，不由本修复填充。
 - 相关：core/sntp_eclipse.go、core/sntp_eclipse_native.go、core/app/dispatcher/default.go、core/app/dispatcher/flow_traffic.go、limiter/limiter.go、api/v2board/user.go；面板 docs/uniproxy-node-troubleshooting-runbook.md 的同日入口 IP 排查条目。修复与本条同一提交，可用 git log -- core/sntp_eclipse.go 定位。
+
+
+## 2026-10-15：重启准备并发与局部配置切换
+
+- **症状**：更新程序、增删节点或改配置后业务长时间不可用；重载期间所有节点一起停服。
+- **链路**：`cmd/server.go -> node.New/prepareController -> loadBootstrapState -> 面板配置/用户/在线状态 -> core -> Controller.Start`；文件修改经 `Conf.Watch -> reload`。
+- **根因**：多节点及各接口串行准备，用户重复全量下载；旧重载先关闭所有节点；文件监控固定等待 5 秒且不支持原子替换。
+- **修复**：节点最多四并发，配置后用户/在线状态并行；最近 24 小时内、凭据绑定且已全量验证的快照先在线追平增量，失效/未追平要求成功全量，旧快照首次升级仍全量；无变化增量检查点每分钟最多一次。先准备和校验候选，再局部增删/替换；共享核心或路由变化整体切换，监听失败恢复旧运行态。目录监听加末次事件后 250ms 防抖。
+- **授权边界**：401/403 不用快照绕过；保留节点也提交在线授权变化，停止旧节点后再次继承较新用户序号，回滚保留最新撤销；托管 TLS 待激活控制器先持久化授权。实测发现核心 TCP 直连可绕过管道关闭，因此连接登记增加真实 TCP 流关闭入口，撤销/移除节点时关闭；不关闭共享 UDP 套接字。
+- **回滚边界**：Xray 监听绑定失败会先注册 tag，必须清理本次失败 handler 才能恢复旧监听。受影响节点连接不保留；完整程序更新不提供跨进程连接迁移。
+- **验证**：临时回归先失败再通过；实际 VLESS TCP 连续传输下修改其他节点端口、增删节点；端口占用局部/整体回滚后代理恢复；保留节点用户撤销真实断开；较新运行状态继承、旧/未来/未绑定快照、无效/不完整增量、非法配置、原子替换及待激活 TLS 均覆盖。执行 `GOEXPERIMENT=jsonv2 go test ./node ./cmd ./conf ./core ./api/v2board ./common/task ./core/app/dispatcher -count=1 -timeout 60s`。
+- **下次检查**：优先看 `stage/elapsed_ms` 耗时；确认状态目录跨更新持久化、首次全量后有 `fast_sync_ready`；分开准备时间与共享核心切换时间，生产使用真实代理请求验收。Windows 缺 C 编译器，race 检查未执行；Linux/systemd 与生产秒数待部署验证。
+- **相关文件**：`node/bootstrap.go`、`node/reconcile.go`、`node/offline_state.go`、`node/task.go`、`cmd/server.go`、`conf/watch.go`、`core/node_preflight.go`、`core/inbound.go`、`core/app/dispatcher/linkmanager.go`；操作说明见 `docs/panel-offline-mode.md`。

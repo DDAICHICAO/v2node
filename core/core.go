@@ -36,6 +36,7 @@ type V2Core struct {
 	Config            *conf.Conf
 	ReloadCh          chan struct{}
 	access            sync.Mutex
+	nodeAccess        sync.RWMutex
 	Server            *xraycore.Instance
 	users             *UserMap
 	ihm               inbound.Manager
@@ -69,6 +70,8 @@ func New(config *conf.Conf) *V2Core {
 }
 
 func (v *V2Core) Start(infos []*panel.NodeInfo) error {
+	v.nodeAccess.Lock()
+	defer v.nodeAccess.Unlock()
 	v.access.Lock()
 	defer v.access.Unlock()
 	if v.eclipse == nil {
@@ -190,6 +193,8 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 }
 
 func (v *V2Core) Close() error {
+	v.nodeAccess.Lock()
+	defer v.nodeAccess.Unlock()
 	v.access.Lock()
 	defer v.access.Unlock()
 	v.Config = nil

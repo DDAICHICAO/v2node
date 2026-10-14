@@ -1,6 +1,7 @@
 package dispatcher
 
 import (
+	"io"
 	sync "sync"
 
 	"github.com/xtls/xray-core/common"
@@ -8,9 +9,10 @@ import (
 )
 
 type ManagedWriter struct {
-	writer  buf.Writer
-	manager *LinkManager
-	source  string
+	writer     buf.Writer
+	manager    *LinkManager
+	source     string
+	connection io.Closer
 }
 
 func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -68,6 +70,11 @@ func (m *LinkManager) closeMatched(match func(*ManagedWriter) bool) int {
 	m.mu.Unlock()
 
 	for i, w := range writers {
+		// Splice can bypass the managed pipes; revoke the underlying per-stream TCP
+		// connection as well so retained listeners cannot keep deleted users alive.
+		if w.connection != nil {
+			_ = w.connection.Close()
+		}
 		_ = common.Close(w.writer)
 		_ = common.Interrupt(readers[i])
 	}
@@ -94,7 +101,7 @@ func (r *LinkRegistry) ActivateUser(user string) {
 	r.mu.Unlock()
 }
 
-func (r *LinkRegistry) RegisterLink(user string, writer buf.Writer, reader buf.Reader, source string) (*ManagedWriter, bool) {
+func (r *LinkRegistry) RegisterLink(user string, writer buf.Writer, reader buf.Reader, source string, connection ...io.Closer) (*ManagedWriter, bool) {
 	if r == nil || user == "" {
 		_ = common.Close(writer)
 		_ = common.Interrupt(reader)
@@ -109,6 +116,9 @@ func (r *LinkRegistry) RegisterLink(user string, writer buf.Writer, reader buf.R
 		return nil, false
 	}
 	managed := &ManagedWriter{writer: writer, manager: manager, source: source}
+	if len(connection) > 0 {
+		managed.connection = connection[0]
+	}
 	manager.AddLink(managed, reader)
 	r.mu.RUnlock()
 	return managed, true

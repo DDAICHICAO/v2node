@@ -39,7 +39,19 @@ func (v *V2Core) addInbound(config *core.InboundHandlerConfig) error {
 	if err != nil {
 		return err
 	}
-	return v.addInboundHandler(handler)
+	if err := v.addInboundHandler(handler); err != nil {
+		// Xray publishes a tagged handler before Start; a bind failure can leave it
+		// registered. Remove only our own failed candidate, never an existing tag.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		installed, lookupErr := v.ihm.GetHandler(ctx, config.Tag)
+		cancel()
+		if lookupErr == nil && installed == handler {
+			_ = v.removeInbound(config.Tag)
+		}
+		_ = handler.Close()
+		return err
+	}
+	return nil
 }
 
 func (v *V2Core) createInboundHandler(config *core.InboundHandlerConfig) (inbound.Handler, error) {

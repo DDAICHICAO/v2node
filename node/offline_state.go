@@ -17,16 +17,19 @@ import (
 const offlineStateVersion = 1
 
 type offlineState struct {
-	Version      int                           `json:"version"`
-	APIHost      string                        `json:"api_host"`
-	NodeID       int                           `json:"node_id"`
-	SavedAt      int64                         `json:"saved_at"`
-	NodeInfo     *panel.NodeInfo               `json:"node_info"`
-	Users        []panel.UserInfo              `json:"users"`
-	Alive        map[int]int                   `json:"alive"`
-	DeviceAlive  map[int]int                   `json:"device_alive"`
-	UUIDIPFanout panel.UUIDIPFanoutGlobalState `json:"uuid_ip_fanout"`
-	UserSyncSeq  int64                         `json:"user_sync_seq"`
+	FastSyncReady      bool                          `json:"fast_sync_ready,omitempty"`
+	UsersAuthoritative bool                          `json:"-"`
+	Version            int                           `json:"version"`
+	APIHost            string                        `json:"api_host"`
+	NodeID             int                           `json:"node_id"`
+	SavedAt            int64                         `json:"saved_at"`
+	NodeInfo           *panel.NodeInfo               `json:"node_info"`
+	Users              []panel.UserInfo              `json:"users"`
+	Alive              map[int]int                   `json:"alive"`
+	DeviceAlive        map[int]int                   `json:"device_alive"`
+	UUIDIPFanout       panel.UUIDIPFanoutGlobalState `json:"uuid_ip_fanout"`
+	ConfigFingerprint  string                        `json:"config_fingerprint,omitempty"`
+	UserSyncSeq        int64                         `json:"user_sync_seq"`
 }
 
 type offlineStateStore struct {
@@ -60,6 +63,9 @@ func validateOfflineState(cfg conf.NodeConfig, state *offlineState) error {
 	}
 	if state.APIHost != normalizeAPIHost(cfg.APIHost) || state.NodeID != cfg.NodeID {
 		return errors.New("offline state identity mismatch")
+	}
+	if state.ConfigFingerprint != "" && state.ConfigFingerprint != offlineConfigFingerprint(cfg) {
+		return errors.New("offline state credentials changed")
 	}
 	if state.SavedAt <= 0 || state.NodeInfo == nil || state.NodeInfo.Id != cfg.NodeID {
 		return errors.New("offline state node info is incomplete")
@@ -98,7 +104,9 @@ func (s *offlineStateStore) Save(cfg conf.NodeConfig, state *offlineState) error
 	if err := os.Chmod(s.dir, 0700); err != nil {
 		return fmt.Errorf("protect offline state directory: %w", err)
 	}
-	data, err := json.Marshal(state)
+	bound := *state
+	bound.ConfigFingerprint = offlineConfigFingerprint(cfg)
+	data, err := json.Marshal(&bound)
 	if err != nil {
 		return fmt.Errorf("encode offline state: %w", err)
 	}
@@ -135,4 +143,10 @@ func cloneIntMap(input map[int]int) map[int]int {
 		output[key] = value
 	}
 	return output
+}
+
+func offlineConfigFingerprint(cfg conf.NodeConfig) string {
+	data, _ := json.Marshal([]any{normalizeAPIHost(cfg.APIHost), cfg.NodeID, cfg.Key, cfg.AppTransportTokenSecret, cfg.TLSCertificateToken})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

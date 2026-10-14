@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -44,51 +46,74 @@ func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 		routeRuntimeState: runtimeState,
 	}
 	store := newOfflineStateStore(statePath)
+	started := time.Now()
+	errorsByNode := make([]error, len(nodes))
+	slots := make(chan struct{}, 4)
+	var wg sync.WaitGroup
 	for i, node := range nodes {
-		p, err := panel.New(&node)
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			controller, err := prepareController(node, store, runtimeEntries)
+			errorsByNode[i] = err
+			if err == nil {
+				n.controllers[i] = controller
+				n.NodeInfos[i] = controller.bootstrap.NodeInfo
+			}
+		})
+	}
+	wg.Wait()
+	for _, err := range errorsByNode {
 		if err != nil {
 			return nil, err
 		}
-		cached, err := store.Load(node)
-		if err != nil {
-			cached = nil
-			if errors.Is(err, os.ErrNotExist) {
-				log.WithFields(log.Fields{
-					"api_host": normalizeAPIHost(node.APIHost),
-					"node_id":  node.NodeID,
-				}).Debug("Offline snapshot does not exist")
-			} else {
-				log.WithFields(log.Fields{
-					"api_host": normalizeAPIHost(node.APIHost),
-					"node_id":  node.NodeID,
-					"err":      err,
-				}).Warning("Offline snapshot is invalid; trying panel state")
-			}
-		}
-		if cached != nil {
-			if entry, ok := runtimeEntries[routeRuntimeIdentity(node.APIHost, node.NodeID)]; ok {
-				if !overlayRouteRuntimeState(cached, entry) {
-					log.WithFields(log.Fields{
-						"api_host": normalizeAPIHost(node.APIHost),
-						"node_id":  node.NodeID,
-					}).Warning("Whole-machine route runtime snapshot entry could not overlay offline state")
-				}
-			}
-		}
-		bootstrap, startedOffline, err := loadBootstrapState(context.Background(), p, node, cached)
-		if err != nil {
-			return nil, fmt.Errorf("load node [%s-%d] bootstrap state: %w", node.APIHost, node.NodeID, err)
-		}
-		controller := NewController(p, &node, store, bootstrap, startedOffline)
-		if p.NodeInfoVersion() == "" {
-			if entry, ok := runtimeEntries[routeRuntimeIdentity(node.APIHost, node.NodeID)]; ok {
-				controller.activeNodeInfoVersion = entry.ConfigVersion
-			}
-		}
-		n.controllers[i] = controller
-		n.NodeInfos[i] = bootstrap.NodeInfo
 	}
+	logBootstrapDuration(0, "all_nodes", started)
 	return n, nil
+}
+
+func prepareController(node conf.NodeConfig, store *offlineStateStore, runtimeEntries map[string]routeRuntimeEntry) (*Controller, error) {
+	p, err := panel.New(&node)
+	if err != nil {
+		return nil, err
+	}
+	cached, err := store.Load(node)
+	if err != nil {
+		cached = nil
+		if errors.Is(err, os.ErrNotExist) {
+			log.WithFields(log.Fields{
+				"api_host": normalizeAPIHost(node.APIHost),
+				"node_id":  node.NodeID,
+			}).Debug("Offline snapshot does not exist")
+		} else {
+			log.WithFields(log.Fields{
+				"api_host": normalizeAPIHost(node.APIHost),
+				"node_id":  node.NodeID,
+				"err":      err,
+			}).Warning("Offline snapshot is invalid; trying panel state")
+		}
+	}
+	if cached != nil {
+		if entry, ok := runtimeEntries[routeRuntimeIdentity(node.APIHost, node.NodeID)]; ok {
+			if !overlayRouteRuntimeState(cached, entry) {
+				log.WithFields(log.Fields{
+					"api_host": normalizeAPIHost(node.APIHost),
+					"node_id":  node.NodeID,
+				}).Warning("Whole-machine route runtime snapshot entry could not overlay offline state")
+			}
+		}
+	}
+	bootstrap, startedOffline, err := loadBootstrapState(context.Background(), p, node, cached)
+	if err != nil {
+		return nil, fmt.Errorf("load node [%s-%d] bootstrap state: %w", node.APIHost, node.NodeID, err)
+	}
+	controller := NewController(p, &node, store, bootstrap, startedOffline)
+	if p.NodeInfoVersion() == "" {
+		if entry, ok := runtimeEntries[routeRuntimeIdentity(node.APIHost, node.NodeID)]; ok {
+			controller.activeNodeInfoVersion = entry.ConfigVersion
+		}
+	}
+	return controller, nil
 }
 
 func (n *Node) Start(nodes []conf.NodeConfig, v2core *core.V2Core) error {
@@ -144,6 +169,5 @@ func (n *Node) Close() error {
 			return err
 		}
 	}
-	n.controllers = nil
 	return nil
 }

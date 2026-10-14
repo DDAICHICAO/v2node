@@ -231,6 +231,9 @@ func (c *Client) FetchUserList(
 			After:      userSyncRetryAfter(r.Header()),
 		}
 	}
+	if r.StatusCode() == 401 || r.StatusCode() == 403 {
+		return nil, &ValidationError{Operation: "get user list", StatusCode: r.StatusCode(), Message: "node authorization rejected"}
+	}
 	if r.StatusCode() >= 400 {
 		return nil, fmt.Errorf(
 			"get user list http status %d: %s",
@@ -325,6 +328,9 @@ func (c *Client) GetUserDeltaSince(
 	if r.StatusCode() == 404 || r.StatusCode() == 405 {
 		return nil, ErrUserDeltaUnsupported
 	}
+	if r.StatusCode() == 401 || r.StatusCode() == 403 {
+		return nil, &ValidationError{Operation: "get user delta", StatusCode: r.StatusCode(), Message: "node authorization rejected"}
+	}
 	if r.StatusCode() >= 400 {
 		return nil, fmt.Errorf("get user delta http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
 	}
@@ -408,6 +414,9 @@ func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
 	if r == nil || r.RawResponse == nil {
 		return nil, fmt.Errorf("received nil alive response")
 	}
+	if r.StatusCode() == 401 || r.StatusCode() == 403 {
+		return nil, &ValidationError{Operation: "get user alive", StatusCode: r.StatusCode(), Message: "node authorization rejected"}
+	}
 	if r.StatusCode() >= 400 {
 		return nil, fmt.Errorf("get user alive http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))
 	}
@@ -442,6 +451,9 @@ func (c *Client) GetUserDeviceAliveState(ctx context.Context) (*DeviceAliveMap, 
 	}
 	if r == nil || r.RawResponse == nil {
 		return nil, fmt.Errorf("received nil device alive response")
+	}
+	if r.StatusCode() == 401 || r.StatusCode() == 403 {
+		return nil, &ValidationError{Operation: "get device alive", StatusCode: r.StatusCode(), Message: "node authorization rejected"}
 	}
 	if r.StatusCode() >= 400 {
 		return nil, fmt.Errorf("get user device alive http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))

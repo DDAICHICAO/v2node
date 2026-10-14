@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"reflect"
 	"runtime"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -80,7 +83,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.WithField("err", err).Error("Start core failed")
 		return
 	}
-	defer v2core.Close()
+	defer func() { _ = nodes.Close(); _ = v2core.Close() }()
 	//node
 	err = nodes.Start(c.NodeConfigs, v2core)
 	if err != nil {
@@ -115,53 +118,99 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
 			if err := reload(config, &nodes, &v2core); err != nil {
-				log.WithField("err", err).Panic("重启失败")
+				log.WithField("err", err).Error("配置切换失败")
+				var fatal *reloadFatalError
+				if errors.As(err, &fatal) {
+					return
+				}
+				continue
 			}
 			log.Info("重启成功")
 		}
 	}
 }
 
+type reloadFatalError struct{ err error }
+
+func (e *reloadFatalError) Error() string { return e.err.Error() }
+func (e *reloadFatalError) Unwrap() error { return e.err }
+
 func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
-	// Preserve old reload channel so new core continues to receive signals
-	var oldReloadCh chan struct{}
-	if *v2core != nil {
-		oldReloadCh = (*v2core).ReloadCh
-	}
-
-	if err := (*nodes).Close(); err != nil {
-		return err
-	}
-
-	if err := (*v2core).Close(); err != nil {
-		return err
-	}
-
+	started := time.Now()
 	newConf := conf.New()
 	if err := newConf.LoadFromPath(config); err != nil {
 		return err
 	}
-
-	applyLogConfig(newConf.LogConfig)
+	if _, err := newConf.AccessAuditConfig.RuntimeConfig(); err != nil {
+		return err
+	}
 	newNodes, err := node.New(newConf.NodeConfigs, newConf.StatePath)
 	if err != nil {
 		return err
 	}
-
+	if err := newNodes.Validate(*v2core); err != nil {
+		return err
+	}
+	if err := (*nodes).RefreshPreparedUsers(newNodes); err != nil {
+		return err
+	}
+	log.WithField("elapsed_ms", time.Since(started).Milliseconds()).Info("SNTP reload candidate prepared while active nodes kept serving")
+	oldConfValue := *(*v2core).Config
+	oldConfValue.NodeConfigs = (*nodes).Configs()
+	oldConf := &oldConfValue
+	oldGlobal, newGlobal := *oldConf, *newConf
+	oldGlobal.NodeConfigs, newGlobal.NodeConfigs = nil, nil
+	if reflect.DeepEqual(oldGlobal, newGlobal) {
+		applied, err := (*nodes).Reconcile(newNodes, *v2core)
+		if applied {
+			var rollbackErr *node.RollbackError
+			if errors.As(err, &rollbackErr) {
+				return &reloadFatalError{err}
+			}
+			if err == nil {
+				applyLogConfig(newConf.LogConfig)
+			}
+			return err
+		}
+	}
+	oldReloadCh := (*v2core).ReloadCh
+	oldNodes := *nodes
+	switchStarted := time.Now()
+	if err := oldNodes.Close(); err != nil {
+		return &reloadFatalError{err}
+	}
+	oldNodes.InheritStoppedUsers(newNodes)
+	rollbackNodes, err := oldNodes.RestartCopy()
+	if err != nil {
+		return &reloadFatalError{err}
+	}
+	if err := (*v2core).Close(); err != nil {
+		return &reloadFatalError{err}
+	}
 	newCore := core.New(newConf)
-	// Reattach reload channel
 	newCore.ReloadCh = oldReloadCh
-	if err := newCore.Start(newNodes.NodeInfos); err != nil {
-		return err
+	activationErr := newCore.Start(newNodes.NodeInfos)
+	if activationErr == nil {
+		activationErr = newNodes.Start(newConf.NodeConfigs, newCore)
 	}
-
-	if err := newNodes.Start(newConf.NodeConfigs, newCore); err != nil {
-		return err
+	if activationErr != nil {
+		_ = newNodes.Close()
+		_ = newCore.Close()
+		rollbackCore := core.New(oldConf)
+		rollbackCore.ReloadCh = oldReloadCh
+		restoreErr := rollbackCore.Start(rollbackNodes.NodeInfos)
+		if restoreErr == nil {
+			restoreErr = rollbackNodes.Start(oldConf.NodeConfigs, rollbackCore)
+		}
+		*nodes, *v2core = rollbackNodes, rollbackCore
+		if restoreErr != nil {
+			return &reloadFatalError{errors.Join(activationErr, fmt.Errorf("restore previous core: %w", restoreErr))}
+		}
+		return fmt.Errorf("candidate activation failed; previous runtime restored: %w", activationErr)
 	}
-
-	*nodes = newNodes
-	*v2core = newCore
-
+	*nodes, *v2core = newNodes, newCore
+	applyLogConfig(newConf.LogConfig)
+	log.WithField("elapsed_ms", time.Since(switchStarted).Milliseconds()).Info("SNTP shared core configuration switched")
 	runtime.GC()
 	return nil
 }
