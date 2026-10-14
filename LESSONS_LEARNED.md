@@ -528,3 +528,12 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 验证：共享恢复包十轮 race；真实客户端/节点的 TLS/WSS、双 IP 2.76 MB 回传、生产 Dispatcher 目标只一次且计费无重复、换新证书和新旧连接、错 SNI、Ready 丢失及正式 V2Core.DelUsers 立即关闭逻辑流验证通过。core/api/node 常规回归与 Linux 二进制编译通过。旧 bbolt 1.3.2 在 Go1.26.2 race 的 checkptr 中崩溃；仅该依赖关闭 checkptr 后继续 node 并发检查，未为本任务升级它。
 - 后续/边界：原进程是活 socket 所有者；同密钥的独立进程不能恢复原 socket，重启也不能。地区实网、物理路由归属仍需发版灰度。临时测试已备份并在结束前清理，见 v2board docs/titan-v3-release.md 的命令与发布顺序。
 - 并发补查：窗口过期快照与新 wire 接入并发时，必须确认 finishIf 真正关闭后再退出收发循环；确定性调度测试先失败、修复后通过，双端源码同步。测试调度 hook 仅临时验证，未进入提交。
+
+## 2026-10-14：自研 V1/V2 托管证书后台预备
+
+- 症状：证书申请流程与节点启动耦合，无法在保留现有 V1/V2 TCP 服务的同时可靠预备 V3 证书。
+- 影响链路：后台独立作用域 → 节点配置/能力上报 → `Controller.Start` → `managedTLSManager` → 证书文件与同步状态。
+- 修复：上报 `managed_tls_native_prepare_v1`；V1/V2 托管模式即使 tls=0 也启动证书管理器，先启动原运行时，再后台签发/续期。证书变更只更新证书版本状态，不替换原生监听器；V3 的 TLS 证书阻塞门禁不变。
+- 验证：`GOEXPERIMENT=jsonv2 go test ./node ./api/v2board -run 'TestNativeCertBatch|TestManagedTLS' -count=1` 通过；临时用例覆盖 V1/V2/tls=0/tls=1、非托管及 V3 隔离、轮换不替换监听器、签发失败保持既有运行时；临时测试文件完成后删除。
+- 下次检查：能力是否由所有活跃实例上报、证书版本是否大于零、作用域同步覆盖率是否全覆盖；创建作用域不等于签发成功。
+- 发布约束：先更新节点二进制，再更新后台批量入口；客户端无需更新。线上整批签发由用户发版后再执行。关联：`node/controller.go`、`api/v2board/panel.go`、v2board `docs/titan-v3-release.md`。

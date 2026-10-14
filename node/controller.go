@@ -277,6 +277,15 @@ func (c *Controller) Start(x *core.V2Core) error {
 			node.Common.TlsSettings.CertificateScopeID,
 			node.Common.TlsSettings.PrimaryServerName(),
 		)
+		if c.preparesNativeManagedTLS() {
+			// V1/V2 do not consume TLS certificates. Keep serving native TCP
+			// while issuance, retries and renewals run independently.
+			if err := c.startRuntime(); err != nil {
+				return err
+			}
+			c.managedTLS.Start(context.Background(), c.activateManagedTLSRuntime)
+			return nil
+		}
 		prepareErr := c.managedTLS.Prepare(time.Now().UTC())
 		if prepareErr != nil && !errors.Is(prepareErr, ErrManagedTLSPending) {
 			return fmt.Errorf("prepare managed TLS certificate: %w", prepareErr)
@@ -305,9 +314,18 @@ func (c *Controller) Start(x *core.V2Core) error {
 
 func (c *Controller) usesManagedTLS() bool {
 	info := c.currentNodeInfo()
-	return info != nil && info.Security == panel.Tls &&
+	return info != nil && (info.Security == panel.Tls || c.preparesNativeManagedTLS()) &&
 		info.Common != nil && info.Common.CertInfo != nil &&
 		strings.EqualFold(strings.TrimSpace(info.Common.CertInfo.CertMode), "managed")
+}
+
+func (c *Controller) preparesNativeManagedTLS() bool {
+	info := c.currentNodeInfo()
+	if info == nil || info.Common == nil || info.Common.Protocol != "sntp-eclipse" {
+		return false
+	}
+	mode := strings.TrimSpace(info.Common.EncryptionSettings.Mode)
+	return mode == "" || mode == "sntp-eclipse-v1" || mode == "sntp-eclipse-v2"
 }
 
 func (c *Controller) activateManagedTLSRuntime() error {
@@ -323,6 +341,11 @@ func (c *Controller) activateManagedTLSRuntimeVersion(version uint64) error {
 	}
 	c.managedTLSActivationMu.Lock()
 	defer c.managedTLSActivationMu.Unlock()
+	if c.preparesNativeManagedTLS() {
+		// A new certificate does not alter a native V1/V2 listener.
+		c.managedTLSRuntimeVersion = version
+		return nil
+	}
 
 	if !c.runtime.Started() {
 		if err := c.startRuntime(); err != nil {
