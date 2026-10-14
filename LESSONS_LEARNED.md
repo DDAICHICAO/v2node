@@ -526,7 +526,7 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 修复：独立 resume key、challenge/epoch/进度 proof、原密文重传去重；Ready 丢失可持钥恢复，目标启动 sync.Once；新连接及恢复查授权，恢复 proof 验证后再按当前物理来源执行 limiter 策略，原连接仍在正式 LinkRegistry 内。证书原子替换，身份或其他配置变化拒绝热替换。
 - 资源/易错点：共享发送/接收各 64 MiB 有效 payload，而非每会话预留；默认 256 会话、64 待认证、物理 max_sessions+64。正常末尾响应直到读完仍计入额度；Abort/Close 释放。TLS 的 lazy PROXY 解析不能清除 net/http 设置的握手 deadline；Serve 退出必须清 ready 并关闭逻辑会话。
 - 验证：共享恢复包十轮 race；真实客户端/节点的 TLS/WSS、双 IP 2.76 MB 回传、生产 Dispatcher 目标只一次且计费无重复、换新证书和新旧连接、错 SNI、Ready 丢失及正式 V2Core.DelUsers 立即关闭逻辑流验证通过。core/api/node 常规回归与 Linux 二进制编译通过。旧 bbolt 1.3.2 在 Go1.26.2 race 的 checkptr 中崩溃；仅该依赖关闭 checkptr 后继续 node 并发检查，未为本任务升级它。
-- 后续/边界：原进程是活 socket 所有者；同密钥的独立进程不能恢复原 socket，重启也不能。地区实网、物理路由归属仍需发版灰度。临时测试已备份并在结束前清理，见 v2board docs/titan-v3-release.md 的命令与发布顺序。
+- 后续/边界：原进程是活 socket 所有者；同密钥的独立进程不能恢复原 socket，重启也不能。地区实网、物理路由归属仍需发版灰度。临时测试已备份并在结束前清理，见 v2board docs/titan-v3-retirement.md 的命令与发布顺序。
 - 并发补查：窗口过期快照与新 wire 接入并发时，必须确认 finishIf 真正关闭后再退出收发循环；确定性调度测试先失败、修复后通过，双端源码同步。测试调度 hook 仅临时验证，未进入提交。
 
 ## 2026-10-14：自研 V1/V2 托管证书后台预备
@@ -536,4 +536,12 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 修复：上报 `managed_tls_native_prepare_v1`；V1/V2 托管模式即使 tls=0 也启动证书管理器，先启动原运行时，再后台签发/续期。证书变更只更新证书版本状态，不替换原生监听器；V3 的 TLS 证书阻塞门禁不变。
 - 验证：`GOEXPERIMENT=jsonv2 go test ./node ./api/v2board -run 'TestNativeCertBatch|TestManagedTLS' -count=1` 通过；临时用例覆盖 V1/V2/tls=0/tls=1、非托管及 V3 隔离、轮换不替换监听器、签发失败保持既有运行时；临时测试文件完成后删除。
 - 下次检查：能力是否由所有活跃实例上报、证书版本是否大于零、作用域同步覆盖率是否全覆盖；创建作用域不等于签发成功。
-- 发布约束：先更新节点二进制，再更新后台批量入口；客户端无需更新。线上整批签发由用户发版后再执行。关联：`node/controller.go`、`api/v2board/panel.go`、v2board `docs/titan-v3-release.md`。
+- 发布约束：先更新节点二进制，再更新后台批量入口；客户端无需更新。线上整批签发由用户发版后再执行。关联：`node/controller.go`、`api/v2board/panel.go`、v2board `docs/titan-v3-retirement.md`。
+
+## 2026-10-14 - 旧 Titan 传输方案退役与下一代命名
+
+- 用户纠正：旧 V3 已全面下线，不再修补或保留为运行选项；后续以 V2 衍生的新方案仍命名 V3。本文更早的 TLS/WSS/恢复实现条目仅是已废弃历史，不可据此重新启用。
+- 清理链路：后台模式/批量编辑/下发 → v2node 模式解析、监听与运行上报 → 三端共用核心与 IPC 诊断。删除旧 TLS/WSS 与恢复源码、专用参数、能力声明、就绪判断和过期实施/发布指南；未知版本显式拒绝或过滤，避免误降级。
+- 保留范围：V1/V2 原生协议、并发帧读写锁与半关闭、网络变化后的入口状态重置、TTL0 缓存清理、通用能力查询、独立证书运维功能；保留其他未提交修改，不改生产或数据库。
+- 新设计边界：以 V2 为基线讨论握手/长度保护、抗探测行为和有界连接池；无抗封锁保证。产品名称可复用 V3，但新能力标识与线协议契约不能沿用旧值。新协议尚未实现。
+- 验证与下一步：本次轻量检查的完整结果见 v2board docs/titan-v3-retirement.md；新设计见 docs/superpowers/specs/2026-10-14-titan-v3-native-design.md。源码清理不等于包内二进制已替换，需按实际发布流程重打三端和节点产物；不以编译/单测替代真实网络验收。

@@ -6,7 +6,6 @@ import (
 )
 
 type NodeRuntimeStatus struct {
-	TitanV3Ready                         bool     `json:"titan_v3_ready"`
 	Hostname                             string   `json:"hostname,omitempty"`
 	MachineInstanceID                    string   `json:"machine_instance_id,omitempty"`
 	Interfaces                           []string `json:"interfaces"`

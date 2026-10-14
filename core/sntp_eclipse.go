@@ -24,7 +24,6 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
-	"github.com/wyx2685/v2node/common/sntpv3"
 	"github.com/wyx2685/v2node/limiter"
 	xbuf "github.com/xtls/xray-core/common/buf"
 	xlog "github.com/xtls/xray-core/common/log"
@@ -44,7 +43,6 @@ const (
 	sntpEclipseProtocol                  = "sntp-eclipse"
 	sntpEclipseModeV1                    = "sntp-eclipse-v1"
 	sntpEclipseModeV2                    = "sntp-eclipse-v2"
-	sntpEclipseModeV3                    = "sntp-eclipse-v3"
 	sntpEclipseVersionV1            byte = 1
 	sntpEclipseVersionV2            byte = 2
 	sntpEclipseCmdTCP               byte = 1
@@ -66,7 +64,6 @@ var (
 )
 
 type SntpEclipseServer struct {
-	v3                  *eclipseV3Runtime
 	tag                 string
 	nodeID              int
 	mode                string
@@ -97,7 +94,6 @@ type sntpEclipseHello struct {
 }
 
 type sntpEclipseSession struct {
-	v3            bool
 	conn          net.Conn
 	clientIP      string
 	hello         sntpEclipseHello
@@ -130,7 +126,6 @@ type sntpEclipseCipher struct {
 }
 
 type sntpEclipseHandshakeState struct {
-	resumeKey      [32]byte
 	hello          sntpEclipseHello
 	c2s            *sntpEclipseCipher
 	s2c            *sntpEclipseCipher
@@ -189,7 +184,7 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Inst
 	if err != nil {
 		return nil, err
 	}
-	server := &SntpEclipseServer{
+	return &SntpEclipseServer{
 		tag:                 tag,
 		nodeID:              nodeInfo.Id,
 		mode:                mode,
@@ -203,14 +198,7 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Inst
 		onlineRefresh:       sntpEclipseOnlineRefreshInterval(nodeInfo),
 		closed:              make(chan struct{}),
 		users:               make(map[string]int),
-	}
-	if mode == sntpEclipseModeV3 {
-		server.v3, err = newEclipseV3(server, nodeInfo)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return server, nil
+	}, nil
 }
 
 func (s *SntpEclipseServer) Start() error {
@@ -219,9 +207,6 @@ func (s *SntpEclipseServer) Start() error {
 		return err
 	}
 	s.listener = ln
-	if s.v3 != nil {
-		return s.v3.start(ln)
-	}
 	go s.acceptLoop()
 	log.WithFields(log.Fields{
 		"tag":                   s.tag,
@@ -237,9 +222,6 @@ func (s *SntpEclipseServer) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
 		close(s.closed)
-		if s.v3 != nil {
-			s.v3.close()
-		}
 		if s.listener != nil {
 			err = s.listener.Close()
 		}
@@ -309,11 +291,6 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	s.handleAuthenticatedConn(conn, clientIP, func() {})
-}
-
-func (s *SntpEclipseServer) handleAuthenticatedConn(conn net.Conn, clientIP string, release func()) {
-	defer release()
 	handshake, err := s.readClientHello(conn)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -396,12 +373,6 @@ func (s *SntpEclipseServer) handleAuthenticatedConn(conn net.Conn, clientIP stri
 		v2:            handshake.v2,
 		onlineRefresh: s.onlineRefresh,
 	}
-	if s.v3 != nil {
-		if err := s.v3.newSession(session, handshake.resumeKey, release); err != nil {
-			_ = conn.Close()
-		}
-		return
-	}
 	switch hello.Command {
 	case sntpEclipseCmdTCP:
 		session.serveTCP()
@@ -420,7 +391,7 @@ func (s *SntpEclipseServer) handleAuthenticatedConn(conn net.Conn, clientIP stri
 }
 
 func (s *SntpEclipseServer) readClientHello(conn net.Conn) (*sntpEclipseHandshakeState, error) {
-	if s.mode == sntpEclipseModeV2 || s.mode == sntpEclipseModeV3 {
+	if s.mode == sntpEclipseModeV2 {
 		return s.readClientHelloV2(conn)
 	}
 	return s.readClientHelloV1(conn)
@@ -520,12 +491,7 @@ func (s *SntpEclipseServer) readClientHelloV2(conn net.Conn) (*sntpEclipseHandsh
 	if err != nil {
 		return nil, err
 	}
-	key, err := sntpv3.DeriveKey(authSecret, fsSecret, header[32:], transcript)
-	if err != nil {
-		return nil, err
-	}
 	return &sntpEclipseHandshakeState{
-		resumeKey:      key,
 		hello:          hello,
 		c2s:            c2s,
 		s2c:            s2c,
@@ -622,11 +588,7 @@ func (s *sntpEclipseSession) serveUDP() {
 		if payload.IsEmpty() {
 			return
 		}
-		frame := encodeSntpEclipsePacket(source.NetAddr(), payload.Bytes())
-		if s.v3 {
-			frame = sntpv3.StampDatagram(frame, 0)
-		}
-		if err := s.writeFrame(s.s2c, frame); err != nil {
+		if err := s.writeFrame(s.s2c, encodeSntpEclipsePacket(source.NetAddr(), payload.Bytes())); err != nil {
 			log.WithFields(log.Fields{
 				"tag":       s.tag,
 				"uid":       s.uid,
@@ -643,13 +605,6 @@ func (s *sntpEclipseSession) serveUDP() {
 		frame, err := s.readFrame(s.c2s)
 		if err != nil {
 			return
-		}
-		if s.v3 {
-			var valid bool
-			frame, valid = sntpv3.UnstampDatagram(frame, 0)
-			if !valid {
-				continue
-			}
 		}
 		target, payload, err := decodeSntpEclipsePacket(frame)
 		if err != nil || len(payload) == 0 {
@@ -1053,8 +1008,6 @@ func normalizeSntpEclipseMode(mode string) string {
 		return sntpEclipseModeV1
 	case sntpEclipseModeV2:
 		return sntpEclipseModeV2
-	case sntpEclipseModeV3:
-		return sntpEclipseModeV3
 	default:
 		return ""
 	}

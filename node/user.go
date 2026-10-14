@@ -396,9 +396,6 @@ func (c *Controller) appendTLSRuntimeStatus(status *panel.NodeRuntimeStatus) {
 		return
 	}
 	info := c.currentNodeInfo()
-	if info != nil && info.Common != nil {
-		status.TitanV3Ready = c.runtime.Started() && c.server.TitanV3Ready(c.tag) && info.Common.Protocol == "sntp-eclipse" && info.Common.EncryptionSettings.Mode == "sntp-eclipse-v3"
-	}
 	if info == nil || info.Security != panel.Tls || info.Common == nil || info.Common.CertInfo == nil {
 		return
 	}
