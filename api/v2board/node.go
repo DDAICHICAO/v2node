@@ -181,11 +181,15 @@ type CertInfo struct {
 }
 
 type EncSettings struct {
-	Mode          string `json:"mode"`
-	Ticket        string `json:"ticket"`
-	ServerPadding string `json:"server_padding"`
-	PrivateKey    string `json:"private_key"`
-	PublicKey     string `json:"public_key"`
+	NativeMaxHandshakes      int    `json:"native_max_handshakes"`
+	NativeMaxConnections     int    `json:"native_max_connections"`
+	NativeMaxUserConnections int    `json:"native_max_user_connections"`
+	NativeReplayCapacity     int    `json:"native_replay_capacity"`
+	Mode                     string `json:"mode"`
+	Ticket                   string `json:"ticket"`
+	ServerPadding            string `json:"server_padding"`
+	PrivateKey               string `json:"private_key"`
+	PublicKey                string `json:"public_key"`
 }
 
 func (e *EncSettings) UnmarshalJSON(data []byte) error {

@@ -545,3 +545,12 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 保留范围：V1/V2 原生协议、并发帧读写锁与半关闭、网络变化后的入口状态重置、TTL0 缓存清理、通用能力查询、独立证书运维功能；保留其他未提交修改，不改生产或数据库。
 - 新设计边界：以 V2 为基线讨论握手/长度保护、抗探测行为和有界连接池；无抗封锁保证。产品名称可复用 V3，但新能力标识与线协议契约不能沿用旧值。新协议尚未实现。
 - 验证与下一步：本次轻量检查的完整结果见 v2board docs/titan-v3-retirement.md；新设计见 docs/superpowers/specs/2026-10-14-titan-v3-native-design.md。源码清理不等于包内二进制已替换，需按实际发布流程重打三端和节点产物；不以编译/单测替代真实网络验收。
+
+
+## 2026-10-14 - Titan native-1 双协议入口
+
+- 目标/链路：后台 V3 配置 → core/sntp_eclipse_native.go 同端口 V2/V3 → 原授权/limiter/Dispatcher。旧 V2 首包、密钥和缓存配置保留。
+- 实现：common/titannative/wire.go 与客户端 transport 同文件；长度/内容 AEAD 分离，50 字节无 read-ahead 分流，授权后防重放，待认证/活动/用户与进程预算分离，失败静默关闭。runtime 来自真实监听，含模式/公钥哈希/端口及聚合计数。
+- 修正：混合入口先授权再写重放缓存；20 分钟覆盖允许未来 10 分钟 hello，缓存满不逐请求全量扫描；认证完成释放握手配额。PROXY 包装保留 CloseWrite。新入口无逐会话身份/目标诊断日志，Dispatcher 运维策略保留。
+- 验证：两端 V1/V2/V3 TCP/UDP 回环及 1024 条混合持有 TCP、2 UDP/2 拒绝，预算回零；原生记录异常/节点预算/无效探测测试通过。Go 相关包检查；race 因本机无 CGO/C 编译器未完成。
+- 边界/下一处：后台 docs/titan-v3-native-wire.md 与 docs/titan-v3-native-release.md；未部署、未实际出站/计费/运营商验收，不承诺抗封锁或进程重启续接。临时测试移出仓库。

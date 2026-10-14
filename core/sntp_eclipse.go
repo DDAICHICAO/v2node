@@ -24,6 +24,7 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
+	"github.com/wyx2685/v2node/common/titannative"
 	"github.com/wyx2685/v2node/limiter"
 	xbuf "github.com/xtls/xray-core/common/buf"
 	xlog "github.com/xtls/xray-core/common/log"
@@ -64,6 +65,7 @@ var (
 )
 
 type SntpEclipseServer struct {
+	nativeBudget        *nativeIngressBudget
 	tag                 string
 	nodeID              int
 	mode                string
@@ -94,6 +96,7 @@ type sntpEclipseHello struct {
 }
 
 type sntpEclipseSession struct {
+	nativeMetrics *nativeIngressBudget
 	conn          net.Conn
 	clientIP      string
 	hello         sntpEclipseHello
@@ -120,12 +123,14 @@ type sntpEclipseFrameWriter struct {
 }
 
 type sntpEclipseCipher struct {
+	native  *titannative.Cipher
 	aead    cipherAEAD
 	counter uint64
 	mu      sync.Mutex
 }
 
 type sntpEclipseHandshakeState struct {
+	native         *titannative.ServerHandshake
 	hello          sntpEclipseHello
 	c2s            *sntpEclipseCipher
 	s2c            *sntpEclipseCipher
@@ -140,6 +145,7 @@ type sntpEclipseReplayCache struct {
 	seen        map[[32]byte]time.Time
 	insertCount int
 	lastCleanup time.Time
+	capacity    int
 }
 
 type cipherAEAD interface {
@@ -184,7 +190,13 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Inst
 	if err != nil {
 		return nil, err
 	}
+	replay := newSntpEclipseReplayCache(sntpEclipseHandshakeTTL)
+	if mode == titannative.Mode {
+		replay.ttl = 2 * sntpEclipseHandshakeTTL
+		replay.capacity = nativeBound(nodeInfo.Common.EncryptionSettings.NativeReplayCapacity, 1048576, 1024, 4194304)
+	}
 	return &SntpEclipseServer{
+		nativeBudget:        newNativeIngressBudget(nodeInfo.Common.EncryptionSettings),
 		tag:                 tag,
 		nodeID:              nodeInfo.Id,
 		mode:                mode,
@@ -194,7 +206,7 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Inst
 		xray:                xray,
 		dispatcher:          dispatcher,
 		counter:             counter.NewTrafficCounter(),
-		replay:              newSntpEclipseReplayCache(sntpEclipseHandshakeTTL),
+		replay:              replay,
 		onlineRefresh:       sntpEclipseOnlineRefreshInterval(nodeInfo),
 		closed:              make(chan struct{}),
 		users:               make(map[string]int),
@@ -207,6 +219,7 @@ func (s *SntpEclipseServer) Start() error {
 		return err
 	}
 	s.listener = ln
+	titanRuntimeServers.Store(s.tag, s)
 	go s.acceptLoop()
 	log.WithFields(log.Fields{
 		"tag":                   s.tag,
@@ -222,6 +235,7 @@ func (s *SntpEclipseServer) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		titanRuntimeServers.CompareAndDelete(s.tag, s)
 		if s.listener != nil {
 			err = s.listener.Close()
 		}
@@ -275,7 +289,15 @@ func (s *SntpEclipseServer) acceptLoop() {
 				continue
 			}
 		}
-		go s.handleConn(conn)
+		if s.mode == titannative.Mode {
+			if !s.nativeBudget.acquire() {
+				_ = conn.Close()
+				continue
+			}
+			go s.handleCompatibleConn(conn)
+		} else {
+			go s.handleConn(conn)
+		}
 	}
 }
 
@@ -391,6 +413,9 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 }
 
 func (s *SntpEclipseServer) readClientHello(conn net.Conn) (*sntpEclipseHandshakeState, error) {
+	if s.mode == titannative.Mode {
+		return s.readCompatibleHello(conn)
+	}
 	if s.mode == sntpEclipseModeV2 {
 		return s.readClientHelloV2(conn)
 	}
@@ -474,7 +499,7 @@ func (s *SntpEclipseServer) readClientHelloV2(conn net.Conn) (*sntpEclipseHandsh
 	if math.Abs(time.Since(time.Unix(hello.Timestamp, 0)).Seconds()) > sntpEclipseHandshakeTTL.Seconds() {
 		return nil, errors.New("expired hello")
 	}
-	if s.replay != nil && !s.replay.Mark(hello.SessionID, time.Now()) {
+	if s.mode != titannative.Mode && s.replay != nil && !s.replay.Mark(hello.SessionID, time.Now()) {
 		return nil, errors.New("replayed hello")
 	}
 	serverEphemeral, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -502,6 +527,17 @@ func (s *SntpEclipseServer) readClientHelloV2(conn net.Conn) (*sntpEclipseHandsh
 }
 
 func (s *SntpEclipseServer) writeServerReply(conn net.Conn, state *sntpEclipseHandshakeState, ok bool) error {
+	if state != nil && state.native != nil {
+		if !ok {
+			return titannative.ErrInvalid
+		}
+		rx, tx, err := state.native.Reply(conn)
+		if err == nil {
+			state.c2s = &sntpEclipseCipher{native: rx}
+			state.s2c = &sntpEclipseCipher{native: tx}
+		}
+		return err
+	}
 	if state != nil && state.v2 {
 		return s.writeServerReplyV2(conn, state, ok)
 	}
@@ -552,25 +588,31 @@ func (s *sntpEclipseSession) serveTCP() {
 		Status: xlog.AccessAccepted,
 		Email:  s.userTag,
 	})
-	log.WithFields(log.Fields{
-		"tag":       s.tag,
-		"uid":       s.uid,
-		"target":    destination.NetAddr(),
-		"client_ip": s.clientIP,
-	}).Info("SNTP Eclipse TCP session accepted")
+	if s.nativeMetrics == nil {
+		log.WithFields(log.Fields{
+			"tag":       s.tag,
+			"uid":       s.uid,
+			"target":    destination.NetAddr(),
+			"client_ip": s.clientIP,
+		}).Info("SNTP Eclipse TCP session accepted")
+	}
 
 	err := s.dispatcher.DispatchLink(ctx, destination, &transport.Link{
 		Reader: &sntpEclipseFrameReader{session: s},
 		Writer: &sntpEclipseFrameWriter{session: s},
 	})
 	if err != nil {
-		log.WithFields(log.Fields{
-			"tag":       s.tag,
-			"uid":       s.uid,
-			"target":    destination.NetAddr(),
-			"client_ip": s.clientIP,
-			"err":       err,
-		}).Warn("SNTP Eclipse TCP dispatch failed")
+		if s.nativeMetrics != nil {
+			s.nativeMetrics.dispatchFailed.Add(1)
+		} else {
+			log.WithFields(log.Fields{
+				"tag":       s.tag,
+				"uid":       s.uid,
+				"target":    destination.NetAddr(),
+				"client_ip": s.clientIP,
+				"err":       err,
+			}).Warn("SNTP Eclipse TCP dispatch failed")
+		}
 	}
 }
 
@@ -589,13 +631,17 @@ func (s *sntpEclipseSession) serveUDP() {
 			return
 		}
 		if err := s.writeFrame(s.s2c, encodeSntpEclipsePacket(source.NetAddr(), payload.Bytes())); err != nil {
-			log.WithFields(log.Fields{
-				"tag":       s.tag,
-				"uid":       s.uid,
-				"target":    source.NetAddr(),
-				"client_ip": s.clientIP,
-				"err":       err,
-			}).Warn("SNTP Eclipse UDP reply failed")
+			if s.nativeMetrics != nil {
+				s.nativeMetrics.dispatchFailed.Add(1)
+			} else {
+				log.WithFields(log.Fields{
+					"tag":       s.tag,
+					"uid":       s.uid,
+					"target":    source.NetAddr(),
+					"client_ip": s.clientIP,
+					"err":       err,
+				}).Warn("SNTP Eclipse UDP reply failed")
+			}
 			cancel()
 		}
 	})
@@ -727,6 +773,13 @@ func (w *sntpEclipseFrameWriter) Close() error {
 }
 
 func (s *sntpEclipseSession) readFrame(c *sntpEclipseCipher) ([]byte, error) {
+	if c.native != nil {
+		p, err := c.native.Read(s.conn, nil, titannative.MaxPayload)
+		if err == nil {
+			s.markOnline()
+		}
+		return p, err
+	}
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(s.conn, lenBuf[:]); err != nil {
 		return nil, err
@@ -803,6 +856,9 @@ func sntpEclipseIntervalSeconds(raw any) (time.Duration, bool) {
 func (s *sntpEclipseSession) writeFrame(c *sntpEclipseCipher, plain []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if c.native != nil {
+		return c.native.Write(s.conn, plain, nil)
+	}
 	if s.v2 {
 		wrapped, err := encodeSntpEclipseV2Frame(plain)
 		if err != nil {
@@ -824,7 +880,7 @@ func (s *sntpEclipseSession) writeFrame(c *sntpEclipseCipher, plain []byte) erro
 }
 
 func (s *sntpEclipseSession) maxFramePayload() int {
-	if s.v2 {
+	if s.v2 || s.hello.Version == 3 {
 		return sntpEclipseMaxFramePlain - 2
 	}
 	return sntpEclipseMaxFramePlain
@@ -929,7 +985,7 @@ func decodeSntpEclipseHello(plain []byte, wantVersion byte) (sntpEclipseHello, e
 	offset := 10
 	cmd := p[1]
 	var sessionID [16]byte
-	if version == sntpEclipseVersionV2 {
+	if version == sntpEclipseVersionV2 || version == 3 {
 		if len(p) < offset+16+3 {
 			return sntpEclipseHello{}, errors.New("invalid session id")
 		}
@@ -1008,6 +1064,8 @@ func normalizeSntpEclipseMode(mode string) string {
 		return sntpEclipseModeV1
 	case sntpEclipseModeV2:
 		return sntpEclipseModeV2
+	case titannative.Mode:
+		return titannative.Mode
 	default:
 		return ""
 	}
@@ -1087,6 +1145,23 @@ func (c *sntpEclipseReplayCache) Mark(sessionID [16]byte, now time.Time) bool {
 	defer c.mu.Unlock()
 	if expiresAt, ok := c.seen[key]; ok && now.Before(expiresAt) {
 		return false
+	}
+	if c.capacity > 0 {
+		// Native caches are bounded; do not scan a full cache for every rejected
+		// handshake or every 256 inserts under high connection churn.
+		if now.Sub(c.lastCleanup) > time.Minute {
+			for k, expiry := range c.seen {
+				if !now.Before(expiry) {
+					delete(c.seen, k)
+				}
+			}
+			c.lastCleanup = now
+		}
+		if len(c.seen) >= c.capacity {
+			return false
+		}
+		c.seen[key] = now.Add(c.ttl)
+		return true
 	}
 	c.seen[key] = now.Add(c.ttl)
 	c.insertCount++
@@ -1261,4 +1336,11 @@ func isSntpEclipseNode(info *panel.NodeInfo) bool {
 
 func isSntpEclipseProtocol(protocol string) bool {
 	return strings.EqualFold(strings.TrimSpace(protocol), sntpEclipseProtocol)
+}
+
+func (c *sntpEclipseBufferedConn) CloseWrite() error {
+	if w, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return w.CloseWrite()
+	}
+	return c.Conn.Close()
 }

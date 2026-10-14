@@ -11,6 +11,7 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/accessaudit"
 	"github.com/wyx2685/v2node/common/instance"
+	"github.com/wyx2685/v2node/core"
 )
 
 const nodeRuntimeStatusReportTimeout = 2 * time.Second
@@ -256,6 +257,7 @@ func (c *Controller) reportNodeRuntimeStatus(ctx context.Context) error {
 	c.appendAccessAuditRuntimeStatus(&status)
 	c.appendManagedTLSRuntimeStatus(&status)
 	c.appendTLSRuntimeStatus(&status)
+	status.TitanNative = core.TitanRuntimeStatus(c.tag)
 	if err := c.apiClient.ReportNodeRuntimeStatus(reportCtx, status); err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -282,6 +284,7 @@ func (c *Controller) reportManagedTLSRuntimeStatus(ctx context.Context) error {
 	}
 	c.appendManagedTLSRuntimeStatus(&status)
 	c.appendTLSRuntimeStatus(&status)
+	status.TitanNative = core.TitanRuntimeStatus(c.tag)
 	if err := c.apiClient.ReportNodeRuntimeStatus(reportCtx, status); err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Debug("Report managed TLS runtime status failed")
 		return err

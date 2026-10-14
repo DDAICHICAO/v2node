@@ -6,6 +6,8 @@ import (
 )
 
 type NodeRuntimeStatus struct {
+	TitanNative map[string]any `json:"titan_native"`
+
 	Hostname                             string   `json:"hostname,omitempty"`
 	MachineInstanceID                    string   `json:"machine_instance_id,omitempty"`
 	Interfaces                           []string `json:"interfaces"`
