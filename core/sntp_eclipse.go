@@ -681,6 +681,7 @@ func (s *sntpEclipseSession) dispatchContext(destination xnet.Destination) conte
 	}
 	ctx := session.ContextWithInbound(baseCtx, &session.Inbound{
 		Source: source,
+		Local:  s.dispatchLocal(),
 		Tag:    s.tag,
 		Name:   sntpEclipseProtocol,
 		User: &protocol.MemoryUser{
@@ -700,6 +701,16 @@ func (s *sntpEclipseSession) dispatchContext(destination xnet.Destination) conte
 			},
 		},
 	})
+}
+
+func (s *sntpEclipseSession) dispatchLocal() xnet.Destination {
+	if s.conn != nil {
+		if addr, ok := s.conn.LocalAddr().(*net.TCPAddr); ok && addr != nil && addr.IP.To16() != nil && !addr.IP.IsUnspecified() {
+			// The outer connection is TCP even when it carries UDP frames.
+			return xnet.TCPDestination(xnet.IPAddress(addr.IP), xnet.Port(addr.Port))
+		}
+	}
+	return xnet.Destination{}
 }
 
 func (s *sntpEclipseSession) dispatchSource(network xnet.Network) xnet.Destination {
@@ -1191,11 +1202,19 @@ func decodeURLBase64(value string) ([]byte, error) {
 
 type sntpEclipseBufferedConn struct {
 	net.Conn
-	reader *bufio.Reader
+	reader    *bufio.Reader
+	localAddr *net.TCPAddr
 }
 
 func (c *sntpEclipseBufferedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
+}
+
+func (c *sntpEclipseBufferedConn) LocalAddr() net.Addr {
+	if c.localAddr != nil {
+		return c.localAddr
+	}
+	return c.Conn.LocalAddr()
 }
 
 func sntpEclipseAcceptProxyProtocol(nodeInfo *panel.NodeInfo) (bool, error) {
@@ -1215,107 +1234,150 @@ func (s *SntpEclipseServer) prepareConn(conn net.Conn) (net.Conn, string, error)
 		return conn, clientIP, nil
 	}
 	reader := bufio.NewReader(conn)
-	proxyIP, err := readProxyProtocolClientIP(reader)
+	proxyIP, localAddr, err := readProxyProtocolAddresses(reader)
 	if err != nil {
 		return conn, clientIP, err
 	}
 	if proxyIP != "" {
 		clientIP = proxyIP
 	}
-	return &sntpEclipseBufferedConn{Conn: conn, reader: reader}, clientIP, nil
+	// As with source IP, forwarded destination metadata is accepted only when
+	// acceptProxyProtocol is explicitly enabled for this listener.
+	if localAddr != nil && localAddr.IP.IsUnspecified() {
+		localAddr = nil
+	}
+	return &sntpEclipseBufferedConn{Conn: conn, reader: reader, localAddr: localAddr}, clientIP, nil
 }
 
 func readProxyProtocolClientIP(reader *bufio.Reader) (string, error) {
+	ip, _, err := readProxyProtocolAddresses(reader)
+	return ip, err
+}
+
+func readProxyProtocolAddresses(reader *bufio.Reader) (string, *net.TCPAddr, error) {
 	first, err := reader.Peek(1)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	switch first[0] {
 	case 'P':
 		prefix, err := reader.Peek(6)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if string(prefix) != "PROXY " {
-			return "", nil
+			return "", nil, nil
 		}
-		return readProxyProtocolV1ClientIP(reader)
+		return readProxyProtocolV1Addresses(reader)
 	case '\r':
 		header, err := reader.Peek(12)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if string(header) != "\r\n\r\n\x00\r\nQUIT\n" {
-			return "", nil
+			return "", nil, nil
 		}
-		return readProxyProtocolV2ClientIP(reader)
+		return readProxyProtocolV2Addresses(reader)
 	default:
-		return "", nil
+		return "", nil, nil
 	}
 }
 
 func readProxyProtocolV1ClientIP(reader *bufio.Reader) (string, error) {
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
+	ip, _, err := readProxyProtocolV1Addresses(reader)
+	return ip, err
+}
+
+func readProxyProtocolV1Addresses(reader *bufio.Reader) (string, *net.TCPAddr, error) {
+	// Bound the read before allocating an arbitrarily long malformed header.
+	lineBytes := make([]byte, 0, 108)
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return "", nil, err
+		}
+		lineBytes = append(lineBytes, b)
+		if b == '\n' {
+			break
+		}
+		if len(lineBytes) == 108 {
+			return "", nil, errors.New("proxy protocol v1 header too long")
+		}
 	}
-	if len(line) > 108 {
-		return "", errors.New("proxy protocol v1 header too long")
+	line := string(lineBytes)
+	if !strings.HasSuffix(line, "\r\n") {
+		return "", nil, errors.New("invalid proxy protocol v1 line ending")
 	}
-	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	line = strings.TrimSuffix(line, "\r\n")
 	fields := strings.Fields(line)
 	if len(fields) < 2 || fields[0] != "PROXY" {
-		return "", errors.New("invalid proxy protocol v1 header")
+		return "", nil, errors.New("invalid proxy protocol v1 header")
 	}
 	if fields[1] == "UNKNOWN" {
-		return "", nil
+		return "", nil, nil
 	}
-	if len(fields) < 6 {
-		return "", errors.New("invalid proxy protocol v1 address fields")
+	if len(fields) != 6 || (fields[1] != "TCP4" && fields[1] != "TCP6") {
+		return "", nil, errors.New("invalid proxy protocol v1 address fields")
 	}
 	sourceIP := net.ParseIP(fields[2])
-	if sourceIP == nil {
-		return "", errors.New("invalid proxy protocol v1 source ip")
+	destinationIP := net.ParseIP(fields[3])
+	if sourceIP == nil || destinationIP == nil ||
+		(fields[1] == "TCP4" && (sourceIP.To4() == nil || destinationIP.To4() == nil)) ||
+		(fields[1] == "TCP6" && (!strings.Contains(fields[2], ":") || !strings.Contains(fields[3], ":"))) {
+		return "", nil, errors.New("invalid proxy protocol v1 ip addresses")
 	}
-	return strings.TrimPrefix(sourceIP.String(), "::ffff:"), nil
+	if _, err := strconv.ParseUint(fields[4], 10, 16); err != nil {
+		return "", nil, errors.New("invalid proxy protocol v1 source port")
+	}
+	port, err := strconv.ParseUint(fields[5], 10, 16)
+	if err != nil {
+		return "", nil, errors.New("invalid proxy protocol v1 destination port")
+	}
+	return sourceIP.String(), &net.TCPAddr{IP: destinationIP, Port: int(port)}, nil
 }
 
 func readProxyProtocolV2ClientIP(reader *bufio.Reader) (string, error) {
+	ip, _, err := readProxyProtocolV2Addresses(reader)
+	return ip, err
+}
+
+func readProxyProtocolV2Addresses(reader *bufio.Reader) (string, *net.TCPAddr, error) {
 	header := make([]byte, 16)
 	if _, err := io.ReadFull(reader, header); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if string(header[:12]) != "\r\n\r\n\x00\r\nQUIT\n" {
-		return "", errors.New("invalid proxy protocol v2 signature")
+		return "", nil, errors.New("invalid proxy protocol v2 signature")
 	}
 	if header[12]>>4 != 2 {
-		return "", errors.New("invalid proxy protocol v2 version")
+		return "", nil, errors.New("invalid proxy protocol v2 version")
 	}
 	command := header[12] & 0x0f
-	if command == 0 {
-		return "", nil
-	}
-	if command != 1 {
-		return "", errors.New("invalid proxy protocol v2 command")
+	if command != 0 && command != 1 {
+		return "", nil, errors.New("invalid proxy protocol v2 command")
 	}
 	addressLen := int(binary.BigEndian.Uint16(header[14:16]))
 	body := make([]byte, addressLen)
 	if _, err := io.ReadFull(reader, body); err != nil {
-		return "", err
+		return "", nil, err
+	}
+	// LOCAL still has a length-delimited body; consume it before the hello.
+	if command == 0 {
+		return "", nil, nil
 	}
 	switch header[13] {
 	case 0x11: // TCP over IPv4.
 		if len(body) < 12 {
-			return "", errors.New("short proxy protocol v2 ipv4 address")
+			return "", nil, errors.New("short proxy protocol v2 ipv4 address")
 		}
-		return net.IP(body[:4]).String(), nil
+		return net.IP(body[:4]).String(), &net.TCPAddr{IP: net.IP(body[4:8]), Port: int(binary.BigEndian.Uint16(body[10:12]))}, nil
 	case 0x21: // TCP over IPv6.
 		if len(body) < 36 {
-			return "", errors.New("short proxy protocol v2 ipv6 address")
+			return "", nil, errors.New("short proxy protocol v2 ipv6 address")
 		}
-		return strings.TrimPrefix(net.IP(body[:16]).String(), "::ffff:"), nil
+		return net.IP(body[:16]).String(), &net.TCPAddr{IP: net.IP(body[16:32]), Port: int(binary.BigEndian.Uint16(body[34:36]))}, nil
 	default:
-		return "", nil
+		return "", nil, nil
 	}
 }
 

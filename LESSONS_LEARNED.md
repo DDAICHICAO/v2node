@@ -554,3 +554,13 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 修正：混合入口先授权再写重放缓存；20 分钟覆盖允许未来 10 分钟 hello，缓存满不逐请求全量扫描；认证完成释放握手配额。PROXY 包装保留 CloseWrite。新入口无逐会话身份/目标诊断日志，Dispatcher 运维策略保留。
 - 验证：两端 V1/V2/V3 TCP/UDP 回环及 1024 条混合持有 TCP、2 UDP/2 拒绝，预算回零；原生记录异常/节点预算/无效探测测试通过。Go 相关包检查；race 因本机无 CGO/C 编译器未完成。
 - 边界/下一处：后台 docs/titan-v3-native-wire.md 与 docs/titan-v3-native-release.md；未部署、未实际出站/计费/运营商验收，不承诺抗封锁或进程重启续接。临时测试移出仓库。
+
+## 2026-10-14：自研协议入口地址丢失与 PROXY 目的地址传播
+
+- 症状：线上自研访问记录的 entry_ip 为空，在线心跳也缺少入口信息；不能以字段和接口存在代替实际采集验证。
+- 影响链/根因：V1/V2/native-1 共用 sntpEclipseSession.dispatchContext，但 session.Inbound 漏设 Local；PROXY v1/v2 解析只保留来源 IP。dispatcher 审计、FlowTraffic 和 limiter 在线入口均依赖 Local。
+- 修复：从真实 TCP 连接设置 Local；仅在 acceptProxyProtocol 启用且首部提供有效目的地址时使用该地址。UNKNOWN、LOCAL、无首部及 unspecified 目的地址回退真实 socket；无法确定的本地地址保持空。UDP 业务仍携带真实外层 TCP 的入口。来源 IP 与目标访问地址保持各自语义，不用 machine_ip 猜测回填。
+- 相邻修复：PROXY v2 LOCAL 必须消费完整长度字段指定的数据，避免污染后续握手；v1 读取限制 108 字节，并校验地址族、目的 IP 和端口。共享来源解析入口继续供 Mieru 使用，既有回归通过。
+- 验证：临时回归先复现直连/转发 Local 缺失和 LOCAL 残留，再验证 PROXY v1/v2、IPv4/IPv6/mapped、TLV、禁用转发、缺失/非法/截断首部及 TCP/UDP 上下文。GOEXPERIMENT=jsonv2 go test ./core ./core/app/dispatcher ./common/accessaudit ./limiter ./api/v2board ./node -count=1 -timeout 60s 六包通过；git diff --check 通过。临时用例移至仓库外，不提交新测试文件。
+- 下一处/边界：需重编并发布节点后，以新连接 entry_ip → aliveDevices → 后台实时入口、审计 → ingest → ClickHouse 历史逐段验收；本次未部署、未改 SQL，也未处理同机 Trojan 空字段的独立原因。“客户端上报入口”由 /user/app/entry/report 独立提供，不由本修复填充。
+- 相关：core/sntp_eclipse.go、core/sntp_eclipse_native.go、core/app/dispatcher/default.go、core/app/dispatcher/flow_traffic.go、limiter/limiter.go、api/v2board/user.go；面板 docs/uniproxy-node-troubleshooting-runbook.md 的同日入口 IP 排查条目。修复与本条同一提交，可用 git log -- core/sntp_eclipse.go 定位。
