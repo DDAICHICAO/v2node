@@ -65,6 +65,22 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 }
 
 func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
+	return c.monitorNodeConfig(ctx, true)
+}
+
+func (c *Controller) monitorNodeConfig(ctx context.Context, periodic bool) (err error) {
+	// Serialize event hints with the legacy poll; cancellation must also work while waiting.
+	for !c.configMonitorMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	defer c.configMonitorMu.Unlock()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if c.hasPendingNodeInfo() {
 		if err := c.applyPendingNodeInfo(); err != nil {
 			log.WithFields(log.Fields{
@@ -73,7 +89,11 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 			}).Error("Apply pending node configuration failed")
 			return err
 		}
-		return nil
+		if periodic {
+			return nil
+		}
+		// A realtime hint may refer to a newer version than the pending config.
+		// Fetch it before considering this notification consumed.
 	}
 
 	// get node info
@@ -96,8 +116,10 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
-	c.checkUpdateTask(ctx)
-	c.checkStreamUnlockTask(ctx)
+	if periodic {
+		c.checkUpdateTask(ctx)
+		c.checkStreamUnlockTask(ctx)
+	}
 	c.recordPanelSuccess("config")
 	return nil
 }

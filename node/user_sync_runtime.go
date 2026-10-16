@@ -182,11 +182,24 @@ func (r *userSyncRuntime) serveConnection(
 	conn userSyncWakeupConnection,
 ) (reachedPush bool, serveErr error) {
 	serveCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	policies := make(chan *panel.UserSyncWakeupMessage, 1)
+	realtimeDone := make(chan struct{})
+	go func() {
+		defer close(realtimeDone)
+		r.serveRealtime(serveCtx, conn, policies)
+	}()
+	readerDone := make(chan struct{})
+	defer func() {
+		cancel()
+		_ = conn.Close()
+		<-readerDone
+		<-realtimeDone
+	}()
 
-	messages := make(chan *panel.UserSyncWakeupMessage, 8)
+	messages := make(chan *panel.UserSyncWakeupMessage, 1)
 	readErrors := make(chan error, 1)
 	go func() {
+		defer close(readerDone)
 		for {
 			readTimeout := time.Duration(r.config.HeartbeatSeconds*3) * time.Second
 			if readTimeout < 30*time.Second {
@@ -196,16 +209,39 @@ func (r *userSyncRuntime) serveConnection(
 			message, err := conn.ReadMessage(readCtx)
 			readCancel()
 			if err != nil {
-				select {
-				case readErrors <- err:
-				case <-serveCtx.Done():
-				}
+				readErrors <- err
+				cancel()
 				return
 			}
+			if message.Type == "ping" {
+				// Heartbeats must remain responsive during slow HTTP sync/apply operations.
+				if err := conn.SendPong(r.now().Unix()); err != nil {
+					readErrors <- err
+					cancel()
+					return
+				}
+				continue
+			}
+			if message.Type == "node_realtime_policy" {
+				select {
+				case <-policies:
+				default:
+				}
+				select {
+				case policies <- message:
+				case <-serveCtx.Done():
+					return
+				}
+				continue
+			}
+			// Record every revision before coalescing the wake signal, so a full channel
+			// cannot stall heartbeats or lose the highest outstanding revision.
+			r.enqueueRevision(message.Revision)
 			select {
 			case messages <- message:
 			case <-serveCtx.Done():
 				return
+			default:
 			}
 		}
 	}()
@@ -232,9 +268,14 @@ func (r *userSyncRuntime) serveConnection(
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-serveCtx.Done():
 			_ = conn.Close()
-			return reachedPush, ctx.Err()
+			select {
+			case err := <-readErrors:
+				return reachedPush, err
+			default:
+			}
+			return reachedPush, serveCtx.Err()
 		case err := <-readErrors:
 			return reachedPush, err
 		case message := <-messages:
@@ -256,13 +297,18 @@ func (r *userSyncRuntime) serveConnection(
 			catchUpRetryPending = false
 			var err error
 			if r.pendingRevision() > 0 {
-				err = r.flushPending(ctx)
+				err = r.flushPending(serveCtx)
 			} else {
-				err = r.activatePush(ctx)
+				err = r.activatePush(serveCtx)
 			}
 			if err != nil {
-				if ctx.Err() != nil {
-					return reachedPush, ctx.Err()
+				if serveCtx.Err() != nil {
+					select {
+					case readErr := <-readErrors:
+						return reachedPush, readErr
+					default:
+					}
+					return reachedPush, serveCtx.Err()
 				}
 				var transportErr *userSyncWakeupTransportError
 				if errors.As(err, &transportErr) {

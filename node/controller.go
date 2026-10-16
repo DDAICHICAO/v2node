@@ -55,6 +55,7 @@ type Controller struct {
 	routeNotifiedVersion     string
 	routeCoordinator         *routeUpdateCoordinator
 	configFetchMu            sync.Mutex
+	configMonitorMu          sync.Mutex
 	nodeInfoApplyMu          sync.Mutex
 	userSyncMu               sync.Mutex
 	stateMu                  sync.RWMutex

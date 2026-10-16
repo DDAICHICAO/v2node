@@ -20,10 +20,14 @@ import (
 const maxWakeupMessageBytes = 4096
 
 type UserSyncWakeupMessage struct {
-	Type        string `json:"type"`
-	Revision    int64  `json:"revision"`
-	PublishedAt int64  `json:"published_at"`
-	SentAt      int64  `json:"sent_at"`
+	Type            string `json:"type"`
+	Revision        int64  `json:"revision"`
+	PublishedAt     int64  `json:"published_at"`
+	SentAt          int64  `json:"sent_at"`
+	Enabled         bool   `json:"enabled"`
+	IntervalSeconds int    `json:"interval_seconds"`
+	LeaseSeconds    int    `json:"lease_seconds"`
+	ConfigRevision  string `json:"config_revision"`
 }
 
 type UserSyncAppliedMessage struct {
@@ -139,6 +143,12 @@ func decodeWakeupMessage(payload []byte) (*UserSyncWakeupMessage, error) {
 		return nil, errors.New("invalid user sync wakeup message")
 	}
 	switch message.Type {
+	case "node_realtime_policy":
+		if message.Enabled && (message.IntervalSeconds < 1 || message.IntervalSeconds > 10 ||
+			message.LeaseSeconds < 5 || message.LeaseSeconds > 15 ||
+			len(message.ConfigRevision) == 0 || len(message.ConfigRevision) > 64) {
+			return nil, errors.New("invalid node realtime policy")
+		}
 	case "user_sync_dirty":
 		if message.Revision <= 0 || message.PublishedAt < 0 {
 			return nil, errors.New("invalid user sync dirty message")
@@ -196,6 +206,9 @@ func (c *UserSyncWakeupConnection) writeJSON(value any) error {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return errors.New("set user sync wakeup write deadline")
+	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 		return fmt.Errorf("write user sync wakeup message: %T", err)
 	}
