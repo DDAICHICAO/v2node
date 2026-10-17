@@ -598,3 +598,15 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 检查命令：设置 `GOEXPERIMENT=jsonv2` 后执行 `go test ./api/v2board ./node ./cmd ./core ./common/task -count=1 -timeout 60s`，全部通过；9 个节点回归场景及 9 类 API 响应验证通过，补测确认残留删除项不会让重启丢弃最新整机路由快照。`gofmt -l`、`git diff --check` 通过。本机无 gcc/clang，未运行 race 检查；Linux 和生产链路待部署验收。
 - 边界：本次未部署、未执行生产 SQL，未修改规则内容和本机配置文件；关闭路由热更新仍沿用配置重载，无法承诺其他连接连续性。同 ID 恢复须在线配置重载/重启并获取完整授权。已有其他工作区修改保持不变。临时测试验收后删除。
 - 相关文件：`api/v2board/node.go`、`node/bootstrap.go`、`node/node.go`、`node/controller.go`、`node/task.go`、`node/reconcile.go`、`node/offline_state.go`、`node/route_update_coordinator.go`、`node/route_runtime_state.go`；运维入口见 `docs/panel-offline-mode.md` 的“面板已删除节点”。提交：见本条记录所属提交。
+
+
+## 2026-10-17：独立管理通道清理已删除节点配置
+
+- 症状：业务控制器在节点删除后停止，挂在控制器内的更新任务无法再收到命令；全部节点失效或启动失败时尤其明显。
+- 链路：实际 `--config` → 面板/凭据/配置实例身份 → 30 秒管理清单 → 定向任务 → 主库复核 → 配置备份/原子替换 → 单节点停用 → 持久回执。
+- 修复：`node/cleanup_control.go` 独立于业务控制器；`cmd/server.go` 启动前建立管理循环，启动失败继续重试；清理由主循环串行执行，与更新任务共用锁。
+- 安全边界：`node/cleanup_config.go` 使用 JSON RawMessage 保留未知字段/大整数，拒绝重复键/歧义字段/非 JSON 与摘要冲突；只删匹配 ApiHost、ApiKey、NodeID 的配置。
+- 运行态：`node/cleanup_runtime.go` 停用指定控制器并应用剩余路由，不重启正常节点；watch=false 仍生效，配置监听只忽略自己完成的写入。
+- 恢复：本地 0600 `.orphan-control.json` 记录执行意图及结果，清理最后一项后仍可跨重启补报；凭据不可外传，确认后删除，备份保留。
+- 验证：Go 指定包回归、临时 HTTP/配置/全部失效启动测试及真实本地 VLESS 已有/新连接连续性验证通过；临时测试已删除。Windows 本地不能替代 Linux 挂载与正式部署验收。
+- 下次检查：管理接口认证、任务摘要/期限、本地目录可写性、待回执日志；面板发布入口见 v2board 的 `docs/node-orphan-cleanup-runbook.md`。

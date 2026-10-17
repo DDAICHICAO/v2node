@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -67,56 +68,121 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 	//init limiter
 	limiter.Init()
-	//get node info
-	nodes, err := node.New(c.NodeConfigs, c.StatePath)
+	// Management is independent of every business controller and starts before bootstrap.
+	ctx, cancelControl := context.WithCancel(context.Background())
+	defer cancelControl()
+	manager, err := node.NewCleanupManager(config)
 	if err != nil {
-		log.WithField("err", err).Error("Get node info failed")
+		log.Error("Initialize node management failed")
 		return
 	}
-	log.Info("Got nodes info from server")
-	//core
-	var reloadCh = make(chan struct{}, 1)
-	v2core := core.New(c)
-	v2core.ReloadCh = reloadCh
-	err = v2core.Start(nodes.NodeInfos)
-	if err != nil {
-		log.WithField("err", err).Error("Start core failed")
-		return
-	}
-	defer func() { _ = nodes.Close(); _ = v2core.Close() }()
-	//node
-	err = nodes.Start(c.NodeConfigs, v2core)
-	if err != nil {
-		log.WithField("err", err).Error("Run nodes failed")
-		return
-	}
-	log.Info("Nodes started")
-	if watch {
-		// On file change, just signal reload; do not run reload concurrently here
-		err = c.Watch(config, func() {
-			select {
-			case reloadCh <- struct{}{}:
-			default: // drop if a reload is already queued
-			}
-		})
+	go manager.Run(ctx)
+	reloadCh := make(chan struct{}, 1)
+	fileChangeCh := make(chan struct{}, 1)
+	var nodes *node.Node
+	var v2core *core.V2Core
+	lastHandledDigest := ""
+	startRuntime := func() error {
+		preparedDigest := manager.ConfigDigest()
+		candidateConf := conf.New()
+		if err := candidateConf.LoadFromPath(config); err != nil {
+			return err
+		}
+		candidate, err := node.New(candidateConf.NodeConfigs, candidateConf.StatePath)
 		if err != nil {
-			log.WithField("err", err).Error("start watch failed")
+			return err
+		}
+		server := core.New(candidateConf)
+		server.ReloadCh = reloadCh
+		if err = server.Start(candidate.NodeInfos); err == nil {
+			err = candidate.Start(candidateConf.NodeConfigs, server)
+		}
+		if err != nil {
+			cleanupErr := errors.Join(candidate.Close(), server.Close())
+			if cleanupErr != nil {
+				return &reloadFatalError{errors.Join(err, cleanupErr)}
+			}
+			return err
+		}
+		nodes, v2core = candidate, server
+		applyLogConfig(candidateConf.LogConfig)
+		lastHandledDigest = preparedDigest
+		return nil
+	}
+	if err := startRuntime(); err != nil {
+		var fatal *reloadFatalError
+		if errors.As(err, &fatal) {
+			log.WithError(err).Error("启动失败且运行态无法清理，退出进程")
 			return
 		}
+		log.WithField("err", err).Error("Business nodes failed to start; management remains active and startup will retry")
 	}
-	// clear memory
+	defer func() {
+		if nodes != nil {
+			_ = nodes.Close()
+		}
+		if v2core != nil {
+			_ = v2core.Close()
+		}
+	}()
+	if watch {
+		if err := c.Watch(config, func() {
+			select {
+			case fileChangeCh <- struct{}{}:
+			default:
+			}
+		}); err != nil {
+			log.WithField("err", err).Error("start watch failed")
+		}
+	}
 	runtime.GC()
-
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
-
+	defer signal.Stop(osSignals)
+	retry := time.NewTicker(30 * time.Second)
+	defer retry.Stop()
 	for {
 		select {
 		case <-osSignals:
 			log.Info("收到退出信号，正在关闭程序...")
-			os.Exit(0)
+			return
+		case req := <-manager.Requests:
+			manager.Execute(ctx, req, nodes, v2core)
+			if req.AppliedDigest != "" {
+				lastHandledDigest = req.AppliedDigest
+			}
+		case <-retry.C:
+			if nodes == nil {
+				if err := startRuntime(); err != nil {
+					var fatal *reloadFatalError
+					if errors.As(err, &fatal) {
+						log.WithError(err).Error("启动失败且运行态无法清理，退出进程")
+						return
+					}
+					log.WithField("err", err).Warn("业务节点启动待重试，管理通道继续运行")
+				}
+			}
+		case <-fileChangeCh:
+			if digest := manager.ConfigDigest(); digest != "" && digest == lastHandledDigest {
+				continue
+			}
+			select {
+			case reloadCh <- struct{}{}:
+			default:
+			}
 		case <-reloadCh:
-			log.Info("收到重启信号，正在重新加载配置...")
+			if nodes == nil {
+				if err := startRuntime(); err != nil {
+					var fatal *reloadFatalError
+					if errors.As(err, &fatal) {
+						log.WithError(err).Error("启动失败且运行态无法清理，退出进程")
+						return
+					}
+					log.WithField("err", err).Warn("业务节点启动待重试")
+				}
+				continue
+			}
+			digest := manager.ConfigDigest()
 			if err := reload(config, &nodes, &v2core); err != nil {
 				log.WithField("err", err).Error("配置切换失败")
 				var fatal *reloadFatalError
@@ -125,7 +191,8 @@ func serverHandle(_ *cobra.Command, _ []string) {
 				}
 				continue
 			}
-			log.Info("重启成功")
+			lastHandledDigest = digest
+			log.Info("配置更新成功")
 		}
 	}
 }
