@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -207,6 +208,10 @@ func (e *EncSettings) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ErrNodeNotFound is only returned for an explicit panel business response,
+// never for a generic HTTP 404, network failure, or authorization rejection.
+var ErrNodeNotFound = errors.New("panel node no longer exists")
+
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if c.managedTLSCredentialRequired.Load() {
 		_ = c.EnsureManagedTLSCredential(ctx, false)
@@ -236,6 +241,20 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	}
 	if r.StatusCode() == 401 || r.StatusCode() == 403 {
 		return nil, &ValidationError{Operation: "get node info", StatusCode: r.StatusCode(), Message: "node authorization rejected"}
+	}
+	var failure struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if r.StatusCode() == 200 && json.Unmarshal(r.Body(), &failure) == nil && failure.Status == "fail" {
+		switch failure.Message {
+		case "server is not exist":
+			return nil, ErrNodeNotFound
+		case "token is null", "token is error":
+			return nil, &ValidationError{Operation: "get node info", StatusCode: r.StatusCode(), Message: "node authorization rejected"}
+		default:
+			return nil, errors.New("panel rejected node configuration request")
+		}
 	}
 	if r.StatusCode() >= 400 {
 		return nil, fmt.Errorf("get node info http status %d: %s", r.StatusCode(), bodySnippet(r.Body()))

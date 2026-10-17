@@ -15,6 +15,7 @@ import (
 )
 
 type Node struct {
+	deletedConfigs    []conf.NodeConfig
 	controllers       []*Controller
 	NodeInfos         []*panel.NodeInfo
 	routeStateStore   *routeRuntimeStateStore
@@ -24,10 +25,26 @@ type Node struct {
 
 func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 	routeStore := newRouteRuntimeStateStore(statePath)
+	store := newOfflineStateStore(statePath)
 	var runtimeState *routeRuntimeState
 	var runtimeEntries map[string]routeRuntimeEntry
 	if loaded, err := routeStore.Load(); err == nil {
-		entries, identityErr := matchRouteRuntimeEntries(loaded, nodes)
+		// Check tombstones only for missing generation entries, avoiding another
+		// serial read of every node's potentially large user snapshot at startup.
+		present := make(map[string]bool, len(loaded.Entries))
+		for _, entry := range loaded.Entries {
+			present[routeRuntimeIdentity(entry.APIHost, entry.NodeID)] = true
+		}
+		snapshotConfigs := make([]conf.NodeConfig, 0, len(nodes))
+		for _, cfg := range nodes {
+			if !present[routeRuntimeIdentity(cfg.APIHost, cfg.NodeID)] {
+				if cached, err := store.Load(cfg); err == nil && cached.Deleted {
+					continue
+				}
+			}
+			snapshotConfigs = append(snapshotConfigs, cfg)
+		}
+		entries, identityErr := matchRouteRuntimeEntries(loaded, snapshotConfigs)
 		if identityErr != nil {
 			log.WithError(identityErr).Warning("Whole-machine route runtime snapshot does not match configured nodes")
 		} else {
@@ -45,7 +62,6 @@ func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 		routeStateStore:   routeStore,
 		routeRuntimeState: runtimeState,
 	}
-	store := newOfflineStateStore(statePath)
 	started := time.Now()
 	errorsByNode := make([]error, len(nodes))
 	slots := make(chan struct{}, 4)
@@ -63,11 +79,21 @@ func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 		})
 	}
 	wg.Wait()
-	for _, err := range errorsByNode {
+	controllers := n.controllers[:0]
+	infos := n.NodeInfos[:0]
+	for i, err := range errorsByNode {
+		if errors.Is(err, panel.ErrNodeNotFound) {
+			n.deletedConfigs = append(n.deletedConfigs, nodes[i])
+			log.WithField("node_id", nodes[i].NodeID).Warn("Skipping deleted panel node")
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
+		controllers = append(controllers, n.controllers[i])
+		infos = append(infos, n.NodeInfos[i])
 	}
+	n.controllers, n.NodeInfos = controllers, infos
 	logBootstrapDuration(0, "all_nodes", started)
 	return n, nil
 }
@@ -105,6 +131,11 @@ func prepareController(node conf.NodeConfig, store *offlineStateStore, runtimeEn
 	}
 	bootstrap, startedOffline, err := loadBootstrapState(context.Background(), p, node, cached)
 	if err != nil {
+		if errors.Is(err, panel.ErrNodeNotFound) {
+			if saveErr := store.SaveDeleted(node); saveErr != nil {
+				return nil, fmt.Errorf("persist node %d deletion: %w", node.NodeID, saveErr)
+			}
+		}
 		return nil, fmt.Errorf("load node [%s-%d] bootstrap state: %w", node.APIHost, node.NodeID, err)
 	}
 	controller := NewController(p, &node, store, bootstrap, startedOffline)
@@ -138,15 +169,15 @@ func (n *Node) Start(nodes []conf.NodeConfig, v2core *core.V2Core) error {
 		coordinator.Start()
 	}
 	n.routeCoordinator = coordinator
-	for i, node := range nodes {
-		err := n.controllers[i].Start(v2core)
+	for _, controller := range n.controllers {
+		err := controller.Start(v2core)
 		if err != nil {
 			if coordinator != nil {
 				coordinator.Close()
 			}
 			return fmt.Errorf("start node controller [%s-%d] error: %s",
-				node.APIHost,
-				node.NodeID,
+				controller.conf.APIHost,
+				controller.conf.NodeID,
 				err)
 		}
 	}

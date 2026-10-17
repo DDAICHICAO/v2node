@@ -586,3 +586,15 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - **验证**：临时回归先失败再通过；实际 VLESS TCP 连续传输下修改其他节点端口、增删节点；端口占用局部/整体回滚后代理恢复；保留节点用户撤销真实断开；较新运行状态继承、旧/未来/未绑定快照、无效/不完整增量、非法配置、原子替换及待激活 TLS 均覆盖。执行 `GOEXPERIMENT=jsonv2 go test ./node ./cmd ./conf ./core ./api/v2board ./common/task ./core/app/dispatcher -count=1 -timeout 60s`。
 - **下次检查**：优先看 `stage/elapsed_ms` 耗时；确认状态目录跨更新持久化、首次全量后有 `fast_sync_ready`；分开准备时间与共享核心切换时间，生产使用真实代理请求验收。Windows 缺 C 编译器，race 检查未执行；Linux/systemd 与生产秒数待部署验证。
 - **相关文件**：`node/bootstrap.go`、`node/reconcile.go`、`node/offline_state.go`、`node/task.go`、`cmd/server.go`、`conf/watch.go`、`core/node_preflight.go`、`core/inbound.go`、`core/app/dispatcher/linkmanager.go`；操作说明见 `docs/panel-offline-mode.md`。
+
+## 2026-10-17：已删除节点阻断整机路由更新
+
+- 症状：面板删除节点后，本机配置仍残留其 NodeID；修改其他节点的路由时，整机刷新因已删除节点返回错误而中止，有效节点继续使用旧规则。启动和配置重载也可能被残留节点阻断。
+- 影响链：v2board `ServerController::__construct` -> `/api/v2/server/config` -> `api/v2board/node.go:GetNodeInfo` -> `Controller.RefreshObserved` / `loadBootstrapState` -> `routeUpdateCoordinator.refreshVector` / `node.New` -> 监听清理、路由发布、离线快照和重载回滚。
+- 根因：面板用 HTTP 200 的 `status=fail,message=server is not exist` 表示不存在，旧节点端按普通配置解析成协议为空；协调器将所有请求错误视为整批失败，离线启动还可能回退旧授权。
+- 修复：精确识别节点不存在的业务响应；鉴权拒绝、普通 404、5xx 和超时不归类为删除。默认热更新路径停止该节点监听/连接/任务并排除其路由，其余节点继续发布。启动跳过删除项并按有效控制器启动，避免索引错位；回滚不恢复已删除节点。保存凭据绑定的删除标记并禁止后台旧快照覆盖；全节点删除允许空路由快照；整机快照匹配时排除有删除标记的配置项。
+- 验证：临时回归先复现“残留节点阻断启动”和“删除节点阻断路由更新”，修复后通过；覆盖错误分类、旧快照不能复活、同 ID 在线恢复、凭据变更、全部删除、重载回滚、临时网络错误及关闭失败重试。本地真实 VLESS 测试从配置监控触发删除，确认被删监听和已连接会话关闭、另一节点持有连接与新连接仍能传输，共享核心未替换。测试专用 loopback 出站显式放行回环；不修改业务默认出站限制。
+- 下次检查：先核对 config 接口原始业务响应，再检查 `Skipping deleted panel node`、`Deleted panel node stopped; remaining nodes continue serving`、`Route runtime generation published`，以及状态目录权限与目标业务端口。不要把所有 HTTP 404 或请求失败当作节点删除。
+- 检查命令：设置 `GOEXPERIMENT=jsonv2` 后执行 `go test ./api/v2board ./node ./cmd ./core ./common/task -count=1 -timeout 60s`，全部通过；9 个节点回归场景及 9 类 API 响应验证通过，补测确认残留删除项不会让重启丢弃最新整机路由快照。`gofmt -l`、`git diff --check` 通过。本机无 gcc/clang，未运行 race 检查；Linux 和生产链路待部署验收。
+- 边界：本次未部署、未执行生产 SQL，未修改规则内容和本机配置文件；关闭路由热更新仍沿用配置重载，无法承诺其他连接连续性。同 ID 恢复须在线配置重载/重启并获取完整授权。已有其他工作区修改保持不变。临时测试验收后删除。
+- 相关文件：`api/v2board/node.go`、`node/bootstrap.go`、`node/node.go`、`node/controller.go`、`node/task.go`、`node/reconcile.go`、`node/offline_state.go`、`node/route_update_coordinator.go`、`node/route_runtime_state.go`；运维入口见 `docs/panel-offline-mode.md` 的“面板已删除节点”。提交：见本条记录所属提交。

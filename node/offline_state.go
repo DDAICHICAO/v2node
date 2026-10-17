@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/conf"
@@ -17,6 +18,7 @@ import (
 const offlineStateVersion = 1
 
 type offlineState struct {
+	Deleted            bool                          `json:"deleted,omitempty"`
 	FastSyncReady      bool                          `json:"fast_sync_ready,omitempty"`
 	UsersAuthoritative bool                          `json:"-"`
 	Version            int                           `json:"version"`
@@ -66,6 +68,12 @@ func validateOfflineState(cfg conf.NodeConfig, state *offlineState) error {
 	}
 	if state.ConfigFingerprint != "" && state.ConfigFingerprint != offlineConfigFingerprint(cfg) {
 		return errors.New("offline state credentials changed")
+	}
+	if state.Deleted {
+		if state.SavedAt <= 0 || state.ConfigFingerprint != offlineConfigFingerprint(cfg) {
+			return errors.New("offline deletion marker is not bound to current credentials")
+		}
+		return nil
 	}
 	if state.SavedAt <= 0 || state.NodeInfo == nil || state.NodeInfo.Id != cfg.NodeID {
 		return errors.New("offline state node info is incomplete")
@@ -135,6 +143,16 @@ func (s *offlineStateStore) Save(cfg conf.NodeConfig, state *offlineState) error
 		return fmt.Errorf("replace offline state: %w", err)
 	}
 	return nil
+}
+
+// Replace stale credentials with a credential-bound tombstone. A later successful
+// online bootstrap can replace it; a panel outage cannot resurrect the node.
+func (s *offlineStateStore) SaveDeleted(cfg conf.NodeConfig) error {
+	return s.Save(cfg, &offlineState{
+		Version: offlineStateVersion, Deleted: true,
+		APIHost: normalizeAPIHost(cfg.APIHost), NodeID: cfg.NodeID,
+		SavedAt: time.Now().Unix(), ConfigFingerprint: offlineConfigFingerprint(cfg),
+	})
 }
 
 func cloneIntMap(input map[int]int) map[int]int {

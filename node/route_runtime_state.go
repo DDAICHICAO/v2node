@@ -130,7 +130,7 @@ func validateRouteRuntimeState(state *routeRuntimeState) error {
 	if state.Version != routeRuntimeStateVersion {
 		return fmt.Errorf("unsupported route runtime state version %d", state.Version)
 	}
-	if state.SavedAt <= 0 || strings.TrimSpace(state.VectorHash) == "" || len(state.Entries) == 0 {
+	if state.SavedAt <= 0 || strings.TrimSpace(state.VectorHash) == "" {
 		return errors.New("route runtime state metadata is incomplete")
 	}
 	identities := make(map[string]struct{}, len(state.Entries))

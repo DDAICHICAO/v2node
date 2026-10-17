@@ -85,6 +85,18 @@ func loadBootstrapState(ctx context.Context, client bootstrapPanel, cfg conf.Nod
 	infoStarted := time.Now()
 	info, err := client.GetNodeInfo(ctx)
 	logBootstrapDuration(cfg.NodeID, "config", infoStarted)
+	if errors.Is(err, panel.ErrNodeNotFound) {
+		return nil, false, err
+	}
+	if cached != nil && cached.Deleted {
+		if panel.IsValidationError(err) {
+			return nil, false, err
+		}
+		if err != nil || info == nil {
+			return nil, false, panel.ErrNodeNotFound
+		}
+		cached = nil
+	}
 	offlineConfig := err != nil || info == nil
 	if offlineConfig {
 		if panel.IsValidationError(err) || cached == nil {

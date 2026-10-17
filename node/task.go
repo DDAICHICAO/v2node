@@ -98,6 +98,16 @@ func (c *Controller) monitorNodeConfig(ctx context.Context, periodic bool) (err 
 
 	// get node info
 	_, err = c.RefreshObserved(ctx)
+	if errors.Is(err, panel.ErrNodeNotFound) {
+		c.nodeInfoApplyMu.Lock()
+		coordinator := c.routeCoordinator
+		c.nodeInfoApplyMu.Unlock()
+		if coordinator != nil {
+			coordinator.Notify()
+			return nil
+		}
+		return c.queueReload()
+	}
 	if err != nil {
 		c.recordPanelFailure("config", "get node info", err)
 		return fmt.Errorf("get node info: %w", err)

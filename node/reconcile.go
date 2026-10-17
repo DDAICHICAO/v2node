@@ -47,9 +47,17 @@ func (n *Node) Validate(server *core.V2Core) error {
 // listeners. A live sync that advanced during preparation must never be rolled back.
 func (n *Node) RefreshPreparedUsers(prepared *Node) error {
 	byIdentity := n.controllersByIdentity()
+	for _, cfg := range prepared.deletedConfigs {
+		if old := byIdentity[routeRuntimeIdentity(cfg.APIHost, cfg.NodeID)]; old != nil &&
+			offlineConfigFingerprint(*old.conf) == offlineConfigFingerprint(cfg) {
+			old.configFetchMu.Lock()
+			old.markDeleted()
+			old.configFetchMu.Unlock()
+		}
+	}
 	for _, candidate := range prepared.controllers {
 		old := byIdentity[routeRuntimeIdentity(candidate.conf.APIHost, candidate.conf.NodeID)]
-		if old == nil || offlineConfigFingerprint(*old.conf) != offlineConfigFingerprint(*candidate.conf) {
+		if old == nil || old.deleted.Load() || offlineConfigFingerprint(*old.conf) != offlineConfigFingerprint(*candidate.conf) {
 			continue
 		}
 		old.userSyncMu.Lock()
@@ -122,6 +130,9 @@ func (n *Node) InheritStoppedUsers(prepared *Node) {
 }
 
 func inheritControllerUsers(candidate, old *Controller) {
+	if old.deleted.Load() {
+		return
+	}
 	if offlineConfigFingerprint(*old.conf) != offlineConfigFingerprint(*candidate.conf) {
 		return
 	}
@@ -141,13 +152,17 @@ func inheritControllerUsers(candidate, old *Controller) {
 
 // RestartCopy captures the latest stopped runtime state without re-fetching the panel.
 func (n *Node) RestartCopy() (*Node, error) {
-	copy := &Node{routeStateStore: n.routeStateStore, controllers: make([]*Controller, len(n.controllers)), NodeInfos: make([]*panel.NodeInfo, len(n.controllers))}
-	for i, c := range n.controllers {
+	copy := &Node{routeStateStore: n.routeStateStore}
+	for _, c := range n.controllers {
+		if c.deleted.Load() {
+			continue
+		}
 		replacement, err := restartController(c)
 		if err != nil {
 			return nil, err
 		}
-		copy.controllers[i], copy.NodeInfos[i] = replacement, replacement.bootstrap.NodeInfo
+		copy.controllers = append(copy.controllers, replacement)
+		copy.NodeInfos = append(copy.NodeInfos, replacement.bootstrap.NodeInfo)
 	}
 	return copy, nil
 }
@@ -174,9 +189,11 @@ func restartController(c *Controller) (*Controller, error) {
 }
 
 func (n *Node) Configs() []conf.NodeConfig {
-	configs := make([]conf.NodeConfig, len(n.controllers))
-	for i, c := range n.controllers {
-		configs[i] = *c.conf
+	configs := make([]conf.NodeConfig, 0, len(n.controllers))
+	for _, c := range n.controllers {
+		if !c.deleted.Load() {
+			configs = append(configs, *c.conf)
+		}
 	}
 	return configs
 }
@@ -214,6 +231,34 @@ func (n *Node) Reconcile(prepared *Node, server *core.V2Core) (applied bool, rec
 			n.resetCoordinator(server)
 		}
 	}()
+	// A deleted node must never participate in retained-state rollback.
+	originalControllers := n.controllers
+	active := make([]*Controller, 0, len(n.controllers))
+	retired := false
+	for _, c := range n.controllers {
+		if c.deleted.Load() {
+			if err := c.RetireDeletedNode(); err != nil {
+				return true, err
+			}
+			retired = true
+			continue
+		}
+		active = append(active, c)
+	}
+	n.controllers = active
+	n.refreshNodeInfos()
+	if retired {
+		if !routeHotReloadEnabled(server) {
+			return false, nil
+		}
+		if _, err := server.ApplyRouteRuntime(n.NodeInfos); err != nil {
+			// Retain tombstoned targets so the coordinator can retry removing
+			// their routes without resurrecting their listeners.
+			n.controllers = originalControllers
+			n.refreshNodeInfos()
+			return true, err
+		}
+	}
 	currentInfos := make([]*panel.NodeInfo, len(n.controllers))
 	for i, c := range n.controllers {
 		currentInfos[i] = c.currentNodeInfo()

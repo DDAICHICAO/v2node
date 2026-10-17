@@ -81,10 +81,11 @@ type routeUpdateCoordinatorStats struct {
 }
 
 type routeUpdateCoordinator struct {
-	targets []routeUpdateTarget
-	applier routeRuntimeApplier
-	writer  routeRuntimeStateWriter
-	options routeUpdateCoordinatorOptions
+	membershipChanged bool // owned by the coordinator loop
+	targets           []routeUpdateTarget
+	applier           routeRuntimeApplier
+	writer            routeRuntimeStateWriter
+	options           routeUpdateCoordinatorOptions
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -289,7 +290,7 @@ func (c *routeUpdateCoordinator) run() {
 func (c *routeUpdateCoordinator) reconcile() (*routePublishedBatch, error) {
 	startedAt := time.Now()
 	c.attempts.Add(1)
-	if len(c.targets) == 0 || c.applier == nil || c.writer == nil {
+	if c.applier == nil || c.writer == nil {
 		return nil, errors.New("route update coordinator dependencies are incomplete")
 	}
 	epoch := c.epoch.Load()
@@ -322,7 +323,7 @@ func (c *routeUpdateCoordinator) reconcile() (*routePublishedBatch, error) {
 		return nil, errRouteVectorChanged
 	}
 
-	hasRouteChange := false
+	hasRouteChange := c.membershipChanged
 	infos := make([]*panel.NodeInfo, 0, len(states))
 	clonedStates := make([]routeObservedState, 0, len(states))
 	for _, state := range states {
@@ -352,6 +353,7 @@ func (c *routeUpdateCoordinator) reconcile() (*routePublishedBatch, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.membershipChanged = false
 	c.successes.Add(1)
 	return &routePublishedBatch{
 		generation: generation,
@@ -367,7 +369,7 @@ func (c *routeUpdateCoordinator) refreshVector() ([]routeObservedState, string, 
 	ctx, cancel := context.WithCancel(c.ctx)
 	defer cancel()
 	semaphore := make(chan struct{}, c.options.MaxConcurrency)
-	errCh := make(chan error, len(c.targets))
+	errorsByTarget := make([]error, len(c.targets))
 	var wg sync.WaitGroup
 	for index, target := range c.targets {
 		wg.Add(1)
@@ -376,27 +378,50 @@ func (c *routeUpdateCoordinator) refreshVector() ([]routeObservedState, string, 
 			select {
 			case semaphore <- struct{}{}:
 			case <-ctx.Done():
-				errCh <- ctx.Err()
+				errorsByTarget[index] = ctx.Err()
 				return
 			}
 			defer func() { <-semaphore }()
 			state, err := safeRefreshRouteTarget(ctx, target)
 			if err != nil {
-				errCh <- fmt.Errorf("refresh route target: %w", err)
-				cancel()
+				errorsByTarget[index] = fmt.Errorf("refresh route target: %w", err)
+				if !errors.Is(err, panel.ErrNodeNotFound) {
+					cancel()
+				}
 				return
 			}
 			states[index] = state
 		}(index, target)
 	}
 	wg.Wait()
-	close(errCh)
-	for err := range errCh {
+	remaining := make([]routeUpdateTarget, 0, len(c.targets))
+	activeStates := make([]routeObservedState, 0, len(states))
+	var refreshErrors []error
+	for index, target := range c.targets {
+		err := errorsByTarget[index]
+		if errors.Is(err, panel.ErrNodeNotFound) {
+			retirable, ok := target.(interface{ RetireDeletedNode() error })
+			if !ok {
+				err = errors.New("deleted route target cannot be stopped")
+			} else {
+				err = retirable.RetireDeletedNode()
+				if err == nil {
+					c.membershipChanged = true
+					continue
+				}
+			}
+		}
+		remaining = append(remaining, target)
+		activeStates = append(activeStates, states[index])
 		if err != nil {
-			return nil, "", err
+			refreshErrors = append(refreshErrors, err)
 		}
 	}
-	return normalizeRouteObservedVector(states)
+	c.targets = remaining
+	if err := errors.Join(refreshErrors...); err != nil {
+		return nil, "", err
+	}
+	return normalizeRouteObservedVector(activeStates)
 }
 
 func (c *routeUpdateCoordinator) currentVector() ([]routeObservedState, string, error) {

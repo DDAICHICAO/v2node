@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -23,6 +24,7 @@ import (
 )
 
 type Controller struct {
+	deleted                  atomic.Bool
 	server                   *core.V2Core
 	apiClient                *panel.Client
 	tag                      string
@@ -109,9 +111,15 @@ func (c *Controller) RefreshObserved(ctx context.Context) (routeObservedState, e
 		return routeObservedState{}, errors.New("node configuration client is nil")
 	}
 	c.configFetchMu.Lock()
+	defer c.configFetchMu.Unlock()
+	if c.deleted.Load() {
+		return routeObservedState{}, panel.ErrNodeNotFound
+	}
 	next, err := c.apiClient.GetNodeInfo(ctx)
 	version := c.apiClient.NodeInfoVersion()
-	c.configFetchMu.Unlock()
+	if errors.Is(err, panel.ErrNodeNotFound) {
+		c.markDeleted()
+	}
 	if err != nil {
 		return routeObservedState{}, err
 	}
@@ -505,6 +513,9 @@ func (c *Controller) persistOfflineStateAtLocked(
 	if c.store == nil {
 		return errors.New("offline state store is nil")
 	}
+	if c.deleted.Load() {
+		return c.store.SaveDeleted(*c.conf)
+	}
 	state := &offlineState{
 		Version:       offlineStateVersion,
 		FastSyncReady: c.fastSyncReady,
@@ -522,6 +533,26 @@ func (c *Controller) persistOfflineStateAtLocked(
 		return err
 	}
 	c.lastSnapshotCheckpoint = time.Now()
+	return nil
+}
+
+func (c *Controller) markDeleted() {
+	c.nodeInfoApplyMu.Lock()
+	defer c.nodeInfoApplyMu.Unlock()
+	c.deleted.Store(true)
+	c.pendingNodeInfo = nil
+	c.pendingNodeInfoVersion = ""
+}
+
+// Called by the coordinator, outside this controller's own polling/sync tasks.
+func (c *Controller) RetireDeletedNode() error {
+	if !c.deleted.Load() {
+		return errors.New("refuse to retire a node without confirmed deletion")
+	}
+	if err := c.Close(); err != nil {
+		return err
+	}
+	log.WithField("node_id", c.conf.NodeID).Warn("Deleted panel node stopped; remaining nodes continue serving")
 	return nil
 }
 
@@ -680,6 +711,12 @@ func cloneUUIDIPFanoutGlobalState(state panel.UUIDIPFanoutGlobalState) panel.UUI
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
+	var deletionErr error
+	if c.deleted.Load() && c.store != nil && c.conf != nil {
+		c.stateMu.Lock()
+		deletionErr = c.store.SaveDeleted(*c.conf)
+		c.stateMu.Unlock()
+	}
 	if c.managedTLS != nil {
 		c.managedTLS.Close()
 	}
@@ -699,7 +736,7 @@ func (c *Controller) Close() error {
 	}
 	c.closeUserSyncRuntime()
 	c.waitUserExpiryScheduler()
-	return c.runtime.Close(func() error {
+	return errors.Join(deletionErr, c.runtime.Close(func() error {
 		c.server.ForgetNodeUsers(c.tag, c.userList)
 		limiter.DeleteLimiter(c.tag)
 		c.limiter = nil
@@ -707,7 +744,7 @@ func (c *Controller) Close() error {
 			return fmt.Errorf("del node error: %s", err)
 		}
 		return nil
-	})
+	}))
 }
 
 type controllerRuntimeLifecycle struct {
@@ -741,7 +778,7 @@ func (l *controllerRuntimeLifecycle) Started() bool {
 func (l *controllerRuntimeLifecycle) Close(stop func() error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closed {
+	if l.closed && !l.started {
 		return nil
 	}
 	l.closed = true
