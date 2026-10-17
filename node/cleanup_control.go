@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -60,6 +62,32 @@ type CleanupManager struct {
 	Requests chan *CleanupRequest
 }
 
+// Only these bounded codes are logged: HTTP errors may otherwise include
+// credentials, panel URLs or response bodies.
+type controlCallError struct {
+	reason string
+	status int
+}
+
+func (e *controlCallError) Error() string {
+	if e.status != 0 {
+		return fmt.Sprintf("%s (HTTP %d)", e.reason, e.status)
+	}
+	return e.reason
+}
+
+func controlFailureFields(err error) log.Fields {
+	var callErr *controlCallError
+	if errors.As(err, &callErr) {
+		fields := log.Fields{"reason": callErr.reason}
+		if callErr.status != 0 {
+			fields["http_status"] = callErr.status
+		}
+		return fields
+	}
+	return log.Fields{"reason": "local_state_or_task"}
+}
+
 func NewCleanupManager(path string) (*CleanupManager, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -90,7 +118,7 @@ func (m *CleanupManager) save(j cleanupJournal) error {
 func (m *CleanupManager) call(ctx context.Context, scope controlScope, action string, payload any, result any) error {
 	u, err := url.Parse(scope.Host)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("invalid panel address")
+		return &controlCallError{reason: "invalid_panel_address"}
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -98,27 +126,31 @@ func (m *CleanupManager) call(ctx context.Context, scope controlScope, action st
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(scope.Host, "/")+"/api/v2/server/control/"+action, bytes.NewReader(data))
 	if err != nil {
-		return errors.New("control request unavailable")
+		return &controlCallError{reason: "invalid_request"}
 	}
 	req.Header.Set("Authorization", "Bearer "+scope.Key)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return errors.New("control request unavailable")
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			return &controlCallError{reason: "timeout"}
+		}
+		return &controlCallError{reason: "network"}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return errors.New("control request rejected")
+		return &controlCallError{reason: "http_status", status: resp.StatusCode}
 	}
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&envelope) != nil || len(envelope.Data) == 0 {
-		return errors.New("invalid control response")
+		return &controlCallError{reason: "invalid_response"}
 	}
 	if err := json.Unmarshal(envelope.Data, result); err != nil {
-		return errors.New("invalid control response")
+		return &controlCallError{reason: "invalid_response"}
 	}
 	return nil
 }
@@ -130,10 +162,23 @@ func (m *CleanupManager) Run(ctx context.Context) {
 	known := map[string]controlScope{}
 	seen := map[string]time.Time{}
 	lastLog := time.Time{}
+	failing := false
 	for {
-		if err := m.cycle(ctx, known, seen); err != nil && time.Since(lastLog) > 5*time.Minute {
-			log.Warn("SNTP 残留节点管理通道暂不可用，将自动重试")
-			lastLog = time.Now()
+		err := m.cycle(ctx, known, seen)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			if !failing || time.Since(lastLog) > 5*time.Minute {
+				log.WithFields(controlFailureFields(err)).Warn("SNTP 残留节点管理通道暂不可用，将自动重试；此告警不代表业务启动失败")
+				lastLog = time.Now()
+			}
+			failing = true
+		} else if failing {
+			// Default installations use warning level, so recovery of this warning
+			// must also be visible without enabling verbose business logging.
+			log.Warn("SNTP 残留节点管理通道已恢复")
+			failing = false
 		}
 		select {
 		case <-ctx.Done():

@@ -215,6 +215,32 @@ func (s *boltSpool[T]) peek(limit int) ([]persistedItem[T], error) {
 		return []persistedItem[T]{}, nil
 	}
 	now := s.now()
+	// bbolt commits even an unchanged Update: it rewrites the freelist and
+	// synchronizes data and metadata. Polling must not compete with the writer
+	// unless expiry or failure accounting actually needs a transaction.
+	if s.pendingGapSnapshot().PersistenceFailures == 0 {
+		var items []persistedItem[T]
+		needsPrune := false
+		err := s.db.View(func(tx *bolt.Tx) error {
+			_, value := tx.Bucket(spoolPendingBucket).Cursor().First()
+			if value != nil {
+				record, err := decodeStoredRecord[T](value)
+				if err != nil {
+					return err
+				}
+				needsPrune = record.EnqueuedAt.Before(now.Add(-s.maxAge))
+			}
+			if needsPrune {
+				return nil
+			}
+			var err error
+			items, err = s.readItems(tx, limit)
+			return err
+		})
+		if err != nil || !needsPrune {
+			return items, err
+		}
+	}
 	gap := s.takePendingGap()
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		stats, err := readSpoolStats(tx)
@@ -236,23 +262,28 @@ func (s *boltSpool[T]) peek(limit int) ([]persistedItem[T], error) {
 		return nil, err
 	}
 
-	items := make([]persistedItem[T], 0, limit)
+	var items []persistedItem[T]
 	err = s.db.View(func(tx *bolt.Tx) error {
-		cursor := tx.Bucket(spoolPendingBucket).Cursor()
-		for key, value := cursor.First(); key != nil && len(items) < limit; key, value = cursor.Next() {
-			record, err := decodeStoredRecord[T](value)
-			if err != nil {
-				return err
-			}
-			items = append(items, persistedItem[T]{
-				Key:        binary.BigEndian.Uint64(key),
-				Event:      record.Event,
-				EnqueuedAt: record.EnqueuedAt,
-			})
-		}
-		return nil
+		var err error
+		items, err = s.readItems(tx, limit)
+		return err
 	})
 	return items, err
+}
+
+func (s *boltSpool[T]) readItems(tx *bolt.Tx, limit int) ([]persistedItem[T], error) {
+	items := make([]persistedItem[T], 0, limit)
+	cursor := tx.Bucket(spoolPendingBucket).Cursor()
+	for key, value := cursor.First(); key != nil && len(items) < limit; key, value = cursor.Next() {
+		record, err := decodeStoredRecord[T](value)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, persistedItem[T]{
+			Key: binary.BigEndian.Uint64(key), Event: record.Event, EnqueuedAt: record.EnqueuedAt,
+		})
+	}
+	return items, nil
 }
 
 func (s *boltSpool[T]) ack(keys []uint64) error {

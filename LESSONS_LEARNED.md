@@ -610,3 +610,14 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 恢复：本地 0600 `.orphan-control.json` 记录执行意图及结果，清理最后一项后仍可跨重启补报；凭据不可外传，确认后删除，备份保留。
 - 验证：Go 指定包回归、临时 HTTP/配置/全部失效启动测试及真实本地 VLESS 已有/新连接连续性验证通过；临时测试已删除。Windows 本地不能替代 Linux 挂载与正式部署验收。
 - 下次检查：管理接口认证、任务摘要/期限、本地目录可写性、待回执日志；面板发布入口见 v2board 的 `docs/node-orphan-cleanup-runbook.md`。
+
+
+## 2026-10-17：审计队列额外写盘与管理重试的诊断边界
+
+- 症状：更新前后日志出现 audit persistence queue full、面板连接重置与独立管理通道重试，用户曾遇到不可用并手动重启。当前运行不能反证重启前无故障。
+- 已核对链路：systemd/MainPID/版本构建元数据 → 实际监听与 socket 双向字节增量 → 配置/快照 → 独立心跳 → accessaudit 非阻塞接收/持久队列。线上 .82 对应 254e672，首次约 11 秒启动，人工重启后约 1 秒；当前业务有流量、心跳 HTTP 200，但审计队列满仍复发并伴随 I/O 等待。
+- 可复现代码问题：boltSpool.peek 无条件 db.Update；即使未清理过期数据、未记录缺口，bbolt 仍提交并重写 freelist/fsync，与落盘写入器争用。该额外负担不能直接证明历史不可用的全部因果。
+- 修复：无过期队首且没有待保存缺口时，在同一只读事务中检查和读取；需要维护才执行原写入路径，保留 fsync、缺口、过期、FIFO 和上传确认。管理错误增加受限原因码/HTTP 状态，不泄露 URL/凭据/响应；恢复提示对默认 warning 级别可见，不把管理告警当业务启动失败。
+- 验证：临时回归先证明空/非空队列各 20 次读取产生 20 次提交，修复后均为 0；过期清理/缺口重启恢复、403/404/503/异常响应/超时分类与脱敏通过。GOEXPERIMENT=jsonv2 go test ./common/accessaudit ./node ./cmd ./core/app/dispatcher -count=1 -timeout 60s 通过。临时测试完成后删除。
+- 下一处：发布后比较队列深度/缺口增长、磁盘 I/O 等待、真实代理请求；管理失败看 reason/http_status，业务启动看独立 err 和监听。spool 文件大小含空闲页，不能当作 pending_bytes；不删除队列、不禁用同步刷盘。
+- 边界：本次未改线上二进制/配置、未重启、未推送或发布；不宣称仅此补丁即可消除慢盘/过载，也未完成原用户客户端故障复现。文件：common/accessaudit/spool_core.go、node/cleanup_control.go；运维说明：v2board/docs/node-orphan-cleanup-runbook.md。提交号用本节所属提交定位。
