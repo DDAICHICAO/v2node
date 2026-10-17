@@ -57,6 +57,37 @@ func (c *RuntimeDNSClient) Close() error {
 	return nil
 }
 
+// IsOwnLink preserves the optional interface used by Xray's DNS outbound to
+// forward upstream queries instead of resolving them recursively. DNS dispatch
+// detaches the query context, so check every still-live generation, not just the
+// currently published backend. The leases prevent cleanup during verification.
+func (c *RuntimeDNSClient) IsOwnLink(ctx context.Context) bool {
+	if c == nil || ctx == nil {
+		return false
+	}
+	c.mu.RLock()
+	manager, closed := c.manager, c.closed
+	c.mu.RUnlock()
+	if closed || manager == nil {
+		return false
+	}
+	leases := manager.acquireDNSLeases()
+	defer func() {
+		for _, lease := range leases {
+			lease.Release()
+		}
+	}()
+	for _, lease := range leases {
+		verifier, ok := lease.DNS().(interface {
+			IsOwnLink(context.Context) bool
+		})
+		if ok && verifier.IsOwnLink(ctx) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *RuntimeDNSClient) LookupIP(domain string, option featuredns.IPOption) ([]xnet.IP, uint32, error) {
 	if c == nil {
 		return nil, 0, errors.New("runtime DNS client is nil")

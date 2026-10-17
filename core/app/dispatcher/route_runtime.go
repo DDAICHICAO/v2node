@@ -147,6 +147,24 @@ func (m *RouteRuntimeManager) Publish(next RouteRuntimeGeneration) error {
 	return nil
 }
 
+// acquireDNSLeases pins active and retained DNS backends for an ownership check.
+// Callers release every lease after invoking backend code outside the lock.
+func (m *RouteRuntimeManager) acquireDNSLeases() []*RouteRuntimeLease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	leases := make([]*RouteRuntimeLease, 0, len(m.registry))
+	for _, generation := range m.registry {
+		if generation.DNS != nil {
+			generation.refs++
+			leases = append(leases, &RouteRuntimeLease{manager: m, generation: generation})
+		}
+	}
+	return leases
+}
+
 func (m *RouteRuntimeManager) Close() error {
 	if m == nil {
 		return nil
