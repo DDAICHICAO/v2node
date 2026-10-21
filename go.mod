@@ -1,6 +1,6 @@
 module github.com/wyx2685/v2node
 
-go 1.26.1
+go 1.26.10
 
 require (
 	github.com/enfein/mieru/v3 v3.26.2

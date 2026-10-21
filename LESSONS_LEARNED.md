@@ -621,3 +621,15 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 验证：临时回归先证明空/非空队列各 20 次读取产生 20 次提交，修复后均为 0；过期清理/缺口重启恢复、403/404/503/异常响应/超时分类与脱敏通过。GOEXPERIMENT=jsonv2 go test ./common/accessaudit ./node ./cmd ./core/app/dispatcher -count=1 -timeout 60s 通过。临时测试完成后删除。
 - 下一处：发布后比较队列深度/缺口增长、磁盘 I/O 等待、真实代理请求；管理失败看 reason/http_status，业务启动看独立 err 和监听。spool 文件大小含空闲页，不能当作 pending_bytes；不删除队列、不禁用同步刷盘。
 - 边界：本次未改线上二进制/配置、未重启、未推送或发布；不宣称仅此补丁即可消除慢盘/过载，也未完成原用户客户端故障复现。文件：common/accessaudit/spool_core.go、node/cleanup_control.go；运维说明：v2board/docs/node-orphan-cleanup-runbook.md。提交号用本节所属提交定位。
+
+## 2026-10-21：Xray v26.10.21 CA 私钥事件的 v2node 影响核查
+
+- 问题：上游紧急版移除 emSign ECC Root CA - C3、emSign ECC Root CA - G3、emSign Root CA - C1，并用修补后的 Go 拦截 8 个问题证书公钥；这属于 TLS 服务端身份信任风险，不能仅凭 Xray 版本早于被撤版版本判定安全。
+- 已核对链路：go.mod 的 replace → 实际缓存中的 wyx2685/xray-core 6f1e299a2bce → Linux TLS getCertPool/SystemCertPool → Go crypto/x509；同时检查面板 Resty HTTPS/WSS、更新包 http.DefaultClient、Xray TLS 出站和 DoH/DoQ，以及 CI/Docker 编译版本。
+- 修复前：定制核心为 2026-05-04 提交，没有此次被移除的内置 x509roots/fallback 包；但默认信任系统 CA。release.yml 和 Dockerfile 固定 Go 1.26.1，缺少 containsDistrustedSPKIHash 拦截。因此若运行二进制仍使用未修补 Go 且有效信任库仍信任问题证书链，存在同类中间人风险；需要攻击者具备流量拦截或重定向条件，不等于已发生入侵或数据泄漏。
+- 修复：go.mod 最低版本提高到 Go 1.26.10；release.yml 改为从 go.mod 读取编译版本，与现有 CodeQL 配置共用来源；Docker 构建镜像升级到 golang:1.26.10-alpine。保留定制核心和依赖版本，后续新产物使用已修补的证书校验器；不会自动修补线上旧程序。
+- 发布后续：仍需重新编译、发布和替换运行二进制，并更新实际运行环境的 CA 库；当前 Xray 会缓存根证书池，不能只更新宿主机包就宣称进程已生效。Docker 还要检查容器内 CA。不要直接以官方 xray 程序覆盖 v2node。
+- 验证：读取 Xray release/PR #7212、golang/crypto 提交 9f2b28d4331a，以及 Go 1.26.1/1.26.10/1.27.3 官方源码；再次确认 Go 1.26.10 的证书链过滤及 8 个 SPKI 拦截值、官方 Linux amd64/arm64 发行包与 Docker 对应镜像可用。go mod edit -json 解析、构建版本一致性检查与 git diff --check 通过。按仓库约束未运行构建、漏洞利用或生产检查，编译兼容性和线上验收待发版验证。核查基线 v2node 8255517。
+- 下一处：从具体节点运行进程定位二进制，用 go version -m 检查实际编译版本/模块；检查有效 CA 信任源、SSL_CERT_FILE/SSL_CERT_DIR 和自定义信任/固定证书配置，再以证书拒绝验证及真实面板/代理请求验收。仅升级机器上的 Go，不会修补已运行的旧程序。
+- 相关：go.mod:238、.github/workflows/release.yml:58、Dockerfile:2、api/v2board/panel.go:70、api/v2board/wakeup.go:105、node/update.go:235；依赖 transport/internet/tls/config_other.go:18。上游：https://github.com/XTLS/Xray-core/releases/tag/v26.10.21 ；https://github.com/XTLS/Xray-core/pull/7212 。
+- 范围：本次仅修改 go.mod、Dockerfile、.github/workflows/release.yml 和本条记录；保留其他未提交记录。用户授权本地提交，未推送、发布、部署或重启；线上逐节点暴露状态与是否遭利用均未确认。提交号用本节所属提交定位。
