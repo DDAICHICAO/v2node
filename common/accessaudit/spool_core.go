@@ -70,7 +70,13 @@ func openBoltSpool[T any](config SpoolConfig, codec spoolCodec[T]) (*boltSpool[T
 	if err := config.MkdirAll(filepath.Dir(config.Path), 0o700); err != nil {
 		return nil, fmt.Errorf("create spool directory: %w", err)
 	}
-	db, err := bolt.Open(config.Path, 0o600, &bolt.Options{Timeout: time.Second})
+	// Rebuild free-page metadata on open instead of rewriting a potentially
+	// multi-megabyte freelist on every enqueue/ack. NoSync stays false: event
+	// data and transaction metadata must still reach disk before commit returns.
+	db, err := bolt.Open(config.Path, 0o600, &bolt.Options{
+		Timeout:        time.Second,
+		NoFreelistSync: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open spool: %w", err)
 	}

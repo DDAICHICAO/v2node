@@ -1,5 +1,13 @@
 # LESSONS LEARNED
 
+## 2026-10-24：审计队列空闲页清单写放大拖慢授权快照
+
+- 症状/链路：少量在线用户仍有高 I/O 和同步确认长尾；访问/流量审计入队及 Ack → bbolt 每次事务保存 freelist → 同盘授权快照 Sync 等待 → 同步 ACK。授权行数不等于在线人数，文件体积也不等于当前积压。
+- 根因：旧节点 access.db 约 2.5 GiB、超过 99% 空间空闲，每个小事务仍重写约 5 MiB freelist；部分 flow.db 另有约 1.52 MiB。旧 Peek 只读优化已经部署，不能重复作为修复方案。
+- 修复：共享 `openBoltSpool` 启用 `NoFreelistSync`，正常事件/事务元页刷盘保留；重新打开时重建空闲页信息。原库直接兼容，不清空、不自动压缩、不提前 ACK。物理文件大小不自动回收，重开扫描成本需要上线观察。
+- 验证：旧实现的 32 MiB 历史积压夹具先失败，入队/Ack/Reject 事务页面量 221184 字节，修复后 12288 字节（约减少 94.4%，不含固定元页，不等于生产磁盘写入降幅）；两类队列异常进程退出后恢复、旧默认打开/再次升级、FIFO/计数/序号和结构检查通过，`go test ./common/accessaudit -count=1` 通过。
+- 范围/下次：只提交源码，由用户构建部署；未验证断电、Linux 运行或生产延迟改善。优先对照进程 write_bytes、审计新增错误、同 revision 的快照/ACK 和真实连接；仍慢再查宿主存储与快照状态锁。维护入口 `docs/audit-spool-storage.md`，关联 `common/accessaudit/spool_core.go`、现有 `spool_core_test.go`、`node/offline_state.go`；相邻 v2board 排查手册保存脱敏现场证据。
+
 ## 2026-10-16：默认关闭的秒级许可与可靠回退
 
 - 症状/链路：节点用户同步已有 wakeup，但配置发现与完整状态仍随轮询；用户要求新增秒级通讯可回退。链路为后台提交后修订 → 既有鉴权 WSS → `node_realtime_v1` 许可 → 原配置接口及独立网卡采样。
