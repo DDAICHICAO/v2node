@@ -186,6 +186,10 @@ type EncSettings struct {
 	NativeMaxConnections     int    `json:"native_max_connections"`
 	NativeMaxUserConnections int    `json:"native_max_user_connections"`
 	NativeReplayCapacity     int    `json:"native_replay_capacity"`
+	NativePreauthRatePerIP   int    `json:"native_preauth_rate_per_ip"`
+	NativePreauthBurstPerIP  int    `json:"native_preauth_burst_per_ip"`
+	NativeReplayPerUser      int    `json:"native_replay_per_user"`
+	NativeReplayPerIP        int    `json:"native_replay_per_ip"`
 	Mode                     string `json:"mode"`
 	Ticket                   string `json:"ticket"`
 	ServerPadding            string `json:"server_padding"`

@@ -26,11 +26,20 @@ var nativeProcessActive atomic.Int64
 type nativeIngressBudget struct {
 	pending, active                                         atomic.Int64
 	rejected, invalid, unauthorized, acceptedV2, acceptedV3 atomic.Uint64
-	dispatchFailed                                          atomic.Uint64
+	dispatchFailed, preauthRejected, replayRejected         atomic.Uint64
 	maxPending, maxActive                                   int64
 	maxUser                                                 int
+	preauthRate, preauthBurst                               float64
 	mu                                                      sync.Mutex
 	users                                                   map[int]int
+	ipMu                                                    sync.Mutex
+	ipBuckets                                               map[string]nativeIPBucket
+	ipLastCleanup                                           time.Time
+}
+
+type nativeIPBucket struct {
+	tokens  float64
+	updated time.Time
 }
 
 func nativeBound(value, fallback, low, high int) int {
@@ -46,7 +55,21 @@ func nativeBound(value, fallback, low, high int) int {
 	return value
 }
 func newNativeIngressBudget(e panel.EncSettings) *nativeIngressBudget {
-	return &nativeIngressBudget{maxPending: int64(nativeBound(e.NativeMaxHandshakes, 4096, 64, 32768)), maxActive: int64(nativeBound(e.NativeMaxConnections, 131072, 1024, 262144)), maxUser: nativeBound(e.NativeMaxUserConnections, 4096, 64, 32768), users: make(map[int]int)}
+	rate := nativeBound(e.NativePreauthRatePerIP, 128, 1, 8192)
+	burst := nativeBound(e.NativePreauthBurstPerIP, 256, 1, 32768)
+	if burst < rate {
+		burst = rate
+	}
+	return &nativeIngressBudget{
+		maxPending:    int64(nativeBound(e.NativeMaxHandshakes, 4096, 64, 32768)),
+		maxActive:     int64(nativeBound(e.NativeMaxConnections, 131072, 1024, 262144)),
+		maxUser:       nativeBound(e.NativeMaxUserConnections, 4096, 64, 32768),
+		preauthRate:   float64(rate),
+		preauthBurst:  float64(burst),
+		users:         make(map[int]int),
+		ipBuckets:     make(map[string]nativeIPBucket),
+		ipLastCleanup: time.Now(),
+	}
 }
 func reserve(a *atomic.Int64, max int64) bool {
 	for {
@@ -102,6 +125,47 @@ func (b *nativeIngressBudget) releaseUser(uid int) {
 	if b.users[uid] <= 0 {
 		delete(b.users, uid)
 	}
+}
+
+func (b *nativeIngressBudget) allowPreauth(clientIP string, now time.Time) bool {
+	if b == nil || b.preauthRate <= 0 || b.preauthBurst <= 0 {
+		return true
+	}
+	key := clientIP
+	if key == "" {
+		key = "<unknown>"
+	}
+	b.ipMu.Lock()
+	defer b.ipMu.Unlock()
+	if now.Sub(b.ipLastCleanup) > time.Minute {
+		for ip, bucket := range b.ipBuckets {
+			if now.Sub(bucket.updated) > time.Minute {
+				delete(b.ipBuckets, ip)
+			}
+		}
+		b.ipLastCleanup = now
+	}
+	bucket, ok := b.ipBuckets[key]
+	if !ok {
+		if len(b.ipBuckets) >= 65536 {
+			return false
+		}
+		bucket = nativeIPBucket{tokens: b.preauthBurst, updated: now}
+	}
+	if elapsed := now.Sub(bucket.updated).Seconds(); elapsed > 0 {
+		bucket.tokens += elapsed * b.preauthRate
+		if bucket.tokens > b.preauthBurst {
+			bucket.tokens = b.preauthBurst
+		}
+		bucket.updated = now
+	}
+	if bucket.tokens < 1 {
+		b.ipBuckets[key] = bucket
+		return false
+	}
+	bucket.tokens--
+	b.ipBuckets[key] = bucket
+	return true
 }
 
 func (s *SntpEclipseServer) readCompatibleHello(conn net.Conn) (*sntpEclipseHandshakeState, error) {
@@ -160,6 +224,10 @@ func (s *SntpEclipseServer) handleCompatibleConn(raw net.Conn) {
 		return
 	}
 	conn := prepared
+	if !b.allowPreauth(clientIP, start) {
+		b.preauthRejected.Add(1)
+		return
+	}
 	hs, err := s.readCompatibleHello(conn)
 	if err != nil {
 		b.invalid.Add(1)
@@ -175,10 +243,6 @@ func (s *SntpEclipseServer) handleCompatibleConn(raw net.Conn) {
 		b.unauthorized.Add(1)
 		return
 	}
-	if !s.replay.Mark(hello.SessionID, time.Now()) {
-		b.invalid.Add(1)
-		return
-	}
 	if !b.acquireUser(uid) {
 		return
 	}
@@ -189,6 +253,11 @@ func (s *SntpEclipseServer) handleCompatibleConn(raw net.Conn) {
 			b.unauthorized.Add(1)
 			return
 		}
+	}
+	if !s.replay.MarkScoped(hello.SessionID, uid, clientIP, time.Now()) {
+		b.invalid.Add(1)
+		b.replayRejected.Add(1)
+		return
 	}
 	if err = s.writeServerReply(conn, hs, true); err != nil {
 		b.invalid.Add(1)
@@ -235,6 +304,8 @@ func TitanRuntimeStatus(tag string) map[string]any {
 		out["pending"] = b.pending.Load()
 		out["active"] = b.active.Load()
 		out["capacity_rejected"] = b.rejected.Load()
+		out["preauth_rejected"] = b.preauthRejected.Load()
+		out["replay_rejected"] = b.replayRejected.Load()
 		out["invalid"] = b.invalid.Load()
 		out["dispatch_failed"] = b.dispatchFailed.Load()
 		out["unauthorized"] = b.unauthorized.Load()

@@ -142,10 +142,20 @@ type sntpEclipseHandshakeState struct {
 type sntpEclipseReplayCache struct {
 	mu          sync.Mutex
 	ttl         time.Duration
-	seen        map[[32]byte]time.Time
+	seen        map[[32]byte]sntpEclipseReplayEntry
+	userCounts  map[int]int
+	ipCounts    map[string]int
 	insertCount int
 	lastCleanup time.Time
 	capacity    int
+	maxPerUser  int
+	maxPerIP    int
+}
+
+type sntpEclipseReplayEntry struct {
+	expiresAt time.Time
+	userID    int
+	clientIP  string
 }
 
 type cipherAEAD interface {
@@ -194,6 +204,8 @@ func newSntpEclipseServer(tag string, nodeInfo *panel.NodeInfo, xray *xcore.Inst
 	if mode == titannative.Mode {
 		replay.ttl = 2 * sntpEclipseHandshakeTTL
 		replay.capacity = nativeBound(nodeInfo.Common.EncryptionSettings.NativeReplayCapacity, 1048576, 1024, 4194304)
+		replay.maxPerUser = nativeBound(nodeInfo.Common.EncryptionSettings.NativeReplayPerUser, 8192, 128, 131072)
+		replay.maxPerIP = nativeBound(nodeInfo.Common.EncryptionSettings.NativeReplayPerIP, 16384, 256, 262144)
 	}
 	return &SntpEclipseServer{
 		nativeBudget:        newNativeIngressBudget(nodeInfo.Common.EncryptionSettings),
@@ -334,7 +346,9 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 			"cmd":       hello.Command,
 			"reason":    limiter.LimitRejectReasonUserNotFound.String(),
 		}).Warn("SNTP Eclipse user not found")
-		_ = s.writeServerReply(conn, handshake, false)
+		if !handshake.v2 {
+			_ = s.writeServerReply(conn, handshake, false)
+		}
 		_ = conn.Close()
 		return
 	}
@@ -360,13 +374,19 @@ func (s *SntpEclipseServer) handleConn(conn net.Conn) {
 				"fanout_threshold":       rejectInfo.FanoutThreshold,
 				"fanout_window_seconds":  rejectInfo.FanoutWindowSeconds,
 			}).Warn("SNTP Eclipse user rejected by limiter")
-			_ = s.writeServerReply(conn, handshake, false)
+			if !handshake.v2 {
+				_ = s.writeServerReply(conn, handshake, false)
+			}
 			_ = conn.Close()
 			return
 		} else if b != nil {
 			// Keep the early limiter check before sending an accepted reply.
 			// Traffic shaping and byte counters are applied by the Xray dispatcher.
 		}
+	}
+	if handshake.v2 && s.replay != nil && !s.replay.MarkScoped(hello.SessionID, uid, clientIP, time.Now()) {
+		_ = conn.Close()
+		return
 	}
 	if err := s.writeServerReply(conn, handshake, true); err != nil {
 		log.WithFields(log.Fields{
@@ -498,9 +518,6 @@ func (s *SntpEclipseServer) readClientHelloV2(conn net.Conn) (*sntpEclipseHandsh
 	}
 	if math.Abs(time.Since(time.Unix(hello.Timestamp, 0)).Seconds()) > sntpEclipseHandshakeTTL.Seconds() {
 		return nil, errors.New("expired hello")
-	}
-	if s.mode != titannative.Mode && s.replay != nil && !s.replay.Mark(hello.SessionID, time.Now()) {
-		return nil, errors.New("replayed hello")
 	}
 	serverEphemeral, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -1142,49 +1159,90 @@ func sntpEclipseV2Transcript(clientPublic, salt, lenBuf, sealedHello, serverPubl
 func newSntpEclipseReplayCache(ttl time.Duration) *sntpEclipseReplayCache {
 	return &sntpEclipseReplayCache{
 		ttl:         ttl,
-		seen:        make(map[[32]byte]time.Time),
+		seen:        make(map[[32]byte]sntpEclipseReplayEntry),
+		userCounts:  make(map[int]int),
+		ipCounts:    make(map[string]int),
 		lastCleanup: time.Now(),
 	}
 }
 
 func (c *sntpEclipseReplayCache) Mark(sessionID [16]byte, now time.Time) bool {
+	return c.MarkScoped(sessionID, 0, "", now)
+}
+
+func (c *sntpEclipseReplayCache) MarkScoped(sessionID [16]byte, userID int, clientIP string, now time.Time) bool {
 	if c == nil {
 		return true
 	}
 	key := sha256.Sum256(sessionID[:])
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if expiresAt, ok := c.seen[key]; ok && now.Before(expiresAt) {
-		return false
+	if entry, ok := c.seen[key]; ok {
+		if now.Before(entry.expiresAt) {
+			return false
+		}
+		c.removeEntryLocked(key, entry)
 	}
+	c.cleanupLocked(now)
 	if c.capacity > 0 {
 		// Native caches are bounded; do not scan a full cache for every rejected
 		// handshake or every 256 inserts under high connection churn.
 		if now.Sub(c.lastCleanup) > time.Minute {
-			for k, expiry := range c.seen {
-				if !now.Before(expiry) {
-					delete(c.seen, k)
-				}
-			}
-			c.lastCleanup = now
+			c.cleanupLocked(now)
 		}
 		if len(c.seen) >= c.capacity {
 			return false
 		}
-		c.seen[key] = now.Add(c.ttl)
-		return true
 	}
-	c.seen[key] = now.Add(c.ttl)
+	clientIP = strings.TrimSpace(clientIP)
+	if userID > 0 && c.maxPerUser > 0 && c.userCounts[userID] >= c.maxPerUser {
+		return false
+	}
+	if clientIP != "" && c.maxPerIP > 0 && c.ipCounts[clientIP] >= c.maxPerIP {
+		return false
+	}
+	entry := sntpEclipseReplayEntry{expiresAt: now.Add(c.ttl), userID: userID, clientIP: clientIP}
+	c.seen[key] = entry
+	if userID > 0 && c.maxPerUser > 0 {
+		c.userCounts[userID]++
+	}
+	if clientIP != "" && c.maxPerIP > 0 {
+		c.ipCounts[clientIP]++
+	}
 	c.insertCount++
 	if c.insertCount%256 == 0 || now.Sub(c.lastCleanup) > time.Minute {
-		for k, expiresAt := range c.seen {
-			if !now.Before(expiresAt) {
-				delete(c.seen, k)
-			}
-		}
+		c.cleanupLocked(now)
 		c.lastCleanup = now
 	}
 	return true
+}
+
+func (c *sntpEclipseReplayCache) removeEntryLocked(key [32]byte, entry sntpEclipseReplayEntry) {
+	delete(c.seen, key)
+	if entry.userID > 0 && c.userCounts[entry.userID] > 0 {
+		c.userCounts[entry.userID]--
+		if c.userCounts[entry.userID] == 0 {
+			delete(c.userCounts, entry.userID)
+		}
+	}
+	if entry.clientIP != "" && c.ipCounts[entry.clientIP] > 0 {
+		c.ipCounts[entry.clientIP]--
+		if c.ipCounts[entry.clientIP] == 0 {
+			delete(c.ipCounts, entry.clientIP)
+		}
+	}
+}
+
+func (c *sntpEclipseReplayCache) cleanupLocked(now time.Time) {
+	if !c.lastCleanup.IsZero() && !now.Before(c.lastCleanup) && now.Sub(c.lastCleanup) <= time.Minute {
+		return
+	}
+	for key, entry := range c.seen {
+		if !now.Before(entry.expiresAt) {
+			c.removeEntryLocked(key, entry)
+		}
+	}
+	c.lastCleanup = now
 }
 
 func decodeURLBase64(value string) ([]byte, error) {
