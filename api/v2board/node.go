@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	stdnet "net"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -154,11 +153,6 @@ type TlsSettings struct {
 	DNSEnv             string   `json:"dns_env"`
 	RejectUnknownSni   string   `json:"reject_unknown_sni"`
 	CertificateScopeID uint64   `json:"certificate_scope_id"`
-	FrontMode          string   `json:"front_mode"`
-	ECH                string   `json:"ech"`
-	ECHServerName      string   `json:"ech_server_name"`
-	ECHKey             string   `json:"ech_key"`
-	ECHConfig          string   `json:"ech_config"`
 }
 
 func (t *TlsSettings) UnmarshalJSON(data []byte) error {
@@ -284,9 +278,6 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode node params error: %s; body=%s", err, bodySnippet(r.Body()))
 	}
-	if err := ValidateIngressMode(cm); err != nil {
-		return nil, fmt.Errorf("invalid ingress mode: %w", err)
-	}
 	managedTLSRequired := cm.TlsSettings.CertMode == "managed"
 	c.managedTLSCredentialRequired.Store(managedTLSRequired)
 	if managedTLSRequired {
@@ -405,101 +396,4 @@ func (t TlsSettings) PrimaryServerName() string {
 		return ""
 	}
 	return serverNames[0]
-}
-
-// ValidateIngressMode rejects an invalid SNI-fronted node before the runtime
-// can attempt to create a listener. Direct mode remains compatible with the
-// existing V2Node combinations, and Titan is kept on its own protocol path.
-func ValidateIngressMode(common *CommonNode) error {
-	if common == nil {
-		return errors.New("missing node configuration")
-	}
-
-	frontMode := strings.ToLower(strings.TrimSpace(common.TlsSettings.FrontMode))
-	if frontMode == "" || frontMode == "direct" {
-		if common.Protocol == "sntp-eclipse" && frontMode == "direct" {
-			return nil
-		}
-		return nil
-	}
-	if frontMode != "sni" {
-		return fmt.Errorf("unsupported front_mode: %s", frontMode)
-	}
-	if common.Protocol == "sntp-eclipse" {
-		return errors.New("Titan does not support SNI front mode")
-	}
-	switch common.Protocol {
-	case "trojan", "anytls", "vless":
-	default:
-		return fmt.Errorf("SNI front mode does not support protocol: %s", common.Protocol)
-	}
-	if common.Tls != Tls {
-		return errors.New("SNI front mode requires ordinary TLS")
-	}
-	if strings.ToLower(strings.TrimSpace(common.Network)) != "tcp" {
-		return errors.New("SNI front mode requires TCP transport")
-	}
-	if common.ServerPort < 1 || common.ServerPort > 65535 {
-		return errors.New("SNI front mode requires server_port in range 1..65535")
-	}
-	if !validIngressDNSName(common.TlsSettings.ServerName) {
-		return errors.New("SNI front mode requires a valid DNS SNI")
-	}
-	certMode := strings.ToLower(strings.TrimSpace(common.TlsSettings.CertMode))
-	switch certMode {
-	case "self", "http", "dns", "file", "managed":
-	default:
-		return errors.New("SNI front mode requires a usable certificate mode")
-	}
-	if common.TlsSettings.ECH != "" || common.TlsSettings.ECHServerName != "" ||
-		common.TlsSettings.ECHKey != "" || common.TlsSettings.ECHConfig != "" {
-		return errors.New("SNI front mode does not support ECH")
-	}
-	if strings.TrimSpace(common.Flow) != "" {
-		return errors.New("SNI front mode does not support flow")
-	}
-	return validateIngressNetworkSettings(common.NetworkSettings)
-}
-
-func validateIngressNetworkSettings(raw json.RawMessage) error {
-	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "" {
-		return nil
-	}
-	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &settings); err != nil {
-		return fmt.Errorf("SNI front mode network_settings must be an object: %w", err)
-	}
-	value, ok := settings["acceptProxyProtocol"]
-	if !ok {
-		return nil
-	}
-	text := strings.TrimSpace(string(value))
-	if text != "true" && text != "false" {
-		return errors.New("acceptProxyProtocol must be boolean")
-	}
-	return nil
-}
-
-func validIngressDNSName(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 253 || stdnet.ParseIP(value) != nil {
-		return false
-	}
-	labels := strings.Split(value, ".")
-	if len(labels) < 2 {
-		return false
-	}
-	for _, label := range labels {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, char := range []byte(label) {
-			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
-				(char >= '0' && char <= '9') || char == '-' {
-				continue
-			}
-			return false
-		}
-	}
-	return true
 }
