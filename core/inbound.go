@@ -115,6 +115,12 @@ func (v *V2Core) RemoveStreamUnlockProbeInbound(tag string) error {
 
 // BuildInbound build Inbound config for different protocol
 func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerConfig, error) {
+	if nodeInfo == nil || nodeInfo.Common == nil {
+		return nil, errors.New("incomplete node configuration")
+	}
+	if err := panel.ValidateIngressMode(nodeInfo.Common); err != nil {
+		return nil, err
+	}
 	in := &coreConf.InboundDetourConfig{}
 	var err error
 	switch nodeInfo.Type {

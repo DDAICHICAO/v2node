@@ -2,6 +2,7 @@ package panel
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -119,5 +120,83 @@ func newNodeConfigTestClient(apiHost string) *Client {
 		NodeId:   1,
 		UserList: &UserListBody{},
 		AliveMap: &AliveMap{},
+	}
+}
+
+func TestValidateIngressModeAcceptsSupportedSNIFrontProtocols(t *testing.T) {
+	for _, protocol := range []string{"trojan", "anytls", "vless"} {
+		common := validSNIFrontCommon(protocol)
+		if err := ValidateIngressMode(common); err != nil {
+			t.Fatalf("protocol=%s: unexpected validation error: %v", protocol, err)
+		}
+	}
+}
+
+func TestValidateIngressModeRejectsUnsafeSNIFrontCombinations(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*CommonNode)
+	}{
+		{name: "unsupported protocol", mutate: func(c *CommonNode) { c.Protocol = "vmess" }},
+		{name: "tls disabled", mutate: func(c *CommonNode) { c.Tls = None }},
+		{name: "reality", mutate: func(c *CommonNode) { c.Tls = Reality }},
+		{name: "non tcp", mutate: func(c *CommonNode) { c.Network = "ws" }},
+		{name: "missing sni", mutate: func(c *CommonNode) { c.TlsSettings.ServerName = "" }},
+		{name: "ip sni", mutate: func(c *CommonNode) { c.TlsSettings.ServerName = "192.0.2.10" }},
+		{name: "wildcard sni", mutate: func(c *CommonNode) { c.TlsSettings.ServerName = "*.example.com" }},
+		{name: "invalid server port", mutate: func(c *CommonNode) { c.ServerPort = 0 }},
+		{name: "certificate disabled", mutate: func(c *CommonNode) { c.TlsSettings.CertMode = "none" }},
+		{name: "flow enabled", mutate: func(c *CommonNode) { c.Flow = "xtls-rprx-vision" }},
+		{name: "proxy protocol type", mutate: func(c *CommonNode) { c.NetworkSettings = json.RawMessage(`{"acceptProxyProtocol":"true"}`) }},
+		{name: "ech enabled", mutate: func(c *CommonNode) { c.TlsSettings.ECH = "custom" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			common := validSNIFrontCommon("vless")
+			tc.mutate(common)
+			if err := ValidateIngressMode(common); err == nil {
+				t.Fatal("expected invalid SNI front configuration to be rejected")
+			}
+		})
+	}
+}
+
+func TestValidateIngressModeKeepsDirectModeAndTitanSeparate(t *testing.T) {
+	if err := ValidateIngressMode(&CommonNode{
+		Protocol: "vless",
+		Tls:      None,
+		Network:  "ws",
+	}); err != nil {
+		t.Fatalf("direct mode should keep existing combinations valid: %v", err)
+	}
+	if err := ValidateIngressMode(&CommonNode{
+		Protocol: "sntp-eclipse",
+		Tls:      None,
+		Network:  "tcp",
+		TlsSettings: TlsSettings{
+			FrontMode: "direct",
+		},
+	}); err != nil {
+		t.Fatalf("Titan direct mode should remain valid: %v", err)
+	}
+	common := validSNIFrontCommon("sntp-eclipse")
+	if err := ValidateIngressMode(common); err == nil {
+		t.Fatal("Titan must not enter SNI front mode")
+	}
+}
+
+func validSNIFrontCommon(protocol string) *CommonNode {
+	return &CommonNode{
+		Protocol:        protocol,
+		Tls:             Tls,
+		Network:         "tcp",
+		ServerPort:      10011,
+		Flow:            "",
+		NetworkSettings: json.RawMessage(`{"acceptProxyProtocol":true}`),
+		TlsSettings: TlsSettings{
+			FrontMode:  "sni",
+			ServerName: "node.example.com",
+			CertMode:   "file",
+		},
 	}
 }
