@@ -792,6 +792,13 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	flowSession := newRoutedFlowTrafficSession(ctx, destination, handler.Tag())
+	if runtimeLease != nil || flowSession != nil {
+		if inbound := session.InboundFromContext(ctx); inbound != nil {
+			// Raw socket splice bypasses the link wrappers used for flow byte
+			// accounting and route-generation lifetime tracking.
+			inbound.CanSpliceCopy = 3
+		}
+	}
 	if runtimeLease != nil {
 		link = newRouteTrackedLink(ctx, link, runtimeLease)
 		runtimeLease = nil

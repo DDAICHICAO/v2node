@@ -49,7 +49,6 @@ type V2Core struct {
 	routeDegraded     bool
 	routeHealthReason string
 	eclipse           map[string]*SntpEclipseServer
-	mieru             map[string]*MieruServer
 }
 
 type UserMap struct {
@@ -64,7 +63,6 @@ func New(config *conf.Conf) *V2Core {
 			uidMap: make(map[string]int),
 		},
 		eclipse: make(map[string]*SntpEclipseServer),
-		mieru:   make(map[string]*MieruServer),
 	}
 	return v2core
 }
@@ -76,9 +74,6 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	defer v.access.Unlock()
 	if v.eclipse == nil {
 		v.eclipse = make(map[string]*SntpEclipseServer)
-	}
-	if v.mieru == nil {
-		v.mieru = make(map[string]*MieruServer)
 	}
 	build, err := buildCore(v.Config, infos)
 	if err != nil {
@@ -209,10 +204,6 @@ func (v *V2Core) Close() error {
 		_ = server.Close()
 	}
 	v.eclipse = nil
-	for _, server := range v.mieru {
-		_ = server.Close()
-	}
-	v.mieru = nil
 	accessaudit.Shutdown()
 	if runtimeManager != nil {
 		_ = runtimeManager.Close()

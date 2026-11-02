@@ -418,7 +418,13 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	randomPasswd := hex.EncodeToString(p)
 	if s.ServerKey != "" {
 		settings.Password = s.ServerKey
-		randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
+		keyBytes := p
+		if cipher == "2022-blake3-aes-128-gcm" {
+			keyBytes = p[:16]
+		}
+		// The placeholder user must also have a valid SS2022 key: the new
+		// core validates every user before the real users are synchronized.
+		randomPasswd = base64.StdEncoding.EncodeToString(keyBytes)
 		cipher = ""
 	}
 	defaultSSuser := &coreConf.ShadowsocksUserConfig{

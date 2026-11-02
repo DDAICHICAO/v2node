@@ -22,13 +22,6 @@ func (v *V2Core) ValidateNode(info *panel.NodeInfo, users []panel.UserInfo) erro
 		}
 		return candidate.Close()
 	}
-	if isMieruNode(info) {
-		candidate, err := newMieruServer(info.Tag, info, v.Server, v.dispatcher)
-		if err != nil {
-			return err
-		}
-		return candidate.Close()
-	}
 	// Managed issuance is deliberately asynchronous and can wait without a listener.
 	if info.Common.TlsSettings.CertMode == "managed" && info.Common.CertInfo != nil {
 		if _, err := os.Stat(info.Common.CertInfo.CertFile); os.IsNotExist(err) {

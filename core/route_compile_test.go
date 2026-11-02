@@ -122,8 +122,8 @@ func TestCompileRouteRuntimeRewritesOutboundDependencies(t *testing.T) {
 	if !ok {
 		t.Fatalf("sender settings type=%T", instance)
 	}
-	if sender.GetProxySettings().GetTag() != childPhysical {
-		t.Fatalf("proxySettings.tag=%q, want %q", sender.GetProxySettings().GetTag(), childPhysical)
+	if sender.GetStreamSettings().GetSocketSettings().GetDialerProxy() != childPhysical {
+		t.Fatalf("migrated proxySettings dialerProxy=%q, want %q", sender.GetStreamSettings().GetSocketSettings().GetDialerProxy(), childPhysical)
 	}
 
 	dialerParentPhysical := compiled.LogicalToPhysical["proxy-c"]

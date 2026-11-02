@@ -26,17 +26,6 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 		v.eclipse[tag] = server
 		return nil
 	}
-	if isMieruNode(info) {
-		if v.mieru == nil {
-			v.mieru = make(map[string]*MieruServer)
-		}
-		server, err := newMieruServer(tag, info, v.Server, v.dispatcher)
-		if err != nil {
-			return err
-		}
-		v.mieru[tag] = server
-		return nil
-	}
 	inBoundConfig, err := buildInbound(info, tag)
 	if err != nil {
 		return fmt.Errorf("build inbound error: %s", err)
@@ -55,10 +44,6 @@ func (v *V2Core) DelNode(tag string) error {
 		delete(v.eclipse, tag)
 		return server.Close()
 	}
-	if server, ok := v.mieru[tag]; ok {
-		delete(v.mieru, tag)
-		return server.Close()
-	}
 	err := v.removeInbound(tag)
 	if err != nil {
 		return fmt.Errorf("remove in error: %s", err)
@@ -67,7 +52,7 @@ func (v *V2Core) DelNode(tag string) error {
 }
 
 func (v *V2Core) ReplaceNode(tag string, info *panel.NodeInfo, users []panel.UserInfo) error {
-	if isSntpEclipseNode(info) || isMieruNode(info) {
+	if isSntpEclipseNode(info) {
 		return errors.New("managed TLS runtime replacement is unsupported for this node type")
 	}
 	rollbackConfig, err := v.currentInboundSnapshot(tag)

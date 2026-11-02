@@ -56,15 +56,6 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		server.DelUsers(users)
 		return nil
 	}
-	if server, ok := vc.mieru[tag]; ok {
-		if err := server.DelUsers(users); err != nil {
-			log.WithFields(log.Fields{
-				"tag":        tag,
-				"error_type": fmt.Sprintf("%T", err),
-			}).Warn("Mieru credential cleanup failed; user data plane remains closed")
-		}
-		return nil
-	}
 	manager, err := vc.GetUserManager(tag)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -135,12 +126,15 @@ func (v *V2Core) deactivateUsers(users []panel.UserInfo, tag string) {
 }
 
 func (v *V2Core) removeManagedUsers(manager proxy.UserManager, users []panel.UserInfo, tag string) {
+	_, asynchronousUpdates := manager.(*anytls.Server)
 	for i := range users {
 		user := format.UserTag(tag, users[i].Uuid)
 		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		installed := manager.GetUser(lookupCtx, user)
 		lookupCancel()
-		if installed == nil {
+		// AnyTLS batches updates: a pending add is not visible to GetUser yet,
+		// but RemoveUser must still cancel it before it enters the auth snapshot.
+		if installed == nil && !asynchronousUpdates {
 			continue
 		}
 		removeCtx, removeCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -178,17 +172,6 @@ func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.User
 		userTraffic, deviceTraffic := flushTrafficCounters(report, mintraffic)
 		return userTraffic, deviceTraffic, nil
 	}
-	if server, ok := vc.mieru[tag]; ok {
-		collectTrafficCounters(server.counter, vc.users.uidMap, report)
-		if vc.dispatcher != nil {
-			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
-				c := v.(*counter.TrafficCounter)
-				collectTrafficCounters(c, vc.users.uidMap, report)
-			}
-		}
-		userTraffic, deviceTraffic := flushTrafficCounters(report, mintraffic)
-		return userTraffic, deviceTraffic, nil
-	}
 	if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 		c := v.(*counter.TrafficCounter)
 		collectTrafficCounters(c, vc.users.uidMap, report)
@@ -206,14 +189,6 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	defer v.nodeAccess.RUnlock()
 	if server, ok := v.eclipse[p.Tag]; ok {
 		server.AddUsers(p.Users)
-		v.commitUserUIDs(p.Tag, p.Users)
-		v.activateUserLinks(userLinkKeys(p.Tag, p.Users))
-		return len(p.Users), nil
-	}
-	if server, ok := v.mieru[p.Tag]; ok {
-		if err := server.AddUsers(p.Users); err != nil {
-			return 0, err
-		}
 		v.commitUserUIDs(p.Tag, p.Users)
 		v.activateUserLinks(userLinkKeys(p.Tag, p.Users))
 		return len(p.Users), nil
@@ -254,6 +229,7 @@ func buildCoreUsers(p *AddUsersParams) ([]*protocol.User, error) {
 }
 
 func (v *V2Core) addManagedUsers(manager proxy.UserManager, tag string, infos []panel.UserInfo, users []*protocol.User) (int, error) {
+	_, asynchronousUpdates := manager.(*anytls.Server)
 	readyEmails := make([]string, 0, len(users))
 	newEmails := make([]string, 0, len(users))
 	for _, user := range users {
@@ -265,7 +241,9 @@ func (v *V2Core) addManagedUsers(manager proxy.UserManager, tag string, infos []
 		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		installed := manager.GetUser(lookupCtx, user.Email)
 		lookupCancel()
-		if installed == nil {
+		// AnyTLS's snapshot can still contain a pending removal. Re-adding
+		// must cancel that removal even while the old credential is visible.
+		if installed == nil || asynchronousUpdates {
 			addCtx, addCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err = manager.AddUser(addCtx, memoryUser)
 			addCancel()
@@ -273,7 +251,9 @@ func (v *V2Core) addManagedUsers(manager proxy.UserManager, tag string, infos []
 				rollbackAddedUsers(manager, newEmails)
 				return 0, err
 			}
-			newEmails = append(newEmails, user.Email)
+			if installed == nil {
+				newEmails = append(newEmails, user.Email)
+			}
 		}
 		readyEmails = append(readyEmails, user.Email)
 	}
@@ -503,8 +483,6 @@ func getCipherFromString(c string) shadowsocks.CipherType {
 		return shadowsocks.CipherType_AES_256_GCM
 	case "chacha20-poly1305", "aead_chacha20_poly1305", "chacha20-ietf-poly1305":
 		return shadowsocks.CipherType_CHACHA20_POLY1305
-	case "none", "plain":
-		return shadowsocks.CipherType_NONE
 	default:
 		return shadowsocks.CipherType_UNKNOWN
 	}

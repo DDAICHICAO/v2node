@@ -654,3 +654,20 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 线上处理顺序：先查运行内核/发行版补丁状态、实际运行二进制的 go version -m、systemd Environment 与自定义 socket 配置；对旧程序可在维护窗口以 GODEBUG=multipathtcp=0 合并原有环境参数并重建监听作为缓解；随后发布自定义修补产物，并升级到发行版已修复 CVE-2026-98432 的内核，启动修补内核后验收。容器共用宿主内核，网络命名空间和其他程序也要核对；不要把仅更新 Go、仅升级 v2node 或关闭 MPTCP 说成修复了内核漏洞。
 - 下一处：core/sntp_eclipse.go、core/mieru.go、core/inbound.go、go.mod、script/install.sh 的 systemd 段；依赖 transport/internet/system_listener.go；公告 https://groups.google.com/g/golang-announce/c/PCoQcdxoScw/m/aD-MgXEvAAAJ ，上游 https://github.com/wyx2685/v2node/pull/52 。
 - 范围：仅改本地主模块默认值并追加本记录，保留原有未提交记录；用户授权本地提交；未完整构建、推送、发布、连接生产节点、执行 sysctl、修改服务或重启。生产暴露条件与利用情况待逐机核查；提交号用本节所属提交定位。
+
+
+## 2026-11-02：完整核心升级、Mieru 移除与定制运行链兼容
+
+- 症状/目标：作者更新到 Go 1.27.3 和新 Xray/REALITY fork；SNTP 旧核心直接更换依赖无法编译，且用户要求保留自有协议、用户同步、流量/访问审计和 DNS/路由热更新。用户明确同意移除 Mieru，并批准本地完整编译、回归和 Linux amd64/arm64 交叉编译。
+- 链路：面板 GetNodeInfo / 用户增量 -> core.AddNode / AddUsers / DelUsers -> 定制 dispatcher、限速与连接登记 -> 版本化 DNS/路由出站 -> 计费计数 / FlowTraffic 包装 -> bbolt 队列 -> 审计 HTTP 接收端。保留这条链和自有协议 wire，不用上游完整源码覆盖本地实现。
+- 固定版本：作者 main dde9f237fad986dabe662db18025fb9ae349b5bf；require Xray v1.260930.0，实际 replace wyx2685/xray-core v0.0.0-20261102040409-dcfae7c4776b，核心运行版本 26.10.31；REALITY 全版本 replace wyx2685/REALITY v0.0.0-20261102081311-25ea3c0fa255，保留 standalone X25519；Go 1.27.3，继续 godebug multipathtcp=0。Docker builder 同步，CI 已从 go.mod 取版本。模块图 tidy，bbolt 仍为 1.3.2，不更换审计格式。
+- 接口根因与修复：新核心移除 errors.Error.AtError、旧 singquic 传输、Shadowsocks NONE 枚举及 proxySettings。分别保留原错误、注册 Hysteria/TUIC 传输、拒绝 none/plain，并在路由首次校验和物理 tag 重写前统一迁移 legacy proxySettings 到 sockopt.dialerProxy。校验字段类型、依赖缺失、循环和冲突；transportLayer:false 的非 TCP/REALITY/header/socket 等配置过去被忽略，不能迁移后悄悄启用，现要求明确迁移，失败沿现有降级/回滚路径处理。
+- SS2022 根因与修复：旧占位用户把随机十六进制文本再 base64，解码长度为 64 字节，新服务端严格校验会报 bad key；占位用户改为 AES128 16 字节、AES256 32 字节随机密钥，真实用户密钥格式不变。AES128/AES256 多用户实测通过；上游 Chacha20 多用户服务端不支持，不能误报为已兼容。
+- AnyTLS 根因与修复：GetUser 只读延迟约 200ms 的认证快照。Add 后立即 Del，快照为空导致漏清 pending add；Del 后立即 Add，快照仍存在导致漏清 pending remove。异步管理器的增删均提交到待处理队列，覆盖相反操作，不逐用户等待 200ms。两个方向均先以临时测试复现失败，再验证修复通过；既有批量失败回滚/UID 提交路径继续回归。
+- 审计/热更新根因与修复：原始 socket splice 可绕过 link 包装，导致流量审计或代次租约失真；有 route lease 或 flow session 时设置 CanSpliceCopy=3，保持受跟踪复制。临时用例先复现绕过状态再通过。生产绑定了路由管理器，因此部分直连会失去 splice 优化；尚未吞吐压测，不能承诺性能不变。
+- 真实验证：VMess、VLESS、Trojan、经典 SS、SS2022 AES128/AES256、Hysteria2、AnyTLS 以真实本地客户端完成 TCP 代理转发；TUIC 用 QUIC v5 认证/流中继客户端验证入站。Xray 的 TUIC outbound 在升级前后均未完成，不能用它的 TODO 报错判定节点入站坏了。
+- REALITY 验证：自签名本地 TLS1.3/X25519 目标无会话票据，临时 fixture 仅预置已知的空 post-handshake profile，实际加密握手和认证不 mock。新 freedom 默认拒绝标准协议访问私网，测试配置只精确允许本地 echo 端口；真实 VLESS 链式转发、热切换前后旧/新连接、撤销真实断连、旧出站回收和审计事件落盘/上报均通过。native-1 真实加密握手、TCP echo、双向计数和撤销断连通过。现有 route_hot_reload_integration_test 的 echo 直连不经过代理，不能单独据其名字宣称已测全链路。
+- 核心检查：GOEXPERIMENT=jsonv2、CGO_ENABLED=0，go test -json -p 8 -mod=readonly ./... -count=1 -timeout 90s；现有 259 个顶层用例、含子测试 367 个通过（9 个测试包；14 个无测试文件包）。仓库外 overlay 补测，不保留新增测试文件。构建 Windows amd64 与 Linux amd64/arm64；用 go version -m、ELF machine 和 SHA256 核对工具链、fork、默认 MPTCP 和架构，产物为本地验证版本，不是已发布 release。
+- 工具排障：旧 govulncheck v1.7.0 由 Go 1.26 编译，分析 Go 1.27 泛型方法/标准库时错误；临时用 1.27.3 重编扫描器后语法加载通过，但官方 vuln.go.dev 漏洞库连接 EOF，扫描未完成。go mod verify 仅验证模块完整性，不能替代漏洞扫描。没有据此声称无漏洞。
+- 下次核查：先看 docs/core-upgrade.md 的固定版本和配置边界，再看 core/route_compile.go、core/user.go、core/app/dispatcher/default.go 与 core/inbound.go；发布需走自有 release，核对安装/节点自更新实际下载源、运行二进制、服务环境和真实代理请求。Linux 内核仍需发行版修补并启动修补内核，容器共用宿主内核；程序升级和关闭 MPTCP 只是应用侧缓解。
+- 范围/剩余：只改 v2node 本地源码与说明，保留本记录追加前文件的完整字节前缀和已有约 282 行未提交记录。未改 v2board/客户端/数据库，未推送、发布、生产部署或重启。Linux 实机、race、全协议 UDP/三端矩阵、吞吐和长期稳定性待后续验收；早先 MPTCP 默认修复已经单独提交 c6fce73，此次完整升级随本条记录进行本地提交，提交号以本节所属提交定位。运行/发布指南见 docs/core-upgrade.md，实施计划见 docs/superpowers/plans/2026-11-02-core-upgrade.md。

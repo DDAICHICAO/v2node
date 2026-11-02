@@ -290,7 +290,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		cm.BaseConfig.UserSyncWakeup.Normalize()
 	}
 	switch cm.Protocol {
-	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless", "sntp-eclipse", "mieru":
+	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless", "sntp-eclipse":
 		node.Type = cm.Protocol
 		node.Security = cm.Tls
 	case "shadowsocks":

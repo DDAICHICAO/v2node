@@ -245,9 +245,9 @@ func parseRouteOutboundDefinition(info *panel.NodeInfo, index int, route panel.R
 		return nil, errors.New("outbound action value is empty")
 	}
 	raw := strings.TrimSpace(*route.ActionValue)
-	var outbound coreConf.OutboundDetourConfig
-	if err := json.Unmarshal([]byte(raw), &outbound); err != nil {
-		return nil, errors.New("invalid outbound JSON")
+	outbound, err := decodeOutboundConfig(raw)
+	if err != nil {
+		return nil, err
 	}
 	outbound.Tag = strings.TrimSpace(outbound.Tag)
 	if outbound.Tag == "" {
@@ -388,6 +388,45 @@ func decodeOutboundConfig(raw string) (*coreConf.OutboundDetourConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &outbound); err != nil {
 		return nil, errors.New("invalid outbound JSON")
 	}
+	if outbound.ProxySettings != nil {
+		var legacy struct {
+			Tag                 string `json:"tag"`
+			TransportLayerProxy bool   `json:"transportLayer"`
+		}
+		if err := json.Unmarshal(*outbound.ProxySettings, &legacy); err != nil || strings.TrimSpace(legacy.Tag) == "" {
+			return nil, errors.New("invalid legacy outbound proxy settings")
+		}
+		if stream := outbound.StreamSetting; stream != nil && !legacy.TransportLayerProxy {
+			network := "tcp"
+			if stream.Network != nil {
+				network = strings.ToLower(string(*stream.Network))
+			}
+			if stream.Method != nil {
+				network = strings.ToLower(string(*stream.Method))
+			}
+			security := strings.ToLower(stream.Security)
+			// Legacy application-layer chaining ignored these transport options.
+			// Activating them during migration would silently change the wire.
+			if (network != "tcp" && network != "raw") || (security != "" && security != "none" && security != "tls") ||
+				stream.TCPSettings != nil || stream.RAWSettings != nil || stream.FinalMask != nil ||
+				stream.Address != nil || stream.Port != 0 || stream.SocketSettings != nil {
+				return nil, errors.New("legacy outbound proxy transport settings require explicit dialerProxy migration")
+			}
+		}
+		if outbound.StreamSetting == nil {
+			outbound.StreamSetting = &coreConf.StreamConfig{}
+		}
+		if outbound.StreamSetting.SocketSettings == nil {
+			outbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
+		}
+		if outbound.StreamSetting.SocketSettings.DialerProxy != "" {
+			return nil, errors.New("conflicting outbound proxy settings")
+		}
+		// Xray removed proxySettings; normalize before resolving dependencies so
+		// legacy panel routes retain the same validation and physical tag rewrite.
+		outbound.StreamSetting.SocketSettings.DialerProxy = strings.TrimSpace(legacy.Tag)
+		outbound.ProxySettings = nil
+	}
 	return &outbound, nil
 }
 
@@ -396,9 +435,6 @@ func outboundReferenceFields(outbound *coreConf.OutboundDetourConfig) []*string 
 		return nil
 	}
 	refs := make([]*string, 0, 2)
-	if outbound.ProxySettings != nil {
-		refs = append(refs, &outbound.ProxySettings.Tag)
-	}
 	if outbound.StreamSetting != nil && outbound.StreamSetting.SocketSettings != nil {
 		refs = append(refs, &outbound.StreamSetting.SocketSettings.DialerProxy)
 	}
