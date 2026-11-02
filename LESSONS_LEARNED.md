@@ -641,3 +641,16 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 下一处：从具体节点运行进程定位二进制，用 go version -m 检查实际编译版本/模块；检查有效 CA 信任源、SSL_CERT_FILE/SSL_CERT_DIR 和自定义信任/固定证书配置，再以证书拒绝验证及真实面板/代理请求验收。仅升级机器上的 Go，不会修补已运行的旧程序。
 - 相关：go.mod:238、.github/workflows/release.yml:58、Dockerfile:2、api/v2board/panel.go:70、api/v2board/wakeup.go:105、node/update.go:235；依赖 transport/internet/tls/config_other.go:18。上游：https://github.com/XTLS/Xray-core/releases/tag/v26.10.21 ；https://github.com/XTLS/Xray-core/pull/7212 。
 - 范围：本次仅修改 go.mod、Dockerfile、.github/workflows/release.yml 和本条记录；保留其他未提交记录。用户授权本地提交，未推送、发布、部署或重启；线上逐节点暴露状态与是否遭利用均未确认。提交号用本节所属提交定位。
+
+
+## 2026-11-02：Linux TCP 内核漏洞与默认 MPTCP 监听缓解
+
+- 症状/背景：上游作者建议升级以降低 Linux 漏洞利用风险；核对上游 main 的 5935d2e、dde9f23 与 v0.4.7，以及 Go Security Team 对 CVE-2026-98432 的公告。漏洞位于 Linux IPv4 TCP 内核路径，已公开的远程执行链使用 MPTCP 监听；不能据此断言普通 TCP 无风险或 SNTP 节点已被入侵。
+- 影响链：go.mod / release.yml / Dockerfile 的编译默认 → Xray transport/internet/system_listener.go → 代理 TCP 入站；另查 core/sntp_eclipse.go:Start、core/mieru.go:mieruListenerFactory.Listen。当前 Go 1.26.10 仍继承 Go 1.24+ 的默认 MPTCP 监听；旧 Xray 只在 TcpMptcp=true 时显式开启，false/未配置不会显式关闭。Titan 和 Mieru 入口也未显式关闭。
+- 本地修补：go.mod 增加 godebug multipathtcp=0，使后续编译的主程序及依赖默认关闭 MPTCP；保留 Go 1.26.10、定制 Xray/REALITY、go.sum、CI 和 Docker 版本。运行环境 GODEBUG 和代码 SetMultipathTCP(true) 可覆盖编译默认，发布验收必须核对有效配置。
+- 上游变更：11 月 2 日将 Go 升到 1.27.3，Xray fork 固定 dcfae7c4776b，REALITY fork 固定 25ea3c0fa255（含 X25519 兼容），加入主模块 MPTCP 默认并整理依赖。新 Xray 默认监听器显式关闭 MPTCP。我们当前定制核心仍为 6f1e299a2bce，不能直接替换整个依赖图或用官方二进制覆盖 SNTP。
+- 兼容边界：已发现本地 core/app/dispatcher/fakednssniffer.go 使用 errors.Error.AtError()，而上游新核心 dcfae7c4776b 已删除该方法；完整内核升级至少需要适配这一调用，并验证用户撤销、限速/流量审计、DNS/路由热更新、REALITY、Titan 和 Mieru。此处仅确认一个静态接口差异，不宣称已穷尽全部兼容问题。
+- 验证：实际 go.mod 经 Go 1.26.10 的 go mod edit -json 解析；复制实际 go.mod 到仓库外临时最小主模块，通过 go list -find -mod=readonly -f '{{.DefaultGODEBUG}}' 对照，修补前为空（继承工具链默认），修补后为 multipathtcp=0；临时目录已自动删除。完整项目 go list 的依赖解析未在检查窗口内结束，已停止；隔离检查仅证明编译默认，不等于完整编译或 Linux 实际监听验证。
+- 线上处理顺序：先查运行内核/发行版补丁状态、实际运行二进制的 go version -m、systemd Environment 与自定义 socket 配置；对旧程序可在维护窗口以 GODEBUG=multipathtcp=0 合并原有环境参数并重建监听作为缓解；随后发布自定义修补产物，并升级到发行版已修复 CVE-2026-98432 的内核，启动修补内核后验收。容器共用宿主内核，网络命名空间和其他程序也要核对；不要把仅更新 Go、仅升级 v2node 或关闭 MPTCP 说成修复了内核漏洞。
+- 下一处：core/sntp_eclipse.go、core/mieru.go、core/inbound.go、go.mod、script/install.sh 的 systemd 段；依赖 transport/internet/system_listener.go；公告 https://groups.google.com/g/golang-announce/c/PCoQcdxoScw/m/aD-MgXEvAAAJ ，上游 https://github.com/wyx2685/v2node/pull/52 。
+- 范围：仅改本地主模块默认值并追加本记录，保留原有未提交记录；用户授权本地提交；未完整构建、推送、发布、连接生产节点、执行 sysctl、修改服务或重启。生产暴露条件与利用情况待逐机核查；提交号用本节所属提交定位。

@@ -2,6 +2,8 @@ module github.com/wyx2685/v2node
 
 go 1.26.10
 
+godebug multipathtcp=0
+
 require (
 	github.com/enfein/mieru/v3 v3.26.2
 	github.com/fsnotify/fsnotify v1.9.0
