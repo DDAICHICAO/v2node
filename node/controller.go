@@ -414,7 +414,7 @@ func (c *Controller) startRuntime() error {
 			if err := c.requestCert(); err != nil {
 				limiter.DeleteLimiter(c.tag)
 				c.limiter = nil
-				return fmt.Errorf("request cert error: %s", err)
+				return fmt.Errorf("request cert error: %w", err)
 			}
 		}
 		// Add new tag

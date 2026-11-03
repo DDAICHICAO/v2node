@@ -88,7 +88,7 @@ func New(nodes []conf.NodeConfig, statePath string) (*Node, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, newConfigError(nodes[i], "bootstrap", "node_bootstrap_failed", err)
 		}
 		controllers = append(controllers, n.controllers[i])
 		infos = append(infos, n.NodeInfos[i])
@@ -175,10 +175,7 @@ func (n *Node) Start(nodes []conf.NodeConfig, v2core *core.V2Core) error {
 			if coordinator != nil {
 				coordinator.Close()
 			}
-			return fmt.Errorf("start node controller [%s-%d] error: %s",
-				controller.conf.APIHost,
-				controller.conf.NodeID,
-				err)
+			return newConfigError(*controller.conf, "activation", "node_activation_failed", err)
 		}
 	}
 	return nil

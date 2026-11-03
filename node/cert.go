@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -42,12 +44,13 @@ func (c *Controller) requestCert() error {
 		return fmt.Errorf("node info is incomplete")
 	}
 	cert := info.Common.CertInfo
+	if cert == nil {
+		return &certificateError{code: "tls_certificate_config_missing", err: errors.New("missing certificate configuration")}
+	}
 	switch cert.CertMode {
 	case "none", "":
 	case "file":
-		if cert.CertFile == "" || cert.KeyFile == "" {
-			return fmt.Errorf("cert file path or key file path not exist")
-		}
+		return validateCertificateFiles(cert.CertFile, cert.KeyFile)
 	case "dns", "http":
 		if cert.CertFile == "" || cert.KeyFile == "" {
 			return fmt.Errorf("cert file path or key file path not exist")
@@ -79,6 +82,41 @@ func (c *Controller) requestCert() error {
 		}
 	default:
 		return fmt.Errorf("unsupported certmode: %s", cert.CertMode)
+	}
+	return nil
+}
+
+type certificateError struct {
+	code string
+	err  error
+}
+
+func (e *certificateError) Error() string { return e.err.Error() }
+func (e *certificateError) Unwrap() error { return e.err }
+
+// File mode never creates or replaces operator-managed certificates.
+func validateCertificateFiles(certPath, keyPath string) error {
+	for _, entry := range []struct{ path, name, code string }{
+		{certPath, "certificate", "tls_certificate_missing"},
+		{keyPath, "private key", "tls_private_key_missing"},
+	} {
+		if entry.path == "" {
+			return &certificateError{code: entry.code, err: fmt.Errorf("%s file path is empty", entry.name)}
+		}
+		stat, err := os.Stat(entry.path)
+		if err != nil {
+			code := "tls_certificate_unreadable"
+			if errors.Is(err, os.ErrNotExist) {
+				code = entry.code
+			}
+			return &certificateError{code: code, err: fmt.Errorf("%s file unavailable: %w", entry.name, err)}
+		}
+		if !stat.Mode().IsRegular() {
+			return &certificateError{code: "tls_certificate_unreadable", err: fmt.Errorf("%s path is not a regular file: %s", entry.name, entry.path)}
+		}
+	}
+	if _, err := tls.LoadX509KeyPair(certPath, keyPath); err != nil {
+		return &certificateError{code: "tls_key_pair_invalid", err: fmt.Errorf("certificate/private key pair is unreadable, invalid or mismatched: %w", err)}
 	}
 	return nil
 }

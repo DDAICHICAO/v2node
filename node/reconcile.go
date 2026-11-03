@@ -21,23 +21,23 @@ func (n *Node) Validate(server *core.V2Core) error {
 	for _, c := range n.controllers {
 		info := c.bootstrap.NodeInfo
 		if info == nil || info.Common == nil || info.Common.BaseConfig == nil {
-			return errors.New("incomplete candidate node configuration")
+			return newConfigError(*c.conf, "validation", "node_validation_failed", errors.New("incomplete candidate node configuration"))
 		}
 		if tags[info.Tag] {
-			return errors.New("duplicate node tag")
+			return newConfigError(*c.conf, "validation", "node_validation_failed", errors.New("duplicate node tag"))
 		}
 		tags[info.Tag] = true
 		c.info, c.tag = info, info.Tag
 		if info.Security == panel.Tls && !c.usesManagedTLS() {
 			if info.Common.CertInfo == nil {
-				return errors.New("missing certificate configuration")
+				return newConfigError(*c.conf, "certificate", "tls_certificate_config_missing", errors.New("missing certificate configuration"))
 			}
 			if err := c.requestCert(); err != nil {
-				return fmt.Errorf("prepare node %d certificate: %w", c.conf.NodeID, err)
+				return newConfigError(*c.conf, "certificate", "tls_certificate_prepare_failed", err)
 			}
 		}
 		if err := server.ValidateNode(info, c.bootstrap.Users); err != nil {
-			return fmt.Errorf("validate node %d: %w", c.conf.NodeID, err)
+			return newConfigError(*c.conf, "validation", "node_validation_failed", err)
 		}
 	}
 	return nil
@@ -354,7 +354,7 @@ func (n *Node) Reconcile(prepared *Node, server *core.V2Core) (applied bool, rec
 		// Include partially-started candidates in cleanup too.
 		added = append(added, c)
 		if err := c.Start(server); err != nil {
-			return rollback(fmt.Errorf("start replacement node %d: %w", c.conf.NodeID, err))
+			return rollback(newConfigError(*c.conf, "activation", "node_activation_failed", err))
 		}
 	}
 	n.controllers = next

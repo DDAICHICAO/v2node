@@ -81,9 +81,23 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	fileChangeCh := make(chan struct{}, 1)
 	var nodes *node.Node
 	var v2core *core.V2Core
+	var recovery reloadRetryState
+	statusReporter := node.NewConfigStatusReporter()
+	go statusReporter.Run(ctx)
+	reportStatus := func(err error, digest string) {
+		latest := conf.New()
+		if digest != manager.ConfigDigest() {
+			return
+		}
+		if latest.LoadFromPath(config) == nil && digest == manager.ConfigDigest() {
+			statusReporter.Update(latest.NodeConfigs, nodes, err, recovery.Next())
+		}
+	}
 	lastHandledDigest := ""
+	lastAttemptDigest := ""
 	startRuntime := func() error {
 		preparedDigest := manager.ConfigDigest()
+		lastAttemptDigest = preparedDigest
 		candidateConf := conf.New()
 		if err := candidateConf.LoadFromPath(config); err != nil {
 			return err
@@ -95,6 +109,9 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		server := core.New(candidateConf)
 		server.ReloadCh = reloadCh
 		if err = server.Start(candidate.NodeInfos); err == nil {
+			err = candidate.Validate(server)
+		}
+		if err == nil {
 			err = candidate.Start(candidateConf.NodeConfigs, server)
 		}
 		if err != nil {
@@ -115,7 +132,11 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			log.WithError(err).Error("启动失败且运行态无法清理，退出进程")
 			return
 		}
-		log.WithField("err", err).Error("Business nodes failed to start; management remains active and startup will retry")
+		recovery.Failed(time.Now(), lastAttemptDigest)
+		reportStatus(err, lastAttemptDigest)
+		log.WithFields(log.Fields{"err": err, "retry_at": recovery.Next()}).Error("业务节点启动失败，管理通道继续运行，将退避重试")
+	} else {
+		reportStatus(nil, lastAttemptDigest)
 	}
 	defer func() {
 		if nodes != nil {
@@ -139,7 +160,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(osSignals)
-	retry := time.NewTicker(30 * time.Second)
+	retry := time.NewTicker(time.Second)
 	defer retry.Stop()
 	for {
 		select {
@@ -150,20 +171,27 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			manager.Execute(ctx, req, nodes, v2core)
 			if req.AppliedDigest != "" {
 				lastHandledDigest = req.AppliedDigest
-			}
-		case <-retry.C:
-			if nodes == nil {
-				if err := startRuntime(); err != nil {
-					var fatal *reloadFatalError
-					if errors.As(err, &fatal) {
-						log.WithError(err).Error("启动失败且运行态无法清理，退出进程")
-						return
+				// Cleanup may remove the cause of a failed generation. Re-read
+				// the latest file; never retry a captured, now removed Nodes list.
+				if recovery.Pending() {
+					recovery.Succeeded()
+					select {
+					case reloadCh <- struct{}{}:
+					default:
 					}
-					log.WithField("err", err).Warn("业务节点启动待重试，管理通道继续运行")
+				} else {
+					reportStatus(nil, req.AppliedDigest)
+				}
+			}
+		case now := <-retry.C:
+			if recovery.Pending() && !now.Before(recovery.Next()) {
+				select {
+				case reloadCh <- struct{}{}:
+				default:
 				}
 			}
 		case <-fileChangeCh:
-			if digest := manager.ConfigDigest(); digest != "" && digest == lastHandledDigest {
+			if digest := manager.ConfigDigest(); !recovery.Pending() && digest != "" && digest == lastHandledDigest {
 				continue
 			}
 			select {
@@ -171,27 +199,35 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			default:
 			}
 		case <-reloadCh:
-			if nodes == nil {
-				if err := startRuntime(); err != nil {
-					var fatal *reloadFatalError
-					if errors.As(err, &fatal) {
-						log.WithError(err).Error("启动失败且运行态无法清理，退出进程")
-						return
-					}
-					log.WithField("err", err).Warn("业务节点启动待重试")
-				}
+			digest := manager.ConfigDigest()
+			if !recovery.Allow(time.Now(), digest) {
 				continue
 			}
-			digest := manager.ConfigDigest()
-			if err := reload(config, &nodes, &v2core); err != nil {
-				log.WithField("err", err).Error("配置切换失败")
+			var err error
+			lastAttemptDigest = digest
+			if nodes == nil {
+				err = startRuntime()
+			} else {
+				err = reload(config, &nodes, &v2core)
+			}
+			if err != nil {
 				var fatal *reloadFatalError
 				if errors.As(err, &fatal) {
+					log.WithError(err).Error("配置切换失败且运行态无法恢复，退出进程")
 					return
 				}
+				recovery.Failed(time.Now(), lastAttemptDigest)
+				reportStatus(err, lastAttemptDigest)
+				log.WithFields(log.Fields{"err": err, "retry_at": recovery.Next()}).Error("配置未生效，保留原运行态并退避重试")
 				continue
 			}
-			lastHandledDigest = digest
+			recovered := recovery.Pending()
+			recovery.Succeeded()
+			lastHandledDigest = lastAttemptDigest
+			reportStatus(nil, lastAttemptDigest)
+			if recovered {
+				log.Warn("节点配置已恢复并生效，已清除失败重试状态")
+			}
 			log.Info("配置更新成功")
 		}
 	}
