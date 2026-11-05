@@ -1,5 +1,28 @@
 # LESSONS LEARNED
 
+## 2026-11-05 晚间：复制同 NodeID 原证书解决持续活跃实例冲突
+
+- 症状/根因：230/231/761/762 两实例持续上报不同自签指纹，面板冻结全局 pin。补文件或重新生成只恢复监听，不自动恢复旧订阅信任；self/file 不承担 managed 的跨机证书分发。
+- 修复：核对原机器文件/实际监听/面板既有 pin 后，备份新增机器配置与旧证书，以 SSH/SFTP 复制对应 NodeID 原证书及私钥，文件 0600；临时 Timeout 变化重建目标 Controller，随后逐字节恢复原配置。未改原机器、删节点/作用域、直接 SQL、清观察缓存或重启主进程。
+- 验证/边界：21:59 四组自然回报 consistent、两实例/一个指纹，已有 pin 值保留；两机八个监听、PID/NRestarts 不变，目标本机/外部 TLS 1.3 实际证书匹配。761/762 原自签信任下严格域名验证通过，到期 2027-11-03 17:13:45（北京时间）；230/231 原 SAN/校验名不一致仍存在，未修改校验策略或验收客户转发。独立托管作用域 2 保持 v2、2/2、pending 0。
+- 管理标签验收：22:05:38 三台目标机器涉及的 14 个 NodeID 在后台实际配置汇总中全部 applied，failed/blocked/unavailable 为 0。追踪 `ConfigStatusReporter` → config-status → `V2nodeConfigStatusService`，不要把 TLS 同步成功等同于配置失败状态已清除。
+- 下次入口：`docs/log-troubleshooting.md` 同日“同 NodeID 原证书跨机对齐”章节；`requestCert`、Controller 复用/重建与面板 `V2nodeTlsCertificateReconciler`。分别比较文件、进程实际证书、面板自然共识和客户连接，避免用端口开放替代完整验收。
+
+## 2026-11-05 晚间：托管凭据超时后的重试门禁形成永久等待
+
+- 症状/根因：已签发作用域长期 1/2，新增实例从约 20:30 起 `managed_tls_config_invalid`、version 0、token 未配置且无监听。pending Controller 只启动证书管理器与状态报告，配置轮询未启动；管理器又要求预先存在 token，使 API 自动领取重试不可达。
+- 修复：`node/managed_tls_manager.go::validateConfiguration` 仅保留静态结构校验，让正常取证接口处理凭据自动领取与 HMAC。现有 `managed_tls_runtime_activation_test.go` 增加首次领取失败后重试、有效本地证书在凭据失败时继续服务；修改前两项失败，修改后 `go test ./node -run '^TestManagedTLS' -count=1` 通过。修复和测试纳入本次提交，尚未构建、发版或部署，不能把线上凭据补齐当作代码已上线。
+- 线上恢复/验证：真实接口领取并校验凭据，标准目录 0700、文件 0600；备份后仅临时调整目标 NodeID 的 Timeout 触发 Controller 重建，再恢复原配置值。约 21:34 监听恢复，21:38 面板自然回报 2/2、pending 0；本机和外部严格公共 CA / SNI 的 PROXY+TLS 1.3 通过，PID/NRestarts 不变。无新签证书、直接 SQL、清缓存或人工 ready；客户代理认证/转发未验收。
+- 下次入口：`docs/log-troubleshooting.md` 同日托管凭据章节；`Controller.Start`、`managedTLSManager.Prepare/reconcileOnceLocked`、`Client.managedTLSRequest`、`EnsureManagedTLSCredential`。首次网络超时上游原因仍未知；curl 空 POST 需显式发送零长度 body，业务失败也可能是 HTTP 200。
+
+## 2026-11-05 晚间：file 证书丢失阻塞整组冷启动
+
+- 症状/链路：两台 Debian 13.3 / v5.0.0.92 各有四个 NodeID；file 模式默认 `trojan<NodeID>.cer/.key` 缺失，`Node.Validate` 失败导致全部业务监听缺失，systemd 仍 active。按退避重复失败，不是需要删除共享证书作用域。
+- 恢复：用户选择保留全部节点、补齐证书；延续原先自签策略，为目标 NodeID 各自生成 SAN 匹配现有 SNI/校验域名的一年期证书，私钥 0600、证书 0644，先验证域名及公私钥匹配，不覆盖旧文件。一个按定时退避恢复，另一个备份后仅修改配置尾部空白，改变摘要触发恢复，不重启服务。
+- 验证：两台共八个端口本机及外部 TCP 成功；各 Trojan 在明确加载本地证书信任后 PROXY+TLS 1.3/SNI 校验通过，进程与重启计数未变。证书重建改变 pin，需核对面板运行态共识与客户端订阅刷新；未据此宣称真实用户转发验收。证书于 2027-11-05 到期，file 模式需要备份和后续更新。
+- 下次入口：`docs/log-troubleshooting.md` 同日晚间章节；`node/cert.go`、`node/reconcile.go`、`node/cleanup_control.go::ConfigDigest`、`cmd/reload_retry.go`；面板 `V2nodeTlsCertificateReconciler`。相同字节重写会触发 watcher，但不会跳过相同摘要的退避。独立托管节点首次领取凭据超时约 16 秒与本次 file 缺失分开处理。
+- 未闭环：21:09 相关四个 Trojan 的面板 pin 未与本机一致；真实身份补报 `/api/v2/server/status` 返回 `data=true`，唯一查询参数配置检查仍旧。需用户提供原来可用的同 NodeID 机器或面板访问以检查证书共识；不能把接口成功当作 pin 更新成功，刷新旧订阅目前不能保证恢复。不执行 SQL、清冲突观察或关闭校验。
+
 ## 2026-11-03：file 证书预检、失败配置重试与独立状态上报（本地源码）
 
 - 症状/链路：新增 TLS 节点缺少 file 模式证书时，候选热加载失败、旧节点继续运行，但修复证书后没有可靠的定时恢复；systemd active 也不能说明新增监听已启动。检查 `cmd/server.go` → `node.New/Validate/Reconcile` → `node/cert.go` → 核心监听，并贯通面板 `/api/v2/server/config-status` → 独立缓存 → 节点管理标签。

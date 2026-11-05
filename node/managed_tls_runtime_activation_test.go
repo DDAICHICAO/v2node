@@ -63,6 +63,77 @@ func (a *managedTLSPendingRetryAPI) TLSCertificateTokenFingerprint() string {
 	return "fingerprint"
 }
 
+type managedTLSCredentialRetryAPI struct {
+	managedTLSPendingRetryAPI
+	credentialErr   error
+	configured      bool
+	certificateGets int
+}
+
+func (a *managedTLSCredentialRetryAPI) GetManagedTLSCertificate(
+	ctx context.Context,
+	domain string,
+	version uint64,
+) (*panel.ManagedTLSCertificate, error) {
+	a.certificateGets++
+	if a.credentialErr != nil {
+		return nil, a.credentialErr
+	}
+	a.configured = true
+	return a.managedTLSPendingRetryAPI.GetManagedTLSCertificate(ctx, domain, version)
+}
+
+func (a *managedTLSCredentialRetryAPI) TLSCertificateTokenConfigured() bool {
+	return a.configured
+}
+
+func TestManagedTLSRetriesCredentialBootstrapBeforeRuntimeStarts(t *testing.T) {
+	api := &managedTLSCredentialRetryAPI{
+		managedTLSPendingRetryAPI: managedTLSPendingRetryAPI{lease: &panel.ManagedTLSLeaseResponse{
+			Status: "waiting", ScopeID: 1, RetryAfter: 900,
+		}},
+		credentialErr: &panel.ManagedTLSError{Code: "managed_tls_credential_transport_error"},
+	}
+	manager := newManagedTLSManager(api, &managedTLSDomainTestStore{}, nil, 1, "node.example.com")
+	if err := manager.Prepare(time.Now()); !errors.Is(err, ErrManagedTLSPending) {
+		t.Fatalf("prepare err=%v, want pending", err)
+	}
+	if snapshot := manager.Snapshot(); snapshot.LastErrorCode != "managed_tls_credential_transport_error" {
+		t.Fatalf("initial failure=%q, want credential transport error", snapshot.LastErrorCode)
+	}
+	api.credentialErr = nil
+	delay, err := manager.reconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.certificateGets != 2 || !api.configured {
+		t.Fatalf("certificate gets=%d configured=%v, want retry to bootstrap credential", api.certificateGets, api.configured)
+	}
+	if snapshot := manager.Snapshot(); snapshot.Status != managedTLSWaiting || !snapshot.TokenConfigured {
+		t.Fatalf("snapshot=%+v, want waiting with credential", snapshot)
+	}
+	if delay != 15*time.Second {
+		t.Fatalf("delay=%s, want 15s", delay)
+	}
+}
+
+func TestManagedTLSKeepsLocalCertificateWhenCredentialBootstrapFails(t *testing.T) {
+	api := &managedTLSCredentialRetryAPI{
+		credentialErr: &panel.ManagedTLSError{Code: "managed_tls_credential_transport_error"},
+	}
+	manager := newManagedTLSManager(api, &managedTLSDomainTestStore{
+		certificate: &managedTLSLocalCertificate{Metadata: managedTLSMetadata{
+			ScopeID: 1, Domain: "node.example.com", Version: 2, NotAfter: 2_000_000_000,
+		}},
+	}, nil, 1, "node.example.com")
+	if err := manager.Prepare(time.Unix(1_800_000_000, 0)); err != nil {
+		t.Fatalf("prepare with usable local certificate failed: %v", err)
+	}
+	if snapshot := manager.Snapshot(); snapshot.Status != managedTLSDegraded || snapshot.Version != 2 {
+		t.Fatalf("snapshot=%+v, want usable local version 2", snapshot)
+	}
+}
+
 func (s *managedTLSDomainTestStore) Current(
 	scopeID uint64,
 	domain string,

@@ -495,7 +495,10 @@ func (m *managedTLSManager) installPanelCertificate(certificate *panel.ManagedTL
 }
 
 func (m *managedTLSManager) validateConfiguration() error {
-	if m.client == nil || m.store == nil || m.scopeID == 0 || !validManagedTLSDomain(m.domain) || !m.client.TLSCertificateTokenConfigured() {
+	// The API client bootstraps missing credentials when fetching a certificate.
+	// A pending TLS node has no runtime config polling yet, so rejecting an
+	// absent credential here would prevent that bootstrap from ever retrying.
+	if m.client == nil || m.store == nil || m.scopeID == 0 || !validManagedTLSDomain(m.domain) {
 		return ErrManagedTLSPending
 	}
 	return nil

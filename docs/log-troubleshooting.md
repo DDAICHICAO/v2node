@@ -1,5 +1,35 @@
 # v2node 日志排查速查
 
+## 2026-11-05 晚间：同 NodeID 原证书跨机对齐后恢复指纹共识
+
+- 四组自签节点 230/231/761/762 的冲突来自两台活跃机器使用不同证书；不是观察 TTL 尚未到期。原机器的实际叶证书指纹与面板既有 pin 一致，761/762 临时新建证书只解决了启动，最终必须沿用同 NodeID 原证书以保留订阅信任。
+- 先只读核对原文件、公私钥匹配、有效期、SAN、实际监听证书及面板 pin。新增机器先在 root 专用目录备份配置和旧文件，再以 SSH/SFTP 在内存中传递原证书及私钥，暂存校验后原子替换，目标文件 0600；不跨 NodeID 复制密钥，不改原机器。
+- `node/reconcile.go` 会复用配置/节点信息相同的 Controller，改磁盘证书不保证进程已切换。此次只临时调整目标 NodeID 的 Timeout 触发其 Controller 重建，确认使用原证书后逐字节恢复原配置。两机各四个监听和主进程 PID/NRestarts 保持，无删除节点、作用域、直接 SQL、清缓存、强设 pin 或主进程重启。
+- 北京时间 21:59，面板自然回报四组均为 consistent、两实例/一个指纹；已有 pin 值未改，后端仅自行补齐缺少的别名。四个目标本机/外部 PROXY v1 + TLS 1.3 实际证书匹配原 pin；761/762 显式信任原自签证书时严格域名校验通过，当前证书到期 2027-11-03 17:13:45（北京时间），临时重建证书的到期日已不适用。
+- 22:05:38 管理端实际配置状态汇总确认三台目标机器的 14 个 NodeID 全部 applied，failed/blocked/unavailable 均为 0，回报距检查 7—40 秒。对应链路是 `ConfigStatusReporter` → `/api/v2/server/config-status` → `V2nodeConfigStatusService` → `NodeConfigStatusTag`；它与普通运行态和 TLS 证书观察相互独立。
+- 230/231 原 SAN 与面板校验名存在既有不一致，原机器也能复现；没有把 pin 一致宣称为严格域名验收通过。客户实际代理认证/转发未测试。托管作用域 2 另行保持 v2、2/2、pending 0；self/file 没有该托管自动分发语义。
+- 下次检查：`node/cert.go`、`api/v2board/node.go`、`node/reconcile.go`；面板 `ServerController::recordTlsPeerCertRuntimeStatus`、`V2nodeTlsCertificateReconciler`。新系统 Python 可能没有 `ssl.match_hostname`，域名验收使用实际 TLS 上下文的主机名验证，探针自身异常不能当成节点启动失败。
+
+## 2026-11-05 晚间：托管凭据首次超时后卡住，作用域同步停在 1/2
+
+- 链路：`Controller.Start` → `managedTLS.Prepare/Start` → `GetManagedTLSCertificate` → 自动领取凭据 → 证书安装 → 业务启动 → 正常状态回报。原实例已有 scope 2 / v2；新增实例约 20:30 凭据超时后，到 21:31 仍为 `managed_tls_config_invalid` / version 0 / token 未配置，无凭据文件及监听。
+- 根因：TLS pending 时只运行证书管理器及专用状态报告器，配置轮询尚未启动；`validateConfiguration` 将缺凭据作为静态配置错误，拦截了取证 API 自带的自动领取，因而没有恢复入口。首次网络超时原因未确定，不解释成正常同步等待。
+- 源码：只移除管理器中的 token 已配置前置条件，保留 client/store/scope/domain 检查。`managedTLSRequest` 仍负责正常领取、凭据校验及 HMAC，缺凭据不等于允许匿名取证。现有测试增加首次失败后重试及有效本地证书回退，先失败，修复后 `go test ./node -run '^TestManagedTLS' -count=1` 通过；修复和测试纳入本次提交，尚未构建、发版或部署。
+- 线上恢复：用真实节点身份从正常接口领取并校验凭据，保存标准 credentials 文件（目录 0700、文件 0600）；备份配置，仅临时调整目标 NodeID 的 Timeout，使该 Controller 重建并自动下载已有证书，再恢复原配置值。其他 NodeID 配置逐项不变，主进程未重启，没有新签证书或人工 ready。
+- 验收：约 21:34 目标监听恢复，21:38 面板自然回报聚合 2/2、pending 0；本机及外部 PROXY v1 + TLS 1.3 严格公共 CA / SNI 校验通过，证书到期 2027-01-15 21:04:46（北京时间），PID/NRestarts 不变。实际账号的代理认证/转发未验收。
+- 下次入口：`node/controller.go::Start`、`node/managed_tls_manager.go::validateConfiguration`、`api/v2board/managed_tls.go::managedTLSRequest`、`managed_tls_credential.go`；面板 `tlsCredential` 和 `V2nodeManagedTlsStatusService`。curl 空 POST 显式发送零长度 body，检查 HTTP 200 内的业务错误码，避免混淆探针请求差异与应用故障。
+
+## 2026-11-05 晚间：file 文件缺失挡住冷启动，补证书后恢复
+
+- 两台 v5.0.0.92 / Debian 13.3 节点主进程 active，但整代证书预检分别报 `tls_certificate_missing`，因此各四个业务端口都未启动；与热加载失败时保留旧监听不同。file 模式不会生成或从面板下载证书，路径为空时展开成 `/etc/v2node/trojan<NodeID>.cer`、`.key`。
+- 原配置允许自签证书但保存了旧 pin。用户选择补齐证书而非移出失败节点后，为目标 NodeID 重建独立、一年期、SAN 匹配 SNI/既有校验域名的自签证书；验证公私钥匹配，文件权限分别 0644/0600，不覆盖已有证书、不跨节点复制私钥。新指纹需要由运行状态上报形成面板共识，旧订阅需刷新；不要声称新证书恢复了原指纹。
+- 一台随退避到期恢复；另一台先在服务器 root 专用目录备份原配置，再仅追加 JSON 尾部空白，原子替换配置以改变原始字节摘要。`CleanupManager.ConfigDigest` 对文件原始字节取摘要，`reloadRetryState.Allow` 对相同摘要仍执行最长 300 秒退避；仅触发相同字节文件事件不能保证立即重试。保留全部节点与业务配置值，不重启服务。
+- 验收：两台均记录恢复成功，共八个业务端口本机/外部 TCP 可达；携带正确 PROXY v1 头后，各 Trojan 以本地证书作为明确的进程内信任完成 TLS 1.3 与域名校验，PID 和 NRestarts 不变。仍需单独核对面板 pin、客户端刷新和实际代理认证/转发；这些不由 TCP/TLS 检查代替。此次 file 证书到期日 2027-11-05。
+- 相关链路：`api/v2board/node.go` → `node/cert.go` → `node/reconcile.go` → `cmd/server.go` / `cmd/reload_retry.go`，以及面板 `ServerController::recordTlsPeerCertRuntimeStatus` → `V2nodeTlsCertificateReconciler`。另一台五节点主机的托管凭据请求超时仅造成约 17 秒 startup 等待，现场已运行，不能误作本次缺文件根因。
+- 后续未闭环：北京时间 21:09，四个相关 Trojan 的当前面板 pin 仍与本机证书不一致；真实证书/网卡状态补报 HTTP 200 且 `data=true`，配置加唯一查询参数后仍未变化。未取得其他同 NodeID 机器或面板观察缓存证据，不能确认多实例冲突、旧观察未过期或线上实现差异的具体原因；不强改 pin 或停用校验。待核对原来可用机器及面板共识后才可要求刷新客户端订阅，当前恢复结论仅覆盖启动与 TCP/TLS。
+
+- 后续证实：21:30 面板缓存显示四个相关 NodeID 各有两台持续活跃机器，指纹不一致、校验名一致，`tls_status=conflict`，当前面板配置为 self；旧观察自然过期不足以解决。原实例 SSH 尚不可访问，需其登录方式后沿用同 NodeID 原证书；独立托管作用域 2/2 的恢复不代表这些节点已恢复信任一致性。
+
 用于排查 SNTP 节点端用户访问、在线设备、连接拒绝、设备/IP 限制和 `blocked_ips`。
 
 文档里的 IP 示例已脱敏成 `x`。线上日志会输出完整 IP，方便定位真实客户端和目标。
