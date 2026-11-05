@@ -689,3 +689,12 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 代次/回滚：成员和组按配置版本标识，当前代次只选择自己的物理成员。启动/热更新校验候选组及成员，旧连接保留旧出站，无效更新保留旧代次；快照继续保存原始 action_value，不改面板 API 或数据库。兼容启动仍可能跳过无效组并标记降级，不把 active 当成负载组健康。
 - 验证：先复现多台 JSON 编译失败，再验证单台/简写与旧 Build 的 protobuf、物理标签及路由目标一致；本地双 SS AEAD 加密转发各分配一半新连接，替换成员后新连接使用新组、原加密连接持续收发；同时覆盖依赖、冲突、route/route_ip/default_out、null/无效成员、错误脱敏、兼容整组移除、多台切回单台、旧成员回收及原始多台配置快照往返。测试均补入既有测试文件，无新增测试文件。
 - 边界/下一处：等权按连接轮询，不自动探活/剔除/重试，不按字节均摊，也不叠加单连接带宽。回退旧二进制前先恢复单台配置；生产多台配置只有升级后才能使用。本轮未改 v2board/客户端/数据库；源码按本条所属提交定位，未推送、发布、部署或连接生产；Linux、UDP、吞吐及长期稳定性待上线前后验收。配置示例及命令见 docs/route-load-balancing.md；实现入口 core/route_balance.go、core/route_compile.go、core/route_runtime.go；保留本文件及 docs/log-troubleshooting.md 既有未提交内容。
+
+## 2026-11-05：带流量的 SS 冷启动会阻塞初始用户加载
+
+- 症状：版本升级/回退后 active 但业务未完整就绪，只有首个 SS 端口监听，CPU 高，后续节点未完成启动；v5.0.0.91 与 v5.0.0.90 均观察到。
+- 链路/根因：`Controller.startRuntime` → `AddNode` 先发布监听 → `AddUsers/addManagedUsers` 逐用户安装；正在接入的 SS 认证持 Validator 读锁全量扫描，启动 Add 等写锁并受持续请求拖慢。pprof 主协程卡于 `Validator.Add`，连接大量排队于 `GetBehaviorSeed/GetWithCache`。两个节点各有数千用户；未观察到多成员出站，本次不能归为多出口解析错误。首次采样的审计 bbolt 页扫描很快进入下一阶段，不是持续卡点。
+- 应急/验证：已备份远端配置；临时只拦目标业务 TCP/UDP 入站，重启后数秒完成全部节点初始化，随后撤销 IPv4/IPv6 临时规则。两个入站均通过 AES-128-GCM 加密固定 IP HTTP 请求；主节点额外返回 Google HTTP 204。第二节点域名探测超时，固定 IP 成功，DNS 原因尚未定位。最终恢复原配置且关闭临时 loopback 诊断端口，线上保持用户已回退版本。
+- 源码修复：`core/node.go:AddNodeWithUsers` 先在离线 handler 加载完整凭据，再发布监听；`node/controller.go` 使用一次激活。失败清理 handler、UID 映射与连接登记；拒绝同 tag 覆盖；旧单出口 JSON、旧 AddNode 及后续增量同步保持兼容。
+- 回归：既有 `core/inbound_reload_test.go` 验证 2048 用户在 AddHandler 前全部可查、重复启动不伤旧用户、端口冲突不残留 handler/UID。先运行新测试观察缺少原子激活能力的失败，再修复；`go test ./core ./node -count=1 -timeout=90s` 和 core/dispatcher/node 的路由与热更新专项通过。未新增测试文件。
+- 下一处/边界：详见 `docs/log-troubleshooting.md` 同日“SS 在带流量重启时卡在用户加载”；入口 `core/node.go`、`core/inbound_reload.go`、`core/user.go`、`node/controller.go`，诊断配置 `conf.Conf.PprofPort`。源码修复随本条记录提交，尚未构建、部署或发布；已恢复线上服务不等于永久修复已发布。未改生产规则、数据库、审计记录或其他机器，保留既有未提交改动。

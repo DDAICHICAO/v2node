@@ -497,3 +497,13 @@ journalctl -u v2node.service --since "2 hours ago" --no-pager \
   | grep -E "source_ip=${CLIENT_IP}|client_ip=${CLIENT_IP}|${CLIENT_IP}" \
   > /tmp/v2node-client-ip.log
 ```
+
+## 2026-11-05：SS 在带流量重启时卡在用户加载
+
+- 症状：升级或降级后进程保持 active，核心已启动，但只出现第一个业务监听；CPU 高，后续节点未启动、状态未正常上报。此现象在 v5.0.0.91 和 v5.0.0.90 均有观察，不能仅凭时间先后归因于多出口配置。
+- 已确认链路：`Controller.startRuntime` → `AddNode` 开启监听 → `AddUsers/addManagedUsers` 逐用户写入 → SS `Validator.Add`。入口已有流量时，认证的 `GetWithCache` 全量扫描持读锁，`Add` 等写锁；同时大量新连接排队在 `GetBehaviorSeed`。节点逐个启动，前一个用户未加完会阻塞后续节点。
+- 证据采集：先核对 `systemctl show`、`ss -lntp`、最近启动日志。必要时备份配置，临时设置 `PprofPort`，只通过 `127.0.0.1` 获取 `/debug/pprof/goroutine?debug=2`；仅保留主协程及少数去重的相关栈，避免输出全部连接栈或配置/凭据。一次 `bbolt.freepages` 采样不表示持续卡在审计库，需重复采样确认主协程进展。
+- 应急恢复：只临时拦截目标业务端口 TCP/UDP 的 IPv4/IPv6 入站，避免修改 SSH 与出站；重启并等待完整用户加载及所有业务端口就绪，再立即删除临时规则。保证异常路径也撤回规则。已实测短暂拦流后数秒内两个入站完成启动，并完成 SS AES-128-GCM 加密请求验证。
+- 永久修复：`core/node.go:AddNodeWithUsers` 在尚未发布的 handler 上加载用户，然后注册并启动监听；`node/controller.go` 改为一次激活。端口绑定失败清理 handler、用户映射及连接登记，重复 tag 拒绝覆盖；旧 `AddNode` 与增量 `AddUsers` 保留。回归补入 `core/inbound_reload_test.go`。
+- 恢复验收：业务端口监听加上真实加密转发，不能仅看 active；域名探测若超时，再用固定 IP 分开检查 DNS 与代理数据面。本次第二个节点域名探测曾超时，固定 IP 加密转发成功，DNS 超时原因未进一步确认。
+- 发布边界：本轮线上保留用户已降级的版本；恢复原始配置并关闭临时诊断端口，临时防火墙规则全部撤销。源码修复本地验证通过，尚未构建、部署或发布；普通重启仍有旧版本启动竞争风险。现有单出口规则未更改。

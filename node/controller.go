@@ -417,24 +417,13 @@ func (c *Controller) startRuntime() error {
 				return fmt.Errorf("request cert error: %w", err)
 			}
 		}
-		// Add new tag
-		if err := c.server.AddNode(c.tag, node); err != nil {
-			limiter.DeleteLimiter(c.tag)
-			c.limiter = nil
-			return fmt.Errorf("add new node error: %s", err)
-		}
-		added, err := c.server.AddUsers(&core.AddUsersParams{
-			Tag:      c.tag,
-			Users:    c.userList,
-			NodeInfo: node,
-		})
+		// Prepare all credentials before opening the business listener. Live SS
+		// traffic must not compete with initial user installation.
+		added, err := c.server.AddNodeWithUsers(c.tag, node, c.userList)
 		if err != nil {
-			if deleteErr := c.server.DelNode(c.tag); deleteErr != nil {
-				log.WithFields(log.Fields{"tag": c.tag, "err": deleteErr}).Warning("Rollback node after adding users failed")
-			}
 			limiter.DeleteLimiter(c.tag)
 			c.limiter = nil
-			return fmt.Errorf("add users error: %s", err)
+			return fmt.Errorf("add node with users error: %w", err)
 		}
 		log.WithField("tag", c.tag).Infof("Added %d new users", added)
 		if _, _, err := c.netSampler.Sample(); err != nil {
