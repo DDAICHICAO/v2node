@@ -6,6 +6,7 @@ SNTP 的节点运行服务，连接面板的配置、用户同步、流量上报
 - [面板离线与恢复](docs/panel-offline-mode.md)
 - [审计持久化存储](docs/audit-spool-storage.md)
 - [日志排查](docs/log-troubleshooting.md)
+- [出站负载均衡](docs/route-load-balancing.md)：保留单出口配置，多台 Shadowsocks 出口按连接轮询。
 
 ## 软件安装
 

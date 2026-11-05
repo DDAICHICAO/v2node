@@ -681,3 +681,11 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 工具排障：旧 govulncheck v1.7.0 由 Go 1.26 编译，分析 Go 1.27 泛型方法/标准库时错误；临时用 1.27.3 重编扫描器后语法加载通过，但官方 vuln.go.dev 漏洞库连接 EOF，扫描未完成。go mod verify 仅验证模块完整性，不能替代漏洞扫描。没有据此声称无漏洞。
 - 下次核查：先看 docs/core-upgrade.md 的固定版本和配置边界，再看 core/route_compile.go、core/user.go、core/app/dispatcher/default.go 与 core/inbound.go；发布需走自有 release，核对安装/节点自更新实际下载源、运行二进制、服务环境和真实代理请求。Linux 内核仍需发行版修补并启动修补内核，容器共用宿主内核；程序升级和关闭 MPTCP 只是应用侧缓解。
 - 范围/剩余：只改 v2node 本地源码与说明，保留本记录追加前文件的完整字节前缀和已有约 282 行未提交记录。未改 v2board/客户端/数据库，未推送、发布、生产部署或重启。Linux 实机、race、全协议 UDP/三端矩阵、吞吐和长期稳定性待后续验收；早先 MPTCP 默认修复已经单独提交 c6fce73，此次完整升级随本条记录进行本地提交，提交号以本节所属提交定位。运行/发布指南见 docs/core-upgrade.md，实施计划见 docs/superpowers/plans/2026-11-02-core-upgrade.md。
+
+## 2026-11-05：Shadowsocks 多出口轮询兼容单出口配置
+
+- 症状/链路：用户需要多台出口分担总带宽，且已有单台 JSON 必须原样使用。面板 action_value → GetNodeInfo → core 路由编译 → 版本化出站与 router → 路由热更新/快照。固定核心要求每个 SS 出站只有一个 server，直接提交多个原先会构建失败。
+- 改动/新行为：仅多项 Shadowsocks settings.servers 自动拆为独立成员并生成 roundRobin balancer；单台及 address 简写保留旧解析、protobuf、物理标签与直接路由。完整组先校验再注册，重复同名同配置去重，冲突拒绝；继承传输和单出口依赖，无效成员整组拒绝，错误不包含原始配置/密码。组作为 socket 代理的引用明确拒绝，既有单出口依赖不变。
+- 代次/回滚：成员和组按配置版本标识，当前代次只选择自己的物理成员。启动/热更新校验候选组及成员，旧连接保留旧出站，无效更新保留旧代次；快照继续保存原始 action_value，不改面板 API 或数据库。兼容启动仍可能跳过无效组并标记降级，不把 active 当成负载组健康。
+- 验证：先复现多台 JSON 编译失败，再验证单台/简写与旧 Build 的 protobuf、物理标签及路由目标一致；本地双 SS AEAD 加密转发各分配一半新连接，替换成员后新连接使用新组、原加密连接持续收发；同时覆盖依赖、冲突、route/route_ip/default_out、null/无效成员、错误脱敏、兼容整组移除、多台切回单台、旧成员回收及原始多台配置快照往返。测试均补入既有测试文件，无新增测试文件。
+- 边界/下一处：等权按连接轮询，不自动探活/剔除/重试，不按字节均摊，也不叠加单连接带宽。回退旧二进制前先恢复单台配置；生产多台配置只有升级后才能使用。本轮未改 v2board/客户端/数据库；源码按本条所属提交定位，未推送、发布、部署或连接生产；Linux、UDP、吞吐及长期稳定性待上线前后验收。配置示例及命令见 docs/route-load-balancing.md；实现入口 core/route_balance.go、core/route_compile.go、core/route_runtime.go；保留本文件及 docs/log-troubleshooting.md 既有未提交内容。

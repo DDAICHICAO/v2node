@@ -80,7 +80,19 @@ func buildGenerationHandlers(compiled *CompiledRouteRuntime, manager outbound.Ma
 		}
 		handlers[config.Tag] = custom[config.Tag]
 	}
+	balancerTags := make(map[string]bool)
+	for _, balancer := range compiled.RouterConfig.GetBalancingRule() {
+		balancerTags[balancer.Tag] = true
+		for _, tag := range balancer.OutboundSelector {
+			if handlers[tag] == nil {
+				return nil, nil, errors.New("balancer references unavailable outbound")
+			}
+		}
+	}
 	for logical, physical := range compiled.LogicalToPhysical {
+		if balancerTags[physical] {
+			continue
+		}
 		handler := handlers[physical]
 		if handler == nil {
 			return nil, nil, fmt.Errorf("logical outbound %q has no candidate handler", logical)
@@ -88,6 +100,9 @@ func buildGenerationHandlers(compiled *CompiledRouteRuntime, manager outbound.Ma
 		handlers[logical] = handler
 	}
 	for _, rule := range compiled.RouterConfig.GetRule() {
+		if tag := rule.GetBalancingTag(); tag != "" && !balancerTags[tag] {
+			return nil, nil, errors.New("router references unavailable balancer")
+		}
 		if tag := rule.GetTag(); tag != "" && handlers[tag] == nil {
 			return nil, nil, fmt.Errorf("router references unavailable outbound %q", tag)
 		}

@@ -34,6 +34,23 @@ func TestRouteRuntimeStateStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRouteRuntimeStateShadowsocksPoolRoundTrip(t *testing.T) {
+	value := `{"tag":"pool","protocol":"shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-a"},{"address":"127.0.0.1","port":19002,"method":"aes-128-gcm","password":"test-b"}]}}`
+	state := testRouteRuntimeState()
+	state.Entries[0].NodeInfo.Common.Routes = []panel.Route{{Id: 52, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &value}}
+	store := newRouteRuntimeStateStore(t.TempDir())
+	if err := store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := got.Entries[0].NodeInfo.Common.Routes[0].ActionValue; actual == nil || *actual != value {
+		t.Fatal("pool wire config changed during snapshot persistence")
+	}
+}
+
 func TestRouteRuntimeStateInvalidSaveKeepsLastGoodSnapshot(t *testing.T) {
 	store := newRouteRuntimeStateStore(t.TempDir())
 	good := testRouteRuntimeState()

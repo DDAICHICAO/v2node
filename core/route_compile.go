@@ -36,14 +36,16 @@ type routeOutboundDefinition struct {
 	info         *panel.NodeInfo
 	index        int
 	route        panel.Route
+	members      []*routeOutboundDefinition
 }
 
 type routeRuleCandidate struct {
-	info    *panel.NodeInfo
-	index   int
-	route   panel.Route
-	logical string
-	raw     json.RawMessage
+	info     *panel.NodeInfo
+	index    int
+	route    panel.Route
+	logical  string
+	raw      json.RawMessage
+	balancer bool
 }
 
 type outboundResolutionError struct {
@@ -102,18 +104,13 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 					}
 					continue
 				}
-				if existing := definitions[definition.logical]; existing != nil {
-					if !proto.Equal(existing.logicalProto, definition.logicalProto) {
-						if handled := handleRouteCompileFailure(strict, info, index, route, errors.New("conflicting outbound tag")); handled != nil {
-							return nil, handled
-						}
-						continue
+				if err := registerRouteOutboundDefinition(definition, definitions, &definitionOrder); err != nil {
+					if handled := handleRouteCompileFailure(strict, info, index, route, err); handled != nil {
+						return nil, handled
 					}
-				} else {
-					definitions[definition.logical] = definition
-					definitionOrder = append(definitionOrder, definition.logical)
+					continue
 				}
-				routeCandidates = append(routeCandidates, routeRuleCandidate{info: info, index: index, route: route, logical: definition.logical})
+				routeCandidates = append(routeCandidates, routeRuleCandidate{info: info, index: index, route: route, logical: definition.logical, balancer: len(definition.members) > 0})
 			default:
 				if handled := handleRouteCompileFailure(strict, info, index, route, errors.New("unknown route action")); handled != nil {
 					return nil, handled
@@ -147,11 +144,18 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 		}).WithError(resolutionError.err).Warn("Skipping invalid route outbound during compatible startup")
 		delete(definitions, resolutionError.logical)
 		definitionOrder = removeLogicalTag(definitionOrder, resolutionError.logical)
+		for _, member := range definition.members {
+			delete(definitions, member.logical)
+			definitionOrder = removeLogicalTag(definitionOrder, member.logical)
+		}
 		routeCandidates = removeOutboundRouteCandidates(routeCandidates, resolutionError.logical)
 	}
 	customOutbounds := make([]*xraycore.OutboundHandlerConfig, 0, len(definitionOrder))
 	for _, logical := range definitionOrder {
 		definition := definitions[logical]
+		if len(definition.members) > 0 {
+			continue
+		}
 		outbound, err := buildPhysicalOutbound(definition, logicalToPhysical)
 		if err != nil {
 			return nil, routeCompileError(definition.info, definition.index, definition.route, err)
@@ -163,7 +167,8 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 	if err != nil {
 		return nil, errors.New("compile route: invalid DNS config")
 	}
-	routerConfig, err := buildCompiledRouterConfig(routeCandidates, logicalToPhysical, strict)
+	balancers := buildRouteBalancers(definitions, definitionOrder, logicalToPhysical)
+	routerConfig, err := buildCompiledRouterConfig(routeCandidates, logicalToPhysical, balancers, strict)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +250,13 @@ func parseRouteOutboundDefinition(info *panel.NodeInfo, index int, route panel.R
 		return nil, errors.New("outbound action value is empty")
 	}
 	raw := strings.TrimSpace(*route.ActionValue)
+	if group, err := parseShadowsocksRouteGroup(info, index, route, raw); group != nil || err != nil {
+		return group, err
+	}
+	return parseSingleRouteOutboundDefinition(info, index, route, raw)
+}
+
+func parseSingleRouteOutboundDefinition(info *panel.NodeInfo, index int, route panel.Route, raw string) (*routeOutboundDefinition, error) {
 	outbound, err := decodeOutboundConfig(raw)
 	if err != nil {
 		return nil, err
@@ -287,6 +299,20 @@ func resolvePhysicalOutboundTags(definitions map[string]*routeOutboundDefinition
 		}
 		visiting[logical] = true
 		defer delete(visiting, logical)
+		if len(definition.members) > 0 {
+			members := make([]string, 0, len(definition.members))
+			for _, member := range definition.members {
+				physical, err := resolve(member.logical)
+				if err != nil {
+					return "", newOutboundResolutionError(definition, err)
+				}
+				members = append(members, physical)
+			}
+			sum := sha256.Sum256([]byte(logical + "\x00" + strings.Join(members, "\x00")))
+			physical := "sntp-balancer@" + hex.EncodeToString(sum[:])
+			resolved[logical] = physical
+			return physical, nil
+		}
 
 		outbound, err := decodeOutboundConfig(definition.raw)
 		if err != nil {
@@ -302,6 +328,9 @@ func resolvePhysicalOutboundTags(definitions map[string]*routeOutboundDefinition
 			}
 			if definitions[dependency] == nil {
 				return "", newOutboundResolutionError(definition, errors.New("missing outbound dependency"))
+			}
+			if len(definitions[dependency].members) > 0 {
+				return "", newOutboundResolutionError(definition, errors.New("outbound dependency cannot reference a load-balancing group"))
 			}
 			physical, err := resolve(dependency)
 			if err != nil {
@@ -472,13 +501,17 @@ func buildStaticRouteRule(info *panel.NodeInfo, route panel.Route) (json.RawMess
 	return json.Marshal(rule)
 }
 
-func buildOutboundRouteRule(info *panel.NodeInfo, route panel.Route, physicalTag string) (json.RawMessage, error) {
+func buildOutboundRouteRule(info *panel.NodeInfo, route panel.Route, physicalTag string, balancer bool) (json.RawMessage, error) {
 	if physicalTag == "" {
 		return nil, errors.New("outbound physical tag is empty")
 	}
 	rule := map[string]interface{}{
-		"inboundTag":  routeInboundTags(info.Tag),
-		"outboundTag": physicalTag,
+		"inboundTag": routeInboundTags(info.Tag),
+	}
+	if balancer {
+		rule["balancerTag"] = physicalTag
+	} else {
+		rule["outboundTag"] = physicalTag
 	}
 	switch route.Action {
 	case "route":
@@ -493,9 +526,14 @@ func buildOutboundRouteRule(info *panel.NodeInfo, route panel.Route, physicalTag
 	return json.Marshal(rule)
 }
 
-func buildCompiledRouterConfig(candidates []routeRuleCandidate, mapping map[string]string, strict bool) (*router.Config, error) {
+func buildCompiledRouterConfig(candidates []routeRuleCandidate, mapping map[string]string, balancers []*coreConf.BalancingRule, strict bool) (*router.Config, error) {
+	newConfig := func() *coreConf.RouterConfig {
+		config := defaultRouteRouterConfig()
+		config.Balancers = balancers
+		return config
+	}
 	materialized := make([]routeRuleCandidate, 0, len(candidates))
-	config := defaultRouteRouterConfig()
+	config := newConfig()
 	for _, candidate := range candidates {
 		raw, err := materializeRouteRule(candidate, mapping)
 		if err != nil {
@@ -515,7 +553,7 @@ func buildCompiledRouterConfig(candidates []routeRuleCandidate, mapping map[stri
 
 	if strict {
 		for _, candidate := range materialized {
-			probe := defaultRouteRouterConfig()
+			probe := newConfig()
 			probe.RuleList = append(probe.RuleList, candidate.raw)
 			if _, probeErr := probe.Build(); probeErr != nil {
 				return nil, routeCompileError(candidate.info, candidate.index, candidate.route, errors.New("invalid route match"))
@@ -524,9 +562,9 @@ func buildCompiledRouterConfig(candidates []routeRuleCandidate, mapping map[stri
 		return nil, errors.New("compile route: invalid router config")
 	}
 
-	compatible := defaultRouteRouterConfig()
+	compatible := newConfig()
 	for _, candidate := range materialized {
-		probe := defaultRouteRouterConfig()
+		probe := newConfig()
 		probe.RuleList = append(probe.RuleList, candidate.raw)
 		if _, probeErr := probe.Build(); probeErr != nil {
 			_ = handleRouteCompileFailure(false, candidate.info, candidate.index, candidate.route, errors.New("invalid route match"))
@@ -545,7 +583,7 @@ func materializeRouteRule(candidate routeRuleCandidate, mapping map[string]strin
 	if candidate.logical == "" {
 		return candidate.raw, nil
 	}
-	return buildOutboundRouteRule(candidate.info, candidate.route, mapping[candidate.logical])
+	return buildOutboundRouteRule(candidate.info, candidate.route, mapping[candidate.logical], candidate.balancer)
 }
 
 func routeCompileError(info *panel.NodeInfo, index int, route panel.Route, err error) error {

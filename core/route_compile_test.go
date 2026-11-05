@@ -8,6 +8,7 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/xtls/xray-core/app/proxyman"
 	xraycore "github.com/xtls/xray-core/core"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestCompileRouteRuntimeRejectsConflictingOutboundTag(t *testing.T) {
@@ -20,6 +21,148 @@ func TestCompileRouteRuntimeRejectsConflictingOutboundTag(t *testing.T) {
 	_, err := CompileRouteRuntime(infos)
 	if err == nil || !strings.Contains(err.Error(), "node_id=2") || !strings.Contains(err.Error(), "action=route") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompileRouteRuntimeShadowsocksMultipleServers(t *testing.T) {
+	value := `{"tag":"test-pool","protocol":"Shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-only-a"},{"address":"127.0.0.1","port":19002,"method":"aes-128-gcm","password":"test-only-b"}]}}`
+	infos := []*panel.NodeInfo{routeCompileNode(1, panel.Route{Id: 52, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &value})}
+	compiled, err := CompileRouteRuntime(infos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.CustomOutbounds) != 2 || len(compiled.RouterConfig.BalancingRule) != 1 {
+		t.Fatalf("outbounds=%d balancers=%d, want 2 and 1", len(compiled.CustomOutbounds), len(compiled.RouterConfig.BalancingRule))
+	}
+	b := compiled.RouterConfig.BalancingRule[0]
+	if b.Strategy != "roundrobin" || len(b.OutboundSelector) != 2 {
+		t.Fatalf("unexpected balancer: %v", b)
+	}
+	if got := compiled.RouterConfig.Rule[1].GetBalancingTag(); got != b.Tag {
+		t.Fatalf("rule balancer=%q want %q", got, b.Tag)
+	}
+	for _, tag := range b.OutboundSelector {
+		if findCompiledOutbound(compiled.CustomOutbounds, tag) == nil {
+			t.Fatalf("balancer references missing physical outbound %q", tag)
+		}
+	}
+	again, err := CompileRouteRuntime(infos)
+	if err != nil || again.ConfigHash != compiled.ConfigHash {
+		t.Fatalf("pool compilation is not deterministic: %v", err)
+	}
+	// A shared definition remains one pool, while each inbound keeps its rule.
+	infos = append(infos, routeCompileNode(2, panel.Route{Id: 52, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &value}))
+	shared, err := CompileRouteRuntime(infos)
+	if err != nil || len(shared.CustomOutbounds) != 2 || len(shared.RouterConfig.BalancingRule) != 1 || len(shared.RouterConfig.Rule) != 3 {
+		t.Fatalf("shared pool was not deduplicated: %v", err)
+	}
+}
+
+func TestCompileRouteRuntimeShadowsocksSingleServerUnchanged(t *testing.T) {
+	for _, value := range []string{
+		`{"tag":"legacy-ss","protocol":"Shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-only"}]}}`,
+		`{"tag":"legacy-ss","protocol":"shadowsocks","settings":{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-only"}}`,
+	} {
+		out, err := decodeOutboundConfig(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy, err := out.Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		physical, err := physicalOutboundTag(out.Tag, legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy.Tag = physical
+		compiled, err := CompileRouteRuntime([]*panel.NodeInfo{routeCompileNode(1, panel.Route{Id: 52, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &value})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(compiled.CustomOutbounds) != 1 || len(compiled.RouterConfig.BalancingRule) != 0 || !proto.Equal(compiled.CustomOutbounds[0], legacy) || compiled.LogicalToPhysical[out.Tag] != physical || compiled.RouterConfig.Rule[1].GetTag() != physical {
+			t.Fatal("single-server config, physical tag, or route changed")
+		}
+	}
+}
+
+func TestCompileRouteRuntimeShadowsocksGroupValidation(t *testing.T) {
+	member := `{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-only"}`
+	for _, tc := range []struct{ name, settings string }{
+		{"null-member", `{"servers":[` + member + `,null]}`},
+		{"invalid-member", `{"servers":[` + member + `,{"password":"never-echo-this-secret"}]}`},
+		{"mixed-address", `{"address":"127.0.0.1","servers":[` + member + `,` + member + `]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := `{"tag":"pool","protocol":"shadowsocks","settings":` + tc.settings + `}`
+			_, err := CompileRouteRuntime([]*panel.NodeInfo{routeCompileNode(1, panel.Route{Id: 52, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &value})})
+			if err == nil || strings.Contains(err.Error(), "never-echo-this-secret") {
+				t.Fatalf("expected safe group validation error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestCompileRouteRuntimeShadowsocksGroupDependenciesAndConflict(t *testing.T) {
+	value := `{"tag":"pool","protocol":"shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-a"},{"address":"127.0.0.1","port":19002,"method":"aes-128-gcm","password":"test-b"}]},"streamSettings":{"sockopt":{"dialerProxy":"upstream"}}}`
+	upstream := `{"tag":"upstream","protocol":"freedom","settings":{}}`
+	makeInfos := func(v string) []*panel.NodeInfo {
+		return []*panel.NodeInfo{routeCompileNode(1,
+			panel.Route{Id: 52, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &v},
+			panel.Route{Id: 53, Action: "route", Match: []string{"domain:other.invalid"}, ActionValue: &upstream},
+		)}
+	}
+	compiled, err := CompileRouteRuntime(makeInfos(value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range compiled.RouterConfig.BalancingRule[0].OutboundSelector {
+		out := findCompiledOutbound(compiled.CustomOutbounds, tag)
+		cfg, err := out.SenderSettings.GetInstance()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.(*proxyman.SenderConfig).GetStreamSettings().GetSocketSettings().GetDialerProxy() != compiled.LogicalToPhysical["upstream"] {
+			t.Fatal("pool member lost its upstream dependency")
+		}
+	}
+	changed := strings.ReplaceAll(value, "19002", "19003")
+	infos := append(makeInfos(value), routeCompileNode(2, panel.Route{Id: 54, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &changed}))
+	if _, err := CompileRouteRuntime(infos); err == nil || !strings.Contains(err.Error(), "conflicting outbound tag") {
+		t.Fatalf("expected pool conflict: %v", err)
+	}
+	// Compatibility startup drops an invalid pool as a unit, without orphaned members.
+	missing := strings.ReplaceAll(value, `"upstream"`, `"missing"`)
+	compatible, err := compileRouteRuntime(makeInfos(missing), false)
+	if err != nil || len(compatible.CustomOutbounds) != 1 || len(compatible.RouterConfig.BalancingRule) != 0 {
+		t.Fatalf("invalid pool was only partially removed: %v", err)
+	}
+	parent := `{"tag":"dependent","protocol":"freedom","settings":{},"streamSettings":{"sockopt":{"dialerProxy":"pool"}}}`
+	infos = append(makeInfos(value), routeCompileNode(2, panel.Route{Id: 55, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &parent}))
+	if _, err := CompileRouteRuntime(infos); err == nil || !strings.Contains(err.Error(), "cannot reference a load-balancing group") {
+		t.Fatalf("expected explicit unsupported group dependency error: %v", err)
+	}
+}
+
+func TestCompileRouteRuntimeShadowsocksGroupRouteActions(t *testing.T) {
+	value := `{"tag":"pool","protocol":"shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-a"},{"address":"127.0.0.1","port":19002,"method":"aes-128-gcm","password":"test-b"}]}}`
+	for _, tc := range []struct {
+		action string
+		match  []string
+	}{
+		{"route", []string{"domain:media.invalid"}},
+		{"route_ip", []string{"192.0.2.0/24"}},
+		{"default_out", nil},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			compiled, err := CompileRouteRuntime([]*panel.NodeInfo{routeCompileNode(1, panel.Route{Id: 52, Action: tc.action, Match: tc.match, ActionValue: &value})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compiled.RouterConfig.Rule[1].GetBalancingTag() != compiled.RouterConfig.BalancingRule[0].Tag {
+				t.Fatal("route does not target pool")
+			}
+		})
 	}
 }
 
