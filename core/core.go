@@ -49,6 +49,7 @@ type V2Core struct {
 	routeDegraded     bool
 	routeHealthReason string
 	eclipse           map[string]*SntpEclipseServer
+	socks             map[string]*managedSocksServer
 }
 
 type UserMap struct {
@@ -204,6 +205,10 @@ func (v *V2Core) Close() error {
 		_ = server.Close()
 	}
 	v.eclipse = nil
+	for _, server := range v.socks {
+		_ = server.Close()
+	}
+	v.socks = nil
 	accessaudit.Shutdown()
 	if runtimeManager != nil {
 		_ = runtimeManager.Close()

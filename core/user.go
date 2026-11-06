@@ -51,6 +51,10 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 	vc.nodeAccess.RLock()
 	defer vc.nodeAccess.RUnlock()
 	vc.deactivateUsers(users, tag)
+	if server, ok := vc.socks[tag]; ok {
+		server.DelUsers(users)
+		return nil
+	}
 
 	if server, ok := vc.eclipse[tag]; ok {
 		server.DelUsers(users)
@@ -187,6 +191,14 @@ func (vc *V2Core) GetUserTrafficReport(tag string, mintraffic int) ([]panel.User
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	v.nodeAccess.RLock()
 	defer v.nodeAccess.RUnlock()
+	if server, ok := v.socks[p.Tag]; ok {
+		if err := server.AddUsers(p.Users); err != nil {
+			return 0, err
+		}
+		v.commitUserUIDs(p.Tag, p.Users)
+		v.activateUserLinks(userLinkKeys(p.Tag, p.Users))
+		return len(p.Users), nil
+	}
 	if server, ok := v.eclipse[p.Tag]; ok {
 		server.AddUsers(p.Users)
 		v.commitUserUIDs(p.Tag, p.Users)

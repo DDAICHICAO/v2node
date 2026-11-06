@@ -556,3 +556,13 @@ journalctl -u v2node.service --since "2 hours ago" --no-pager \
 - 永久修复：`core/node.go:AddNodeWithUsers` 在尚未发布的 handler 上加载用户，然后注册并启动监听；`node/controller.go` 改为一次激活。端口绑定失败清理 handler、用户映射及连接登记，重复 tag 拒绝覆盖；旧 `AddNode` 与增量 `AddUsers` 保留。回归补入 `core/inbound_reload_test.go`。
 - 恢复验收：业务端口监听加上真实加密转发，不能仅看 active；域名探测若超时，再用固定 IP 分开检查 DNS 与代理数据面。本次第二个节点域名探测曾超时，固定 IP 加密转发成功，DNS 超时原因未进一步确认。
 - 发布边界：本轮线上保留用户已降级的版本；恢复原始配置并关闭临时诊断端口，临时防火墙规则全部撤销。源码修复本地验证通过，尚未构建、部署或发布；普通重启仍有旧版本启动竞争风险。现有单出口规则未更改。
+
+
+## 2026-11-06：普通用户 SOCKS5 节点与路由标签
+
+- 面板协议 `socks`，能力 `socks5_users_v1`；原生 TCP，`network_settings.udp` 默认关闭。用户名/密码均使用同步下来的账号 UUID（设备账号同样适用），拒绝匿名、HTTP 和 SOCKS4。没有给探测用本地 SOCKS 入口开放普通用户权限。
+- `api/v2board/node.go` → `core/node_preflight.go` → `core/socks.go` 维护动态凭据/监听，复用核心 SOCKS 的 CONNECT、UDP ASSOCIATE；通过 `socksUserDispatcher` 映射既有 UserTag 后进入 dispatcher、limiter、计费和设备/在线上报链。撤销关闭已认证连接，停节点关闭监听及全部连接；用户变更不重建监听，监听配置变化走原 reconciliation。
+- UDP 是每个认证控制连接分配动态端口，防火墙或 NAT 仅放行配置的 TCP 端口时，TCP 正常并不代表 UDP 可用。SOCKS5 代理协议本身不加密；没有新增 PROXY protocol 或 TLS 包装支持。
+- 路由 action_value 可直接引用本机同时下发定义的标签，支持先引用后定义和 SS 轮询组；Default/block/dns_out 为内置引用，不能重新定义。严格编译缺失标签时拒绝更新；兼容启动仍按既有策略记录警告并跳过错误规则，不能忽略启动日志。
+- 验证：本地真实 TCP/UDP echo、错误密码/匿名拒绝、UID 流量归属、账号撤销断连、重新授权及监听重建通过；面板生成 10 组不同协议/传输出站均经当前核心编译。API 能力/配置解析及相关已有路由、用户连接管理、启动与重载分类定向检查通过。临时测试文件与模拟配置检查后删除，没有修改依赖 fork/cache，也未打包、部署、压测或实机验收。
+- 后台操作及完整参数/文件范围见相邻 v2board 的 `docs/server-routing-forms.md`。A→B 使用所选账号的参数快照，B 按该账号与倍率正常计费；不能把选择节点理解为自动跟随目标地址或免计费内部通道。

@@ -1,5 +1,13 @@
 # LESSONS LEARNED
 
+## 2026-11-06：SOCKS5 普通用户监听不能直接复用固定账号入口
+
+- 症状/需求：A→B 解锁想减少额外代理加密；用户要求 SOCKS5 同时可作为普通用户节点，不能只做固定账号出口或开放匿名探测端口。
+- 根因/链路：当前 Xray SOCKS 服务端没有动态 UserManager，SS none/plain 已移除。新增受管理 SOCKS 监听完成动态认证，再复用核心 CONNECT/UDP 与原 dispatcher，将账号映射到 UserTag，保持限速、设备限制、流量/在线归属和撤销链。
+- 改动：core/socks.go 管理凭据、最多 256 个并发认证和 10 秒认证期限、已认证连接及监听生命周期；配置/用户增删入口接入 socks。补路由裸标签引用的两遍解析，保留逻辑→物理标签及轮询组解析，缺失标签按既有严格/兼容启动策略处理。
+- 验证/边界：本地 TCP/UDP echo、错误密码/匿名拒绝、UID 计费、撤销既有 TCP/UDP 控制连接、重新授权、监听重建通过；面板生成 10 组出站、标签前向/缺失/轮询组及相邻既有 Go 定向回归通过。临时测试检查后删除，未发布、部署、压测或客户实机验收。
+- 下次：api/v2board/node.go / panel.go → core/node_preflight.go / node.go / user.go / socks.go → core/app/dispatcher；路由查 core/route_compile.go。UDP 动态端口和 NAT/防火墙要单独排查，SOCKS5 不加密。详细记录见 docs/log-troubleshooting.md 同日章节，面板操作见相邻 v2board 的 docs/server-routing-forms.md。
+
 ## 2026-11-06：面板 CF CIDR 不能直接覆盖进程级官方列表
 
 - 需求/风险：后台需要查看、增删改并下发可信 CF 回源 CIDR；单进程可能服务多个面板或节点，直接写全局官方 store 会造成策略串用，官方定时刷新还会覆盖人工修改。

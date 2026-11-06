@@ -15,6 +15,9 @@ import (
 func (v *V2Core) AddNodeWithUsers(tag string, info *panel.NodeInfo, users []panel.UserInfo) (int, error) {
 	v.nodeAccess.Lock()
 	defer v.nodeAccess.Unlock()
+	if info != nil && info.Type == "socks" {
+		return v.addSocksNode(tag, info, users)
+	}
 	if isSntpEclipseNode(info) {
 		if v.eclipse == nil {
 			v.eclipse = make(map[string]*SntpEclipseServer)
@@ -64,6 +67,10 @@ func (v *V2Core) AddNodeWithUsers(tag string, info *panel.NodeInfo, users []pane
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 	v.nodeAccess.Lock()
 	defer v.nodeAccess.Unlock()
+	if info != nil && info.Type == "socks" {
+		_, err := v.addSocksNode(tag, info, nil)
+		return err
+	}
 	if isSntpEclipseNode(info) {
 		if v.eclipse == nil {
 			v.eclipse = make(map[string]*SntpEclipseServer)
@@ -93,6 +100,10 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 func (v *V2Core) DelNode(tag string) error {
 	v.nodeAccess.Lock()
 	defer v.nodeAccess.Unlock()
+	if server, ok := v.socks[tag]; ok {
+		delete(v.socks, tag)
+		return server.Close()
+	}
 	if server, ok := v.eclipse[tag]; ok {
 		delete(v.eclipse, tag)
 		return server.Close()
@@ -105,6 +116,9 @@ func (v *V2Core) DelNode(tag string) error {
 }
 
 func (v *V2Core) ReplaceNode(tag string, info *panel.NodeInfo, users []panel.UserInfo) error {
+	if info != nil && info.Type == "socks" {
+		return errors.New("SOCKS5 listener changes require node reconciliation")
+	}
 	if isSntpEclipseNode(info) {
 		return errors.New("managed TLS runtime replacement is unsupported for this node type")
 	}

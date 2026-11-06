@@ -97,6 +97,13 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 				}
 				routeCandidates = append(routeCandidates, routeRuleCandidate{info: info, index: index, route: route, raw: raw})
 			case "route", "route_ip", "default_out":
+				if route.ActionValue != nil {
+					reference := strings.TrimSpace(*route.ActionValue)
+					if reference != "" && !looksLikeJSON(reference) {
+						routeCandidates = append(routeCandidates, routeRuleCandidate{info: info, index: index, route: route, logical: reference})
+						continue
+					}
+				}
 				definition, err := parseRouteOutboundDefinition(info, index, route)
 				if err != nil {
 					if handled := handleRouteCompileFailure(strict, info, index, route, err); handled != nil {
@@ -166,6 +173,13 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 	dnsConfig, err := coreDNSConfig.Build()
 	if err != nil {
 		return nil, errors.New("compile route: invalid DNS config")
+	}
+	// References can precede definitions and can target a round-robin group.
+	for i := range routeCandidates {
+		definition := definitions[routeCandidates[i].logical]
+		if definition != nil {
+			routeCandidates[i].balancer = len(definition.members) > 0
+		}
 	}
 	balancers := buildRouteBalancers(definitions, definitionOrder, logicalToPhysical)
 	routerConfig, err := buildCompiledRouterConfig(routeCandidates, logicalToPhysical, balancers, strict)
@@ -583,7 +597,14 @@ func materializeRouteRule(candidate routeRuleCandidate, mapping map[string]strin
 	if candidate.logical == "" {
 		return candidate.raw, nil
 	}
-	return buildOutboundRouteRule(candidate.info, candidate.route, mapping[candidate.logical], candidate.balancer)
+	physical := mapping[candidate.logical]
+	if _, builtin := reservedOutboundTags[candidate.logical]; builtin {
+		physical = candidate.logical
+	}
+	if physical == "" {
+		return nil, errors.New("referenced outbound is not present on this machine")
+	}
+	return buildOutboundRouteRule(candidate.info, candidate.route, physical, candidate.balancer)
 }
 
 func routeCompileError(info *panel.NodeInfo, index int, route panel.Route, err error) error {

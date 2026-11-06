@@ -15,6 +15,13 @@ func (v *V2Core) ValidateNode(info *panel.NodeInfo, users []panel.UserInfo) erro
 	if info.Common.ServerPort < 1 || info.Common.ServerPort > 65535 {
 		return fmt.Errorf("invalid node port")
 	}
+	if info.Type == "socks" {
+		if err := validateSocksUsers(users); err != nil {
+			return err
+		}
+		_, err := newManagedSocksServer(info.Tag, info, v.Server, v.dispatcher)
+		return err
+	}
 	if isSntpEclipseNode(info) {
 		candidate, err := newSntpEclipseServer(info.Tag, info, v.Server, v.dispatcher)
 		if err != nil {
