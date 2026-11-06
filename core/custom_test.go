@@ -88,6 +88,72 @@ func TestCloudflareRemoteAddr(t *testing.T) {
 	}
 }
 
+func TestManagedCloudflareOriginPolicy(t *testing.T) {
+	compile := func(policy *panel.CloudflareOriginConfig, settings string) (*cloudflareRangeStore, error) {
+		n := routeCompileNode(42)
+		n.Common.ListenIP = "127.0.0.1"
+		n.Common.ServerPort = 443
+		n.Common.Network = "ws"
+		n.Common.NetworkSettings = json.RawMessage(settings)
+		n.Common.BaseConfig = &panel.BaseConfig{CloudflareOrigin: policy}
+		inbound, err := buildInbound(n, n.Tag)
+		if err != nil {
+			return nil, err
+		}
+		receiver, err := inbound.ReceiverSettings.GetInstance()
+		if err != nil {
+			return nil, err
+		}
+		stream, err := internet.ToMemoryStreamConfig(receiver.(*proxyman.ReceiverConfig).StreamSettings)
+		if err != nil {
+			return nil, err
+		}
+		return cloudflareStoreForWebSocket(stream.ProtocolSettings.(*xws.Config))
+	}
+	managed := &panel.CloudflareOriginConfig{Managed: true, CIDRs: []string{"8.8.8.0/24", "2606:4700::/32", "8.8.8.0/24"}}
+	store, err := compile(managed, `{"path":"/ws"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store == cloudflarePeers || len(*store.prefixes.Load()) != 2 || !store.contains(netip.MustParseAddr("8.8.8.8")) || store.contains(netip.MustParseAddr("173.245.48.1")) {
+		t.Fatal("managed policy was not authoritative or isolated")
+	}
+	peer := &net.TCPAddr{IP: net.ParseIP("8.8.8.8"), Port: 123}
+	if got := store.remoteAddr(peer, http.Header{"Cf-Connecting-Ip": {"9.9.9.9"}}); got.String() != "9.9.9.9:0" {
+		t.Fatal("managed peer did not restore client source")
+	}
+	other, err := compile(&panel.CloudflareOriginConfig{Managed: true, CIDRs: []string{"9.9.9.0/24"}}, `{"path":"/ws"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.contains(netip.MustParseAddr("8.8.8.8")) || !store.contains(netip.MustParseAddr("8.8.8.8")) || other == store {
+		t.Fatal("one inbound replaced another inbound's policy")
+	}
+	for _, policy := range []*panel.CloudflareOriginConfig{nil, {Managed: false, CIDRs: []string{"8.8.8.0/24"}}} {
+		got, err := compile(policy, `{"path":"/ws","headers":{"X-SNTP-Internal-CF-CIDRs":"[\"8.8.8.0/24\"]"}}`)
+		if err != nil || got != cloudflarePeers {
+			t.Fatalf("unmanaged did not restore automatic defaults: %v", err)
+		}
+	}
+	before := cloudflarePeers.prefixes.Load()
+	replacement := []netip.Prefix{netip.MustParsePrefix("9.9.9.0/24")}
+	cloudflarePeers.prefixes.Store(&replacement)
+	defer cloudflarePeers.prefixes.Store(before)
+	if !store.contains(netip.MustParseAddr("8.8.8.8")) || store.contains(netip.MustParseAddr("9.9.9.9")) {
+		t.Fatal("official snapshot update overwrote managed policy")
+	}
+	for _, cidrs := range [][]string{nil, {"0.0.0.0/0"}, {"::/0"}, {"10.0.0.0/8"}, {"192.0.0.0/8"}, {"2000::/3"}, {"2001:db8::/32"}, {"::ffff:8.8.8.0/120"}, {"8.8.8.1/24"}, {"8.8.8.0/024"}, {"host.invalid/24"}, make([]string, 257)} {
+		if _, err := compile(&panel.CloudflareOriginConfig{Managed: true, CIDRs: cidrs}, `{"path":"/ws"}`); err == nil {
+			t.Fatalf("unsafe managed policy accepted: %q", cidrs)
+		}
+	}
+	for _, encoded := range []string{"null", "[]", "garbage", `["127.0.0.0/8"]`, strings.Repeat(" ", 16385)} {
+		if _, err := cloudflareStoreForWebSocket(&xws.Config{Header: map[string]string{cloudflareCIDRMetadata: encoded}}); err == nil {
+			t.Fatal("malformed private transport metadata accepted")
+		}
+	}
+}
+
 type cloudflareTestRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f cloudflareTestRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

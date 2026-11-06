@@ -245,7 +245,11 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	if err != nil {
 		return nil, err
 	}
-	if err := enableCloudflareWebSocket(config); err != nil {
+	var cloudflareOrigin *panel.CloudflareOriginConfig
+	if nodeInfo.Common.BaseConfig != nil {
+		cloudflareOrigin = nodeInfo.Common.BaseConfig.CloudflareOrigin
+	}
+	if err := enableCloudflareWebSocket(config, cloudflareOrigin); err != nil {
 		return nil, err
 	}
 	return config, nil

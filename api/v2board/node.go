@@ -72,18 +72,25 @@ type Route struct {
 }
 
 type BaseConfig struct {
-	PushInterval               any                   `json:"push_interval"`
-	PullInterval               any                   `json:"pull_interval"`
-	DeviceOnlineMinTraffic     int                   `json:"device_online_min_traffic"`
-	NodeReportMinTraffic       int                   `json:"node_report_min_traffic"`
-	DeviceTrafficReport        bool                  `json:"device_traffic_report"`
-	DeviceAliveReport          bool                  `json:"device_alive_report"`
-	DeviceLimitByUUID          bool                  `json:"device_limit_by_uuid"`
-	DeviceLimitEnforcementMode string                `json:"device_limit_enforcement_mode"`
-	UUIDIPFanoutGuard          *UUIDIPFanoutConfig   `json:"uuid_ip_fanout_guard"`
-	UserSyncWakeup             *UserSyncWakeupConfig `json:"user_sync_wakeup"`
+	CloudflareOrigin           *CloudflareOriginConfig `json:"cloudflare_origin,omitempty"`
+	PushInterval               any                     `json:"push_interval"`
+	PullInterval               any                     `json:"pull_interval"`
+	DeviceOnlineMinTraffic     int                     `json:"device_online_min_traffic"`
+	NodeReportMinTraffic       int                     `json:"node_report_min_traffic"`
+	DeviceTrafficReport        bool                    `json:"device_traffic_report"`
+	DeviceAliveReport          bool                    `json:"device_alive_report"`
+	DeviceLimitByUUID          bool                    `json:"device_limit_by_uuid"`
+	DeviceLimitEnforcementMode string                  `json:"device_limit_enforcement_mode"`
+	UUIDIPFanoutGuard          *UUIDIPFanoutConfig     `json:"uuid_ip_fanout_guard"`
+	UserSyncWakeup             *UserSyncWakeupConfig   `json:"user_sync_wakeup"`
 	// Optional seconds between SNTP Eclipse online refresh marks.
 	SntpEclipseOnlineRefresh any `json:"sntp_eclipse_online_refresh"`
+}
+
+// A managed policy is authoritative for this inbound only. Nil uses official defaults.
+type CloudflareOriginConfig struct {
+	Managed bool     `json:"managed"`
+	CIDRs   []string `json:"cidrs"`
 }
 
 type UserSyncWakeupConfig struct {

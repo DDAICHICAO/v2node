@@ -4,15 +4,40 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/wyx2685/v2node/conf"
 )
 
 const validNodeConfigBody = `{"protocol":"vless","listen_ip":"0.0.0.0","server_port":443,"base_config":{"push_interval":60,"pull_interval":60}}`
+
+func TestCloudflareOriginConfigDelivery(t *testing.T) {
+	body := strings.Replace(validNodeConfigBody, `"push_interval":60`, `"cloudflare_origin":{"managed":true,"cidrs":["173.245.48.0/20","2606:4700::/32"]},"push_interval":60`, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Query().Get("capabilities"), "cloudflare_origin_cidrs_v1") {
+			t.Error("node did not advertise managed Cloudflare CIDR support")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 1, MachineIP: "1.1.1.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := client.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Common.BaseConfig.CloudflareOrigin == nil || !info.Common.BaseConfig.CloudflareOrigin.Managed || len(info.Common.BaseConfig.CloudflareOrigin.CIDRs) != 2 {
+		t.Fatal("panel Cloudflare policy was lost while parsing")
+	}
+}
 
 func TestNodeConfigVersionCommitsOnlyAfterSuccessfulParse(t *testing.T) {
 	var body atomic.Value

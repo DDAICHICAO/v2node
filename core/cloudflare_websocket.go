@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
+	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
 	xnet "github.com/xtls/xray-core/common/net"
@@ -27,11 +29,15 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 	v2tls "github.com/xtls/xray-core/transport/internet/tls"
 	xws "github.com/xtls/xray-core/transport/internet/websocket"
+	"google.golang.org/protobuf/proto"
 )
 
 const cloudflareWebSocket = "sntp-cf-websocket"
 
-func enableCloudflareWebSocket(in *xcore.InboundHandlerConfig) error {
+// Private transport metadata, never sent as a request or response header.
+const cloudflareCIDRMetadata = "X-SNTP-Internal-CF-CIDRs"
+
+func enableCloudflareWebSocket(in *xcore.InboundHandlerConfig, policy *panel.CloudflareOriginConfig) error {
 	raw, err := in.ReceiverSettings.GetInstance()
 	if err != nil {
 		return err
@@ -59,12 +65,37 @@ func enableCloudflareWebSocket(in *xcore.InboundHandlerConfig) error {
 	if ws.AcceptProxyProtocol {
 		return nil
 	}
+	ws = proto.Clone(ws).(*xws.Config)
+	for key := range ws.Header {
+		if strings.EqualFold(key, cloudflareCIDRMetadata) {
+			delete(ws.Header, key)
+		}
+	}
+	if policy != nil && policy.Managed {
+		prefixes, err := validatedCloudflarePrefixes(policy.CIDRs)
+		if err != nil {
+			return fmt.Errorf("invalid managed Cloudflare origin policy: %w", err)
+		}
+		cidrs := make([]string, len(prefixes))
+		for i, prefix := range prefixes {
+			cidrs[i] = prefix.String()
+		}
+		encoded, err := json.Marshal(cidrs)
+		if err != nil {
+			return err
+		}
+		if ws.Header == nil {
+			ws.Header = make(map[string]string)
+		}
+		ws.Header[cloudflareCIDRMetadata] = string(encoded)
+	}
 	found := false
 	for _, setting := range stream.TransportSettings {
 		if setting.ProtocolName != "websocket" {
 			continue
 		}
 		setting.ProtocolName = cloudflareWebSocket
+		setting.Settings = serial.ToTypedMessage(ws)
 		found = true
 		break
 	}
@@ -118,6 +149,10 @@ func listenCloudflareWS(ctx context.Context, address xnet.Address, port xnet.Por
 	if config.AcceptProxyProtocol || settings.SocketSettings.GetAcceptProxyProtocol() || settings.FinalMask != nil {
 		return nil, errors.New("Cloudflare WebSocket requires the original socket peer")
 	}
+	peers, err := cloudflareStoreForWebSocket(config)
+	if err != nil {
+		return nil, err
+	}
 	var addr net.Addr = &net.TCPAddr{IP: address.IP(), Port: int(port)}
 	if port == 0 {
 		addr = &net.UnixAddr{Name: address.Domain(), Net: "unix"}
@@ -132,7 +167,7 @@ func listenCloudflareWS(ctx context.Context, address xnet.Address, port xnet.Por
 		}
 	}
 	server := &http.Server{
-		Handler:           &cloudflareWSHandler{config: config, peers: cloudflarePeers, addConn: addConn},
+		Handler:           &cloudflareWSHandler{config: config, peers: peers, addConn: addConn},
 		ReadHeaderTimeout: 4 * time.Second, MaxHeaderBytes: 8192,
 	}
 	go func() {
@@ -142,6 +177,27 @@ func listenCloudflareWS(ctx context.Context, address xnet.Address, port xnet.Por
 	}()
 	// Like the upstream listener, closing the accept socket preserves hijacked connections.
 	return &cloudflareWSListener{Listener: listener}, nil
+}
+
+func cloudflareStoreForWebSocket(config *xws.Config) (*cloudflareRangeStore, error) {
+	encoded, managed := config.Header[cloudflareCIDRMetadata]
+	if !managed {
+		return cloudflarePeers, nil
+	}
+	if len(encoded) > 16384 {
+		return nil, errors.New("managed Cloudflare CIDRs too large")
+	}
+	var cidrs []string
+	if err := json.Unmarshal([]byte(encoded), &cidrs); err != nil {
+		return nil, errors.New("invalid managed Cloudflare CIDRs")
+	}
+	prefixes, err := validatedCloudflarePrefixes(cidrs)
+	if err != nil {
+		return nil, err
+	}
+	store := new(cloudflareRangeStore)
+	store.prefixes.Store(&prefixes)
+	return store, nil
 }
 
 func init() {

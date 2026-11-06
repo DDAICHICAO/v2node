@@ -1,5 +1,12 @@
 # LESSONS LEARNED
 
+## 2026-11-06：面板 CF CIDR 不能直接覆盖进程级官方列表
+
+- 需求/风险：后台需要查看、增删改并下发可信 CF 回源 CIDR；单进程可能服务多个面板或节点，直接写全局官方 store 会造成策略串用，官方定时刷新还会覆盖人工修改。
+- 修复链：能力 `cloudflare_origin_cidrs_v1` → `BaseConfig.CloudflareOrigin` → `core/inbound.go` → 私有 WS 传输元数据 → 每入站独立 store。托管清单是该入站的完整权威范围，官方任务只更新未托管入站引用的全局 store；缺省/关闭回退自动模式，PROXY/finalmask 保持原路径，元数据不发往网络。
+- 验证/维护：沿用现有 Go 测试文件检查能力、配置解析、来源解析与隔离、默认回退、坏 CIDR/元数据、重载分类；面板 31 项 PHP 隔离检查与 TypeScript 检查通过。两端默认 22 条范围一致，空/宽泛/保留段拒绝；未创建永久测试文件、发布或部署。详见 `docs/log-troubleshooting.md` 同日“接收面板托管”章节。
+- 后续入口：`api/v2board/node.go` / `panel.go`、`core/cloudflare_ips.go` / `cloudflare_websocket.go` / `inbound.go` 与相邻面板 `CloudflareOriginPolicy`。该功能使用既有配置重载和离线快照，不把配置已保存等同于所有旧版节点已应用，真实上线需按能力、版本与新连接来源分别验收。
+
 ## 2026-11-06：CF 来源识别需要官方回源网段与严格头解析（本地修复）
 
 - 症状/根因：CF WebSocket 节点来源退化为 CF；固定 Xray 升级后默认忽略 XFF。`trustedXForwardedFor` 是头名列表，并不验证来源 CIDR，简单恢复无条件 XFF 会允许直连伪造。

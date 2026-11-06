@@ -45,6 +45,31 @@ func newCloudflareRangeStore(cidrs []string) *cloudflareRangeStore {
 
 var cloudflarePeers = newCloudflareRangeStore(builtinCloudflareRanges)
 
+func validatedCloudflarePrefixes(cidrs []string) ([]netip.Prefix, error) {
+	if len(cidrs) == 0 || len(cidrs) > 256 {
+		return nil, errors.New("Cloudflare CIDRs must contain 1 to 256 prefixes")
+	}
+	prefixes := make([]netip.Prefix, 0, len(cidrs))
+	seen := make(map[netip.Prefix]bool, len(cidrs))
+	for _, cidr := range cidrs {
+		p, err := netip.ParsePrefix(cidr)
+		if err != nil || p != p.Masked() || p.Addr().Is4In6() || p.Bits() < 8 ||
+			(!p.Addr().Is4() && p.Bits() < 19) || !p.Addr().IsGlobalUnicast() {
+			return nil, errors.New("invalid Cloudflare prefix")
+		}
+		for _, blocked := range *nonPublicRanges.prefixes.Load() {
+			if p.Overlaps(blocked) {
+				return nil, errors.New("unsafe Cloudflare prefix")
+			}
+		}
+		if !seen[p] {
+			seen[p] = true
+			prefixes = append(prefixes, p)
+		}
+	}
+	return prefixes, nil
+}
+
 func (s *cloudflareRangeStore) contains(ip netip.Addr) bool {
 	list := s.prefixes.Load()
 	if list != nil {

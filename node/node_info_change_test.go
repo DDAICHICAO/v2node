@@ -27,6 +27,11 @@ func TestClassifyNodeInfoChange(t *testing.T) {
 		{name: "port requires reload", mutate: func(n *panel.NodeInfo) {
 			n.Common.ServerPort++
 		}, want: nodeInfoFullReload},
+		{name: "Cloudflare CIDRs require listener reload", mutate: func(n *panel.NodeInfo) {
+			baseConfig := *n.Common.BaseConfig
+			n.Common.BaseConfig = &baseConfig
+			n.Common.BaseConfig.CloudflareOrigin = &panel.CloudflareOriginConfig{Managed: true, CIDRs: []string{"173.245.48.0/20"}}
+		}, want: nodeInfoFullReload},
 		{name: "route and port require reload", mutate: func(n *panel.NodeInfo) {
 			n.Common.ServerPort++
 			n.Common.Routes = []panel.Route{{Id: 9, Action: "block", Match: []string{"domain:example.com"}}}

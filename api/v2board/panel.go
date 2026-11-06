@@ -22,6 +22,7 @@ import (
 // Panel is the interface for different panel's api.
 
 var deviceLimitCapabilities = []string{
+	"cloudflare_origin_cidrs_v1",
 	"titan_v3_native_v1",
 	"device_uuid_users",
 	"uid_traffic_aggregate",
