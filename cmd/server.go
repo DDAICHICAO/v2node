@@ -71,6 +71,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	// Management is independent of every business controller and starts before bootstrap.
 	ctx, cancelControl := context.WithCancel(context.Background())
 	defer cancelControl()
+	go core.RunCloudflareIPUpdates(ctx)
 	manager, err := node.NewCleanupManager(config)
 	if err != nil {
 		log.Error("Initialize node management failed")

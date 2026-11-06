@@ -241,7 +241,14 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		break
 	}
 	in.Tag = tag
-	return in.Build()
+	config, err := in.Build()
+	if err != nil {
+		return nil, err
+	}
+	if err := enableCloudflareWebSocket(config); err != nil {
+		return nil, err
+	}
+	return config, nil
 }
 
 func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {

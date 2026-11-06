@@ -1,5 +1,15 @@
 # v2node 日志排查速查
 
+## 2026-11-06：CF WebSocket 来源地址恢复（本地源码，未部署）
+
+- 症状/原因：CF 回源节点的在线 IP 变为边缘 IP，并出现 `sockopt.trustedXForwardedFor` 未配置警告。2026-11-02 升级至固定 Xray `dcfae7c4776b` 后，WebSocket 不再默认读取 XFF。该字段配置的是头名而非可信 CIDR；直接填入 CF 头不能防止公网伪造。
+- 本地修复：`core/inbound.go` 生成普通 WebSocket 入站后选择 SNTP 的 `sntp-cf-websocket` 监听。`core/cloudflare_websocket.go` 保留原 Host/path、TLS、early data、heartbeat 与流封装，先按真实 socket 对端匹配 CF 官方 IPv4/IPv6 网段，再采用单值、合法公网 `CF-Connecting-IP`；Pseudo IPv4 覆盖模式下仅接受合法 `CF-Connecting-IPv6`。直连、非 CF、缺失/重复/非法头均保留 socket 来源，不回退到任意 XFF。
+- 清单机制：`core/cloudflare_ips.go` 内置官方 15 个 IPv4、7 个 IPv6 网段；`cmd/server.go` 在进程启动时异步更新，此后每 6 小时从固定 HTTPS 官方 `/client/v4/ips` 获取，10 秒超时、拒绝重定向、64 KiB 响应上限、双地址族与网段校验、原子替换。失败保留内存中上次成功清单；重启先使用内置清单，不依赖 API 可用性、不新增磁盘缓存或第三方来源设置。新增同类节点自动使用，不需要逐个填写优选 IP。
+- 业务链：连接 `RemoteAddr` → Xray `session.Inbound.Source` → SNTP dispatcher/limiter 的设备/IP 限制、在线/访问记录 → `node/user.go` 的在线上报。客户端优选入口 IP 和源站回源对端属于不同链路位置，不能把第三方测速 TXT 当可信回源清单。
+- 适用边界：VLESS/VMess/Trojan/AnyTLS 等由现有生成器生成的普通 WS 入站。开启 PROXY Protocol 或 finalmask 的入站保持原传输，避免把可被替换的 RemoteAddr 当物理对端。CF → Nginx/其他中转 → 节点、Tunnel、Workers 特殊转发链以及 HTTPUpgrade/XHTTP/gRPC 均需单独核实可信链；本次不自动信任它们，也不在面板按 NodeID 打补丁。CF 若移除真实 IP 头，节点不能凭空还原。
+- 本地验证：先添加入站选择回归测试并确认旧实现失败；现有 `core/custom_test.go` 追加官方网段、IPv4/IPv6/mapped、Pseudo IPv4、头伪造/重复/非法、坏清单保留快照、取消、Host/path、TLS WS early data/双向收发、关闭监听保留连接等覆盖；真实本地 VLESS 认证进入 limiter 后，`GetOnlineDeviceState` 的用户/设备来源在可信夹具下使用客户端地址、直连伪造下保留 socket 地址。循环回源白名单仅为测试夹具，正式内置清单不信任 loopback。测试目标限制在本机；Xray 默认 freedom 会 blackhole 回环目标，在线统计回归在认证/统计完成后结束，不修改出站保护或以其宣称代理转发验收。
+- 发布/验收：源码与相关记录纳入本次本地提交，未构建发行包、推送、更新生产节点、重启或执行清理 SQL。发布需更新节点二进制；先备份实际运行二进制及校验和，再在一个 CF 节点验证版本、WS/TLS 可连、真实客户端新连接、后台实时来源和后续历史，然后扩展其他节点。切换需重连才适用新入站；旧 MySQL 历史、Redis 在线窗口和审计不会自动改写。回滚使用现场备份版本；不能用清空记录代替恢复真实来源。
+
 ## 2026-11-05 晚间：同 NodeID 原证书跨机对齐后恢复指纹共识
 
 - 四组自签节点 230/231/761/762 的冲突来自两台活跃机器使用不同证书；不是观察 TTL 尚未到期。原机器的实际叶证书指纹与面板既有 pin 一致，761/762 临时新建证书只解决了启动，最终必须沿用同 NodeID 原证书以保留订阅信任。

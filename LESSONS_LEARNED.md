@@ -1,5 +1,13 @@
 # LESSONS LEARNED
 
+## 2026-11-06：CF 来源识别需要官方回源网段与严格头解析（本地修复）
+
+- 症状/根因：CF WebSocket 节点来源退化为 CF；固定 Xray 升级后默认忽略 XFF。`trustedXForwardedFor` 是头名列表，并不验证来源 CIDR，简单恢复无条件 XFF 会允许直连伪造。
+- 链路/修复：`core/inbound.go` → SNTP WS listener → `RemoteAddr` → Xray inbound source → dispatcher/limiter → `node/user.go`。普通 WS 入站自动匹配 CF 官方 socket 来源，仅采用单值合法公网 CF-Connecting-IP，兼容 IPv6、mapped 和 Pseudo IPv4；其他来源或无效头保留实际 socket，不信任任意 XFF。PROXY/finalmask 保留原路径，其他 CDN/本地反代需独立核实。
+- 清单：内置官方 IPv4/IPv6，进程级独立任务启动异步更新并每 6 小时刷新；固定 HTTPS、10 秒超时、拒绝重定向、64 KiB 与双族/公网 CIDR 校验、原子快照。失败保留当前清单，重启用内置值。客户端优选 IP 不等于 CF 回源对端，不能拿第三方优选 TXT 当信任依据。
+- 验证/范围：旧生成器回归先失败，修复后官方网段/伪造/IPv6/清单失败、TLS WS early data/收发、监听关闭保留已有流，以及真实本地 VLESS 认证→用户/设备在线来源通过。Xray freedom 默认 blackhole 回环目标；本地在线统计用例验证到 limiter，不修改该保护，也不据此宣称生产代理转发通过。没有新建永久测试文件、构建发行包或修改面板/数据库。
+- 下次/状态：详见 `docs/log-troubleshooting.md` 同日章节；新增 `core/cloudflare_ips.go`、`core/cloudflare_websocket.go`，生命周期入口 `cmd/server.go`，回归在现有 `core/custom_test.go`。本次提交纳入源码与相关记录，未推送、部署或重启；需更新节点后用新连接验收真实客户端与面板自然上报，旧历史不自动恢复。
+
 ## 2026-11-05 晚间：复制同 NodeID 原证书解决持续活跃实例冲突
 
 - 症状/根因：230/231/761/762 两实例持续上报不同自签指纹，面板冻结全局 pin。补文件或重新生成只恢复监听，不自动恢复旧订阅信任；self/file 不承担 managed 的跨机证书分发。
