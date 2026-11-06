@@ -1,5 +1,12 @@
 # LESSONS LEARNED
 
+## 2026-11-06：路由 DNS 合并必须区分省略值与显式关闭
+
+- 症状/链路：复核后台路由回显时发现 DNS 表单提供 script 和关闭开关，但 core/custom.go 合并遗漏 Script，布尔值只合并 true、TTL 只合并非零；显式 false/0 单独配置在严格编译时甚至被当作无效配置。
+- 修复：DNS 解析后同时检查原 JSON 字段是否存在；script 进入编译配置，全局 false/0/空字符串可显式覆盖，未提供字段继续继承。旧 applyDNSRouteConfig 与严格 applyDNSRouteConfigChecked 共用合并逻辑；多个全局设置按收到的规则顺序以最后一个显式值为准。
+- 验证：在既有 core/custom_test.go 先复现严格/旧路径失败，再验证显式关闭、保留省略字段及脚本到编译配置；core/route_compile_test.go 补充普通/轮询标签前后向引用、内置标签和缺失定义。核心、路由运行时、dispatcher、节点启动/重载定向检查通过。未新增永久测试文件，未构建、发布、部署或真实客户端验收。
+- 下次入口：core/custom.go 的 dnsConfigHasValue / mergeDNSConfig，core/route_compile.go 的 applyDNSRouteConfigChecked，以及相应既有测试。后台完整定义与标签引用不能互相替代；DNS script 与域名/回退/并行选项冲突由表单和当前核心校验。详见 docs/log-troubleshooting.md 同日复核章节及相邻 v2board 的 docs/server-routing-forms.md。
+
 ## 2026-11-06：SOCKS5 普通用户监听不能直接复用固定账号入口
 
 - 症状/需求：A→B 解锁想减少额外代理加密；用户要求 SOCKS5 同时可作为普通用户节点，不能只做固定账号出口或开放匿名探测端口。

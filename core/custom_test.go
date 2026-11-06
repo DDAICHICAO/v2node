@@ -556,3 +556,37 @@ func TestApplyDNSRouteConfigAppliesMatchToSingleJSONServer(t *testing.T) {
 		t.Fatalf("expected server query strategy UseIPv4, got %q", config.Servers[0].QueryStrategy)
 	}
 }
+
+func TestApplyDNSRouteConfigPreservesScriptAndExplicitGlobalOptions(t *testing.T) {
+	for _, checked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("checked=%t", checked), func(t *testing.T) {
+			config := &coreConf.DNSConfig{}
+			apply := func(value string) {
+				route := panel.Route{Action: "dns", ActionValue: &value}
+				if checked {
+					if err := applyDNSRouteConfigChecked(config, route); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					applyDNSRouteConfig(config, route)
+				}
+			}
+			apply(`{"servers":["localhost"],"queryStrategy":"UseIPv4","tag":"keep-dns","disableCache":true,"disableFallback":true,"disableFallbackIfMatch":true,"enableParallelQuery":true,"useSystemHosts":true,"serveStale":true,"serveExpiredTTL":300}`)
+			apply(`{"disableCache":false,"disableFallback":false,"disableFallbackIfMatch":false,"enableParallelQuery":false,"useSystemHosts":false,"serveStale":false,"serveExpiredTTL":0}`)
+			if config.DisableCache || config.DisableFallback || config.DisableFallbackIfMatch || config.EnableParallelQuery || config.UseSystemHosts || config.ServeStale || config.ServeExpiredTTL != 0 {
+				t.Fatal("explicit false/zero DNS fields were ignored")
+			}
+			if config.QueryStrategy != "UseIPv4" || config.Tag != "keep-dns" || len(config.Servers) != 1 {
+				t.Fatal("absent options unexpectedly replaced prior DNS settings")
+			}
+			apply(`{"script":"test-script-content"}`)
+			if config.Script != "test-script-content" {
+				t.Fatal("DNS script was discarded during route merge")
+			}
+			built, err := config.Build()
+			if err != nil || built.Script != config.Script {
+				t.Fatalf("DNS options did not reach the compiled config: %v", err)
+			}
+		})
+	}
+}

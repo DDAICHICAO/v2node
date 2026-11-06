@@ -24,6 +24,49 @@ func TestCompileRouteRuntimeRejectsConflictingOutboundTag(t *testing.T) {
 	}
 }
 
+func TestCompileRouteRuntimeLogicalTagReferences(t *testing.T) {
+	for _, pool := range []bool{false, true} {
+		for _, forward := range []bool{false, true} {
+			t.Run(fmt.Sprintf("pool=%t/forward=%t", pool, forward), func(t *testing.T) {
+				value := `{"tag":"shared-exit","protocol":"shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-only"}]}}`
+				if pool {
+					value = strings.Replace(value, `}]}`, `},{"address":"127.0.0.1","port":19002,"method":"aes-128-gcm","password":"test-only-two"}]}`, 1)
+				}
+				ref := "shared-exit"
+				definition := panel.Route{Id: 1, Action: "route", Match: []string{"domain:one.invalid"}, ActionValue: &value}
+				reference := panel.Route{Id: 2, Action: "route", Match: []string{"domain:two.invalid"}, ActionValue: &ref}
+				routes := []panel.Route{definition, reference}
+				if forward {
+					routes[0], routes[1] = routes[1], routes[0]
+				}
+				compiled, err := CompileRouteRuntime([]*panel.NodeInfo{routeCompileNode(1, routes...)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, rule := range compiled.RouterConfig.Rule[1:] {
+					got := rule.GetTag()
+					if pool {
+						got = rule.GetBalancingTag()
+					}
+					if got != compiled.LogicalToPhysical[ref] {
+						t.Fatal("reference did not target the same compiled outbound or pool")
+					}
+				}
+			})
+		}
+	}
+	for _, tag := range []string{"Default", "block", "dns_out"} {
+		compiled, err := CompileRouteRuntime([]*panel.NodeInfo{routeCompileNode(1, panel.Route{Action: "default_out", ActionValue: &tag})})
+		if err != nil || compiled.RouterConfig.Rule[1].GetTag() != tag || len(compiled.CustomOutbounds) != 0 {
+			t.Fatalf("built-in reference failed: %v", err)
+		}
+	}
+	missing := "missing-exit"
+	if _, err := CompileRouteRuntime([]*panel.NodeInfo{routeCompileNode(1, panel.Route{Action: "default_out", ActionValue: &missing})}); err == nil {
+		t.Fatal("a reference cannot replace its only definition")
+	}
+}
+
 func TestCompileRouteRuntimeShadowsocksMultipleServers(t *testing.T) {
 	value := `{"tag":"test-pool","protocol":"Shadowsocks","settings":{"servers":[{"address":"127.0.0.1","port":19001,"method":"aes-128-gcm","password":"test-only-a"},{"address":"127.0.0.1","port":19002,"method":"aes-128-gcm","password":"test-only-b"}]}}`
 	infos := []*panel.NodeInfo{routeCompileNode(1, panel.Route{Id: 52, Action: "route", Match: []string{"domain:media.invalid"}, ActionValue: &value})}

@@ -60,11 +60,12 @@ func jsonObjectHasKey(value string, key string) bool {
 	return ok
 }
 
-func dnsConfigHasValue(config *coreConf.DNSConfig) bool {
+func dnsConfigHasValue(config *coreConf.DNSConfig, raw string) bool {
 	if config == nil {
 		return false
 	}
-	return len(config.Servers) > 0 ||
+	if len(config.Servers) > 0 ||
+		config.Script != "" ||
 		config.Hosts != nil ||
 		config.ClientIP != nil ||
 		config.Tag != "" ||
@@ -75,7 +76,20 @@ func dnsConfigHasValue(config *coreConf.DNSConfig) bool {
 		config.DisableFallback ||
 		config.DisableFallbackIfMatch ||
 		config.EnableParallelQuery ||
-		config.UseSystemHosts
+		config.UseSystemHosts {
+		return true
+	}
+	// An explicit false/zero is a valid override, unlike an absent option.
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &fields) != nil {
+		return false
+	}
+	for _, key := range []string{"script", "tag", "queryStrategy", "disableCache", "serveStale", "serveExpiredTTL", "disableFallback", "disableFallbackIfMatch", "enableParallelQuery", "useSystemHosts"} {
+		if value, ok := fields[key]; ok && string(value) != "null" {
+			return true
+		}
+	}
+	return false
 }
 
 func applyRouteMatchToDNSServer(server *coreConf.NameServerConfig, match []string) {
@@ -86,10 +100,13 @@ func applyRouteMatchToDNSServer(server *coreConf.NameServerConfig, match []strin
 	server.SkipFallback = true
 }
 
-func mergeDNSConfig(dst *coreConf.DNSConfig, src *coreConf.DNSConfig, routeMatch []string) {
+func mergeDNSConfig(dst *coreConf.DNSConfig, src *coreConf.DNSConfig, routeMatch []string, raw string) {
 	if dst == nil || src == nil {
 		return
 	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(raw), &fields)
+	has := func(key string) bool { value, ok := fields[key]; return ok && string(value) != "null" }
 	if len(src.Servers) == 1 {
 		applyRouteMatchToDNSServer(src.Servers[0], routeMatch)
 	}
@@ -102,32 +119,35 @@ func mergeDNSConfig(dst *coreConf.DNSConfig, src *coreConf.DNSConfig, routeMatch
 	if src.ClientIP != nil {
 		dst.ClientIP = src.ClientIP
 	}
-	if src.Tag != "" {
+	if src.Script != "" || has("script") {
+		dst.Script = src.Script
+	}
+	if src.Tag != "" || has("tag") {
 		dst.Tag = src.Tag
 	}
-	if src.QueryStrategy != "" {
+	if src.QueryStrategy != "" || has("queryStrategy") {
 		dst.QueryStrategy = src.QueryStrategy
 	}
-	if src.DisableCache {
-		dst.DisableCache = true
+	if src.DisableCache || has("disableCache") {
+		dst.DisableCache = src.DisableCache
 	}
-	if src.ServeStale {
-		dst.ServeStale = true
+	if src.ServeStale || has("serveStale") {
+		dst.ServeStale = src.ServeStale
 	}
-	if src.ServeExpiredTTL != 0 {
+	if src.ServeExpiredTTL != 0 || has("serveExpiredTTL") {
 		dst.ServeExpiredTTL = src.ServeExpiredTTL
 	}
-	if src.DisableFallback {
-		dst.DisableFallback = true
+	if src.DisableFallback || has("disableFallback") {
+		dst.DisableFallback = src.DisableFallback
 	}
-	if src.DisableFallbackIfMatch {
-		dst.DisableFallbackIfMatch = true
+	if src.DisableFallbackIfMatch || has("disableFallbackIfMatch") {
+		dst.DisableFallbackIfMatch = src.DisableFallbackIfMatch
 	}
-	if src.EnableParallelQuery {
-		dst.EnableParallelQuery = true
+	if src.EnableParallelQuery || has("enableParallelQuery") {
+		dst.EnableParallelQuery = src.EnableParallelQuery
 	}
-	if src.UseSystemHosts {
-		dst.UseSystemHosts = true
+	if src.UseSystemHosts || has("useSystemHosts") {
+		dst.UseSystemHosts = src.UseSystemHosts
 	}
 }
 
@@ -162,8 +182,8 @@ func applyDNSRouteConfig(coreDnsConfig *coreConf.DNSConfig, route panel.Route) {
 		}
 
 		var dnsConfig coreConf.DNSConfig
-		if err := json.Unmarshal([]byte(dnsJSON), &dnsConfig); err == nil && dnsConfigHasValue(&dnsConfig) {
-			mergeDNSConfig(coreDnsConfig, &dnsConfig, route.Match)
+		if err := json.Unmarshal([]byte(dnsJSON), &dnsConfig); err == nil && dnsConfigHasValue(&dnsConfig, dnsJSON) {
+			mergeDNSConfig(coreDnsConfig, &dnsConfig, route.Match, dnsJSON)
 			return
 		}
 

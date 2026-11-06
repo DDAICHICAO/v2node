@@ -249,8 +249,8 @@ func applyDNSRouteConfigChecked(config *coreConf.DNSConfig, route panel.Route) e
 		dnsJSON = `{"servers":` + dnsJSON + `}`
 	}
 	var dnsConfig coreConf.DNSConfig
-	if err := json.Unmarshal([]byte(dnsJSON), &dnsConfig); err == nil && dnsConfigHasValue(&dnsConfig) {
-		mergeDNSConfig(config, &dnsConfig, route.Match)
+	if err := json.Unmarshal([]byte(dnsJSON), &dnsConfig); err == nil && dnsConfigHasValue(&dnsConfig, dnsJSON) {
+		mergeDNSConfig(config, &dnsConfig, route.Match, dnsJSON)
 		return nil
 	}
 	if appendDNSServerConfig(config, actionValue, route.Match) {
