@@ -219,5 +219,13 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 	}
 	outbounds := []*core.OutboundHandlerConfig{defaultOutbound, blockOutbound, dnsOutbound}
 	outbounds = append(outbounds, compiled.CustomOutbounds...)
-	return compiled.DNSConfig, outbounds, compiled.RouterConfig, nil
+	dnsConfig := compiled.DNSConfig
+	// This legacy API can represent one node's DNS configuration. The runtime
+	// uses NodeDNSConfigs for multi-node isolation instead of flattening them.
+	if len(compiled.NodeDNSConfigs) == 1 {
+		for _, config := range compiled.NodeDNSConfigs {
+			dnsConfig = config
+		}
+	}
+	return dnsConfig, outbounds, compiled.RouterConfig, nil
 }

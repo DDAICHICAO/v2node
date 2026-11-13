@@ -259,3 +259,39 @@ func (d *blockingRuntimeDNS) LookupIP(domain string, option featuredns.IPOption)
 	<-d.release
 	return d.fixedRuntimeDNS.LookupIP(domain, option)
 }
+
+func TestScopedRuntimeDNSPinsLookupBeyondConnection(t *testing.T) {
+	backend := newBlockingDNS("192.0.2.1")
+	var cleaned atomic.Int32
+	manager := NewRouteRuntimeManager(RouteRuntimeGeneration{ID: 1, DNS: backend, Cleanup: func() error { cleaned.Add(1); return nil }})
+	defer manager.Close()
+	lease, err := manager.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := lease.Context(dnsInboundContext("node-1"))
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := featuredns.LookupIP(ctx, nil, "example.invalid", featuredns.IPOption{IPv4Enable: true})
+		done <- err
+	}()
+	<-backend.started
+	lease.Release()
+	if err := manager.Publish(RouteRuntimeGeneration{ID: 2, DNS: &fixedRuntimeDNS{ip: "192.0.2.2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if cleaned.Load() != 0 {
+		t.Fatal("scoped lookup lost its generation when connection closed")
+	}
+	close(backend.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if cleaned.Load() != 1 {
+		t.Fatalf("cleanup count=%d", cleaned.Load())
+	}
+	// A stale scope must not silently resolve using the new generation.
+	if _, _, err := featuredns.LookupIP(ctx, nil, "example.invalid", featuredns.IPOption{IPv4Enable: true}); err == nil {
+		t.Fatal("released DNS scope accepted a query")
+	}
+}

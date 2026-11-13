@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/proxyman"
 	xraycore "github.com/xtls/xray-core/core"
 	"google.golang.org/protobuf/proto"
@@ -398,4 +399,54 @@ func findCompiledOutbound(outbounds []*xraycore.OutboundHandlerConfig, tag strin
 		}
 	}
 	return nil
+}
+
+func TestCompileRouteRuntimeIsolatesNodeDNSOptionsAndHash(t *testing.T) {
+	jp := `{"servers":[{"address":"192.0.2.1"}],"queryStrategy":"UseIPv4","disableCache":true,"disableFallbackIfMatch":true}`
+	us := `{"servers":[{"address":"192.0.2.2"}],"queryStrategy":"UseIPv6","disableCache":false,"disableFallbackIfMatch":false}`
+	a := routeCompileNode(1, panel.Route{Action: "dns", Match: []string{"domain:video.test"}, ActionValue: &jp})
+	b := routeCompileNode(2, panel.Route{Action: "dns", Match: []string{"domain:video.test"}, ActionValue: &us})
+	c := routeCompileNode(3)
+	compile := func(infos ...*panel.NodeInfo) *CompiledRouteRuntime {
+		t.Helper()
+		v, err := CompileRouteRuntime(infos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	first := compile(a, b, c)
+	if len(first.NodeDNSConfigs) != 3 {
+		t.Fatal("missing per-node DNS config")
+	}
+	for tag, want := range map[string]dns.QueryStrategy{"node-1": dns.QueryStrategy_USE_IP4, "node-2": dns.QueryStrategy_USE_IP6} {
+		if first.NodeDNSConfigs[tag].QueryStrategy != want {
+			t.Fatalf("%s query strategy leaked", tag)
+		}
+	}
+	if !first.NodeDNSConfigs[a.Tag].DisableCache || first.NodeDNSConfigs[b.Tag].DisableCache {
+		t.Fatal("cache option leaked between nodes")
+	}
+	if !first.NodeDNSConfigs[a.Tag].DisableFallbackIfMatch || first.NodeDNSConfigs[b.Tag].DisableFallbackIfMatch {
+		t.Fatal("fallback option leaked between nodes")
+	}
+	if len(first.NodeDNSConfigs[c.Tag].NameServer) != 1 || len(first.DNSConfig.NameServer) != 1 {
+		t.Fatal("unconfigured node inherited another node's resolver")
+	}
+	if reordered := compile(c, b, a); reordered.ConfigHash != first.ConfigHash {
+		t.Fatal("node order changed DNS-only config hash")
+	}
+	a.Common.Routes[0].ActionValue = &us
+	b.Common.Routes[0].ActionValue = &jp
+	if switched := compile(a, b, c); switched.ConfigHash == first.ConfigHash {
+		t.Fatal("swapping per-node DNS bindings did not change runtime hash")
+	}
+}
+
+func TestGetCustomConfigPreservesSingleNodeDNS(t *testing.T) {
+	value := `{"servers":[{"address":"192.0.2.1"}],"disableCache":true}`
+	config, _, _, err := GetCustomConfig([]*panel.NodeInfo{routeCompileNode(1, panel.Route{Action: "dns", ActionValue: &value})})
+	if err != nil || config == nil || !config.DisableCache || len(config.NameServer) != 2 {
+		t.Fatalf("single-node DNS compatibility lost: config=%v error=%v", config, err)
+	}
 }

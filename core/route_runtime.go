@@ -150,7 +150,7 @@ func (v *V2Core) ApplyRouteRuntime(infos []*panel.NodeInfo) (uint64, error) {
 		v.setRouteHealthLocked(err)
 		return v.routeGeneration, err
 	}
-	dnsBackend, err := createRouteDNSBackend(v.Server, compiled.DNSConfig)
+	dnsBackend, err := createRouteNodeDNS(v.Server, compiled)
 	if err != nil {
 		v.setRouteHealthLocked(err)
 		return v.routeGeneration, err

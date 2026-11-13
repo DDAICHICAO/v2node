@@ -23,6 +23,7 @@ import (
 
 type CompiledRouteRuntime struct {
 	DNSConfig         *dns.Config
+	NodeDNSConfigs    map[string]*dns.Config
 	RouterConfig      *router.Config
 	CustomOutbounds   []*xraycore.OutboundHandlerConfig
 	LogicalToPhysical map[string]string
@@ -67,7 +68,8 @@ func CompileRouteRuntime(infos []*panel.NodeInfo) (*CompiledRouteRuntime, error)
 }
 
 func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRuntime, error) {
-	coreDNSConfig := defaultRouteDNSConfig()
+	defaultDNSConfig := defaultRouteDNSConfig()
+	nodeDNSConfigs := make(map[string]*dns.Config)
 	definitions := make(map[string]*routeOutboundDefinition)
 	definitionOrder := make([]string, 0)
 	routeCandidates := make([]routeRuleCandidate, 0)
@@ -79,6 +81,7 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 			}
 			continue
 		}
+		coreDNSConfig := defaultRouteDNSConfig()
 		for index, route := range info.Common.Routes {
 			switch route.Action {
 			case "dns":
@@ -124,6 +127,14 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 				}
 			}
 		}
+		nodeDNS, err := coreDNSConfig.Build()
+		if err != nil {
+			return nil, fmt.Errorf("compile route: invalid DNS config for node_id=%d", info.Id)
+		}
+		if _, exists := nodeDNSConfigs[info.Tag]; exists {
+			return nil, errors.New("compile route: duplicate DNS inbound tag")
+		}
+		nodeDNSConfigs[info.Tag] = nodeDNS
 	}
 
 	var logicalToPhysical map[string]string
@@ -170,7 +181,7 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 		customOutbounds = append(customOutbounds, outbound)
 	}
 
-	dnsConfig, err := coreDNSConfig.Build()
+	dnsConfig, err := defaultDNSConfig.Build()
 	if err != nil {
 		return nil, errors.New("compile route: invalid DNS config")
 	}
@@ -186,12 +197,13 @@ func compileRouteRuntime(infos []*panel.NodeInfo, strict bool) (*CompiledRouteRu
 	if err != nil {
 		return nil, err
 	}
-	configHash, err := compiledRouteRuntimeHash(dnsConfig, routerConfig, customOutbounds)
+	configHash, err := compiledRouteRuntimeHash(dnsConfig, routerConfig, customOutbounds, nodeDNSConfigs)
 	if err != nil {
 		return nil, err
 	}
 	return &CompiledRouteRuntime{
 		DNSConfig:         dnsConfig,
+		NodeDNSConfigs:    nodeDNSConfigs,
 		RouterConfig:      routerConfig,
 		CustomOutbounds:   customOutbounds,
 		LogicalToPhysical: logicalToPhysical,
@@ -628,7 +640,7 @@ func handleRouteCompileFailure(strict bool, info *panel.NodeInfo, index int, rou
 	return nil
 }
 
-func compiledRouteRuntimeHash(dnsConfig *dns.Config, routerConfig *router.Config, outbounds []*xraycore.OutboundHandlerConfig) (string, error) {
+func compiledRouteRuntimeHash(dnsConfig *dns.Config, routerConfig *router.Config, outbounds []*xraycore.OutboundHandlerConfig, nodeConfigs ...map[string]*dns.Config) (string, error) {
 	hasher := sha256.New()
 	if err := writeDeterministicProto(hasher, dnsConfig); err != nil {
 		return "", err
@@ -641,6 +653,22 @@ func compiledRouteRuntimeHash(dnsConfig *dns.Config, routerConfig *router.Config
 	for _, outbound := range sorted {
 		if err := writeDeterministicProto(hasher, outbound); err != nil {
 			return "", err
+		}
+	}
+	for _, configs := range nodeConfigs {
+		tags := make([]string, 0, len(configs))
+		for tag := range configs {
+			tags = append(tags, tag)
+		}
+		sort.Strings(tags)
+		for _, tag := range tags {
+			var length [8]byte
+			binary.BigEndian.PutUint64(length[:], uint64(len(tag)))
+			_, _ = hasher.Write(length[:])
+			_, _ = hasher.Write([]byte(tag))
+			if err := writeDeterministicProto(hasher, configs[tag]); err != nil {
+				return "", err
+			}
 		}
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil

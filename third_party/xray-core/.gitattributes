@@ -1,0 +1,10 @@
+# Preserve inherited whitespace in these byte-identical upstream files.
+# All seven SNTP-patched files retain the normal whitespace checks.
+app/router/command/command.proto whitespace=-blank-at-eol,-blank-at-eof
+main/commands/all/api/source_ip_block.go whitespace=-blank-at-eol,-blank-at-eof
+main/commands/all/tls/cert.go whitespace=-blank-at-eol,-blank-at-eof
+proxy/tuic/config.proto whitespace=-blank-at-eol,-blank-at-eof
+transport/internet/config.proto whitespace=-blank-at-eol,-blank-at-eof
+transport/internet/finalmask/mkcp/original/xor_amd64.s whitespace=-blank-at-eol,-blank-at-eof
+transport/internet/finalmask/udphop/config.proto whitespace=-blank-at-eol,-blank-at-eof
+transport/internet/finalmask/xicmp/config.proto whitespace=-blank-at-eol,-blank-at-eof

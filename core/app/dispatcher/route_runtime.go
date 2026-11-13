@@ -7,6 +7,8 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
 	featuredns "github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/routing"
@@ -55,6 +57,8 @@ type routeRuntimeContextKey struct{}
 type routeRuntimeContext struct {
 	manager    *RouteRuntimeManager
 	generation *routeRuntimeGeneration
+	// Retain the ingress resolver when nested routing changes the inbound tag.
+	dns featuredns.Client
 }
 
 func NewRouteRuntimeManager(initial RouteRuntimeGeneration) *RouteRuntimeManager {
@@ -292,9 +296,34 @@ func (l *RouteRuntimeLease) Context(ctx context.Context) context.Context {
 	if l == nil || l.manager == nil || l.generation == nil {
 		return ctx
 	}
+
+	backend := l.DNS()
+	var ownerDNS featuredns.Client
+	if inherited, ok := ctx.Value(routeRuntimeContextKey{}).(*routeRuntimeContext); ok && inherited.manager == l.manager && inherited.generation == l.generation {
+		ownerDNS = inherited.dns
+	}
+	if ownerDNS != nil {
+		backend = ownerDNS
+	} else if scoped, ok := backend.(interface {
+		ForInbound(string) featuredns.Client
+	}); ok {
+		tag := ""
+		if inbound := session.InboundFromContext(ctx); inbound != nil {
+			tag = inbound.Tag
+		}
+		backend = scoped.ForInbound(tag)
+		if tag != "" {
+			ownerDNS = backend
+		}
+	}
+
+	if backend != nil {
+		ctx = featuredns.ContextWithClient(ctx, &leasedRouteDNS{manager: l.manager, generation: l.generation, backend: backend})
+	}
 	return context.WithValue(ctx, routeRuntimeContextKey{}, &routeRuntimeContext{
 		manager:    l.manager,
 		generation: l.generation,
+		dns:        ownerDNS,
 	})
 }
 
@@ -305,4 +334,25 @@ func (l *RouteRuntimeLease) Release() {
 	l.once.Do(func() {
 		l.manager.release(l.generation)
 	})
+}
+
+// A DNS outbound can query asynchronously after its stream closes. Pin the
+// generation for the complete lookup, including while a reload retires it.
+type leasedRouteDNS struct {
+	manager    *RouteRuntimeManager
+	generation *routeRuntimeGeneration
+	backend    featuredns.Client
+}
+
+func (*leasedRouteDNS) Type() interface{} { return featuredns.ClientType() }
+func (*leasedRouteDNS) Start() error      { return nil }
+func (*leasedRouteDNS) Close() error      { return nil }
+func (c *leasedRouteDNS) LookupIP(domain string, option featuredns.IPOption) ([]xnet.IP, uint32, error) {
+	ctx := context.WithValue(context.Background(), routeRuntimeContextKey{}, &routeRuntimeContext{manager: c.manager, generation: c.generation})
+	lease, err := c.manager.Acquire(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer lease.Release()
+	return c.backend.LookupIP(domain, option)
 }

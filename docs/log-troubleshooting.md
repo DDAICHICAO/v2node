@@ -573,3 +573,16 @@ journalctl -u v2node.service --since "2 hours ago" --no-pager \
 - 本端发现 DNS 合并未复制 Script，且显式 false/0 被忽略；严格解析还拒绝只包含关闭开关的有效配置。现在保留 JSON 字段存在性，未提供的全局字段继承，显式值按接收到的路由顺序覆盖；服务器列表继续按原逻辑追加。该行为需更新节点二进制才会生效。
 - 单服务器继续继承路由匹配；多服务器继续使用各自 domains。当前核心不允许 DNS script 与 domains/skipFallback/finalQuery、disableFallback/disableFallbackIfMatch/enableParallelQuery 同用；后台也拦截这些冲突，跨规则全局冲突仍以节点严格编译为准。
 - 在既有 core/custom_test.go 中复现并验证旧/严格路径的显式关闭、TTL 清零、字段继承及脚本编译；既有 core/route_compile_test.go 增补定义在前/后、轮询组、内置标签与缺失定义。核心、DNS 运行时、dispatcher 及节点启动/重载定向测试通过。后台另完成 37 项临时 React/AntD 回填/保存检查；本轮未发布、部署、生产写入或实机解锁验收。
+
+
+## 2026-11-14：同进程按节点隔离 DNS（源码修复）
+
+- 旧问题：此前 JP/US 虽分别绑定节点，但 DNS config 与缓存按整个进程合并；出站解析接口又不携带入站身份，仅拆面板编号/端口无法提供独立地区线路。旧二进制曾实测两个 SS 入口都识别为日本。
+- 新链路：面板 `Common.routes` → `core/route_compile.go::NodeDNSConfigs` 按节点标签独立编译 → `core/route_dns.go` 为每节点创建独立 DNS backend/缓存/全局选项 → `RouteRuntimeLease.Context` 绑定当前入站及运行代 → 带 context 的实际解析接口。正式入站与其 `-stream-unlock-probe` 别名使用同一节点 backend；嵌套转发即使重写入站标签也保留原始入口所属 DNS；未下发 DNS 的其他节点使用自身默认配置。
+- 覆盖路径：DNS outbound 的 A/AAAA 截获、默认与自定义 Freedom 出站、outbound targetStrategy、sockopt DomainStrategy、UDP 多目标包和路由 IP 解析均传递连接 context。原 IPv4/IPv6、Force、fallback、私网安全规则语义保留；同一自定义出站对象被多个节点引用时，不把节点 DNS 保存到共享出站字段。
+- 热更新：整代原子发布，配置哈希包含节点标签与其 DNS 配置。新连接选新代，旧连接继续其原代；每次 DNS 查询另持租约，连接先关闭也不会提前释放正在查询的 backend。候选创建/脚本失败则关闭候选资源并继续旧代，DNS upstream 的 IsOwnLink 仍检查所有在用运行代，避免 UDP/53 自递归。
+- 构建：`go.mod` 的 Xray replace 指向仓库 `third_party/xray-core`。基于此前固定的 `dcfae7c4776b` 源码，只修改 7 个上下文相关文件；来源、许可证和迁移清单见 `third_party/xray-core/SNTP_PATCHES.md`。正常构建/现有发布工作流直接带上修复，不能重新改回未打补丁的远端 replace。
+- 验证：修复前真实 DNS outbound 与普通 TCP 同域名双节点回归均复现第二节点误用第一节点结果；修复后通过 DNS 截获/探测别名、TCP、UDP 多目标新域名、真实 AES-128-GCM 双 SS 入站、共享自定义出站 targetStrategy/sockopt、热更新既有流持续传输、并发查询、失败候选回滚、路由解析、单节点兼容及旧查询租约测试。测试 DNS/目标均为本机临时监听；加密 SS 用例仅为测试目标显式允许 loopback，不放宽生产私网规则。
+- 检查命令：`go test ./... -count=1 -timeout=120s`（另按发布工作流启用 `GOEXPERIMENT=jsonv2` 跑全量）、`git diff --check`，并逐文件对比固定依赖，确认其余 903 个引入文件未改。当前 Windows 环境 CGO 关闭且无 gcc，未执行 race detector；并发与租约行为已用受控回归覆盖。
+- 发布：需要发布新二进制并重启 v2node，配置热加载不能替换旧进程代码；后续 DNS 规则更新仍走运行代热更新，不要求每次重启。既有面板两节点分别绑定 JP/US 的方式可保留，无需为了 DNS 隔离拆成两个服务实例。
+- 范围/上线验收：本轮仅本地源码和自动化测试，不部署、不改生产规则/系统 DNS、不重启线上服务。上线后仍需经两条真实入口复测 Netflix/ABEMA 等地区；自动化隔离通过不等于已验证线上会员播放、DRM 或登录后的 AI 调用。系统 DNS 与各节点内部 DNS 继续独立。

@@ -751,3 +751,13 @@ ClickHouse 写入逻辑优化后的追踪再次证明，单次测速恢复不能
 - 源码修复：`core/node.go:AddNodeWithUsers` 先在离线 handler 加载完整凭据，再发布监听；`node/controller.go` 使用一次激活。失败清理 handler、UID 映射与连接登记；拒绝同 tag 覆盖；旧单出口 JSON、旧 AddNode 及后续增量同步保持兼容。
 - 回归：既有 `core/inbound_reload_test.go` 验证 2048 用户在 AddHandler 前全部可查、重复启动不伤旧用户、端口冲突不残留 handler/UID。先运行新测试观察缺少原子激活能力的失败，再修复；`go test ./core ./node -count=1 -timeout=90s` 和 core/dispatcher/node 的路由与热更新专项通过。未新增测试文件。
 - 下一处/边界：详见 `docs/log-troubleshooting.md` 同日“SS 在带流量重启时卡在用户加载”；入口 `core/node.go`、`core/inbound_reload.go`、`core/user.go`、`node/controller.go`，诊断配置 `conf.Conf.PprofPort`。源码修复随本条记录提交，尚未构建、部署或发布；已恢复线上服务不等于永久修复已发布。未改生产规则、数据库、审计记录或其他机器，保留既有未提交改动。
+
+
+## 2026-11-14：DNS 配置、缓存和解析上下文必须同时按节点隔离
+
+- 症状/根因：同进程双节点分别下发不同地区 DNS，同域名仍命中第一节点。链路为 NodeInfo 聚合 → compileRouteRuntime 的共享 config → contextless 出站/DNS 查询。只拆配置对象无法修复实际出站，不能把正式/探测入站分开或把节点状态写进共享出站。
+- 修复：NodeDNSConfigs 独立编译并进入配置哈希；每代按节点建立 DNS backend/缓存，探测别名指向其所属节点，二次转发重写标签不改变原始入口的 DNS 归属；RouteRuntimeLease.Context 绑定带租约的解析器。固定核心源码随仓库维护 7 个 context 补丁，覆盖 DNS 截获、路由、targetStrategy、Freedom 和 UDP endpoint 解析，保留原解析与安全策略。
+- 生命周期：新连接用新代，老连接保留旧代；异步 DNS 查询单独持租约，候选创建失败不替换旧代。IsOwnLink 仍聚合所有在用 backend，防止 DNS upstream 再被截获。缺少自定义 DNS 的节点不继承其他节点规则。
+- 验证：先在旧实现观察 DNS/TCP 双节点同域名失败，再验证真实 AES-128-GCM SS 双入口、共享自定义出站、UDP 新域名、并发热更新、探测别名、旧查询持代、失败候选回滚及全量 Go 回归。测试用 loopback 目标受到核心默认私网规则阻挡时，仅在测试出站显式允许该范围，不能修改生产策略。Windows 无 CGO/gcc，未跑 race detector。
+- 交付边界：本地提交由用户发布；需更新二进制并重启进程，之后路由规则仍可热更新。没有上线部署或宣称线上 JP/US 已验收；流媒体地区/播放与 AI 实际对话须经新版本真实入口复测。
+- 下次入口：`docs/log-troubleshooting.md` 2026-11-14 章节、`third_party/xray-core/SNTP_PATCHES.md`、`core/route_dns.go`、`core/route_compile.go`、`core/app/dispatcher/route_runtime.go`、已有 `route_runtime_dns_test.go`/`runtime_dns_test.go`。升级核心时必须迁移 7 个补丁，不能直接恢复远端 replace。

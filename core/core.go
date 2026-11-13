@@ -108,7 +108,7 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 		cleanupServer()
 		return errors.New("Xray router is unavailable")
 	}
-	initialDNS, err := createRouteDNSBackend(server, build.compiled.DNSConfig)
+	initialDNS, err := createRouteNodeDNS(server, build.compiled)
 	if err != nil {
 		cleanupServer()
 		return err
