@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -598,5 +599,111 @@ func TestPanelDoesNotForwardCredentialsOnRedirect(t *testing.T) {
 	_, err = client.client.R().Get("/api/v2/server/config")
 	if err == nil || followed {
 		t.Fatal("redirect forwarded a credential-bearing request")
+	}
+}
+
+func TestNodeAPICredentialExchangeVerifiesScopedCredentialOverTLS(t *testing.T) {
+	key := "sntp-node-v1.v2node.7." + strings.Repeat("a", 64)
+	var authorizations []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v2/server/credential" || r.URL.Query().Get("node_id") != "7" || r.URL.Query().Has("token") {
+			t.Error("unexpected credential exchange request")
+		}
+		authorizations = append(authorizations, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"data":{"node_type":"v2node","node_id":7,"api_key":%q}}`, key)
+	}))
+	defer server.Close()
+	c := &Client{client: resty.NewWithClient(server.Client()), APIHost: server.URL, NodeId: 7, Token: "legacy-test-key"}
+	got, err := c.ExchangeNodeAPICredential(context.Background())
+	if err != nil || got != key {
+		t.Fatalf("credential exchange failed: %v", err)
+	}
+	if len(authorizations) != 2 || authorizations[0] != "Bearer legacy-test-key" || authorizations[1] != "Bearer "+key || c.Token != "legacy-test-key" {
+		t.Fatal("credential was not verified independently before changing runtime state")
+	}
+}
+
+func TestNodeAPICredentialExchangeRejectsUnsafeOrUnverifiedResponses(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		status       int
+		body         string
+		verifyStatus int
+	}{
+		{"wrong_node", 200, `{"data":{"node_type":"v2node","node_id":8,"api_key":"sntp-node-v1.v2node.8.` + strings.Repeat("a", 64) + `"}}`, 200},
+		{"wrong_protocol", 200, `{"data":{"node_type":"trojan","node_id":7,"api_key":"sntp-node-v1.trojan.7.` + strings.Repeat("a", 64) + `"}}`, 200},
+		{"malformed_key", 200, `{"data":{"node_type":"v2node","node_id":7,"api_key":"legacy-test-key"}}`, 200},
+		{"not_found", 404, `{}`, 200},
+		{"html", 200, `<html>not the panel</html>`, 200},
+		{"too_large", 200, strings.Repeat("x", 9000), 200},
+		{"verification_rejected", 200, `{"data":{"node_type":"v2node","node_id":7,"api_key":"sntp-node-v1.v2node.7.` + strings.Repeat("a", 64) + `"}}`, 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				status := test.status
+				if calls > 1 {
+					status = test.verifyStatus
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			c := &Client{client: resty.NewWithClient(server.Client()), APIHost: server.URL, NodeId: 7, Token: "legacy-test-key"}
+			if _, err := c.ExchangeNodeAPICredential(context.Background()); err == nil {
+				t.Fatal("unsafe or unverified credential accepted")
+			} else if strings.Contains(err.Error(), "legacy-test-key") || strings.Contains(err.Error(), server.URL) {
+				t.Fatal("exchange error leaked secret or panel address")
+			}
+		})
+	}
+}
+
+func TestNodeAPICredentialExchangeRequiresVerifiedTLSAndRejectsRedirects(t *testing.T) {
+	calls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer target.Close()
+	c := &Client{client: resty.New(), APIHost: target.URL, NodeId: 7, Token: "legacy-test-key"}
+	if _, err := c.ExchangeNodeAPICredential(context.Background()); err == nil || calls != 0 {
+		t.Fatal("credential exchange attempted plaintext HTTP")
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	c.APIHost = server.URL
+	if _, err := c.ExchangeNodeAPICredential(context.Background()); err == nil {
+		t.Fatal("untrusted server certificate accepted")
+	}
+	c.client = resty.NewWithClient(server.Client())
+	if _, err := c.ExchangeNodeAPICredential(context.Background()); err == nil || calls != 0 {
+		t.Fatal("credential exchange followed a redirect")
+	}
+}
+
+func TestNodeAPICredentialScopeValidation(t *testing.T) {
+	for _, id := range []int{7, 71} {
+		key := "sntp-node-v1.v2node." + strconv.Itoa(id) + "." + strings.Repeat("a", 64)
+		if !IsNodeAPICredentialFor(key, id) || IsNodeAPICredentialFor(key, id+1) || IsNodeAPICredentialFor(key+"x", id) {
+			t.Fatal("invalid node credential scope validation")
+		}
+	}
+}
+
+func TestNodeAPICredentialExchangePreservesAPIHostPath(t *testing.T) {
+	key := "sntp-node-v1.v2node.7." + strings.Repeat("a", 64)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/panel/api/v2/server/credential" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"data":{"node_type":"v2node","node_id":7,"api_key":%q}}`, key)
+	}))
+	defer server.Close()
+	c := &Client{client: resty.NewWithClient(server.Client()), APIHost: server.URL + "/panel/", NodeId: 7, Token: "legacy-test-key"}
+	if _, err := c.ExchangeNodeAPICredential(context.Background()); err != nil {
+		t.Fatal("APIHost path prefix was lost")
 	}
 }

@@ -289,6 +289,15 @@ func (m *CleanupManager) cycle(ctx context.Context, known map[string]controlScop
 			"capability": "orphan_cleanup_v1", "current_version": selfversion.Current(), "accept_tasks": canAccept,
 			"config_hash": controlDigest(before), "node_ids": nodeIDs,
 		}, &result)
+		// A migrated configuration no longer references the legacy scope. Once
+		// it is rejected, stop replaying that retired key from the in-memory
+		// zero-entry inventory. Pending journals still retain their own retry.
+		var callErr *controlCallError
+		if len(nodeIDs) == 0 && errors.As(err, &callErr) && callErr.status == http.StatusForbidden {
+			delete(known, id)
+			delete(seen, id)
+			continue
+		}
 		if err != nil {
 			lastErr = err
 			continue

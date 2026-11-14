@@ -1,11 +1,19 @@
 # LESSONS LEARNED
 
+## 2026-11-14：批量升级须自动迁移节点密钥并保留失败条目
+
+- 症状/链路：节点权限隔离后的手动 ApiKey 迁移难以覆盖几百个节点；仅升级程序不会更改旧配置。链路为 cmd/server.go → node/api_credential_migration.go → api/v2board/node_credential.go → 主站受限领钥接口 → 原子写回与配置重载。
+- 修复：启动时按每个 Nodes[] 的既有身份，通过可验证证书的 HTTPS 领取本 NodeID 专用密钥，并用新密钥再次认证，成功后才备份/替换 ApiKey；业务/管理客户端随后读取新配置。运行期每 5 分钟重试，单轮 20 秒，续扫位置避免超时项长期挡住后续节点。已持有专用凭据不重新交换。
+- 失败/恢复：失败条目保持旧值，共用更新锁；待完成清理回执先结束，配置有并发编辑时不覆盖。原始 .node-api-credential.bak 权限受限且不被重试覆盖，.node-api-migration.json 仅含编号/结果码；运行期成功走既有配置重载，即使 --watch 关闭也通知主流程。无引用且 403 的旧控制身份退出内存重试，未完成清理回执独立保留。
+- 验证：API 整包、既有 node/api_host_config_task_test.go 补充迁移定向回归、cmd 包编译通过；覆盖 HTTPS/重定向/错误范围/二次验证、300 个节点独立密钥、部分失败、备份失败、取消、管理员并发修改、歧义 JSON、续扫及脱敏汇总。没有新增永久测试文件、构建发行包、推送或部署。
+- 下次入口/边界：主站 docs/node-api-security-runbook.md。必须先部署主站领钥接口并核对来源绑定和 HTTPS，再批量升级节点；关闭旧密钥兼容需全量实际同步验收。already_scoped 只是配置格式检查，原始备份仍含旧凭据；轮换 APP_KEY 或忽略 TLS 校验都不是迁移办法。
+
 ## 2026-11-14：节点 API 凭据须绑定 NodeID 并移出 URL
 
 - 症状/链路：Nodes[].ApiKey 经 api/v2board/panel.go 放入 token query，若使用全局密钥，节点失陷会扩大为面板跨节点风险。仅节点端签名不能弥补所有节点持有同一根密钥的问题。
 - 修复：HTTP 改 Authorization 请求头并移除 token query，保持 WebSocket 的头部传输；拒绝错误 NodeID 的专用凭据、含账号/query/fragment 的 APIHost 和自动重定向。安装函数拒绝将绑定 NodeID 的凭据复制给另一 NodeID；多节点配置必须逐项指定密钥。
 - 验证：既有 user_test.go 先复现 URL 泄露/缺少请求头，再验证修复及跨节点配置、重定向；go test ./api/v2board -count=1、安装脚本语法/四项临时函数检查与差异检查通过。未新增永久测试文件，未构建或部署。
-- 发布/边界：先部署相邻 v2board 的 NodeApiAuthentication，再从主站安装命令取得每个节点自己的 ApiKey；旧配置不会自动换密钥。主站完成所有配置迁移后关闭 SNTP_NODE_API_ALLOW_LEGACY。v2board 的 docs/node-api-security-runbook.md 为迁移入口；节点自身授权用户与密钥仍属于本机风险范围。
+- 发布/边界：初次修复需从主站安装命令取得每个节点自己的 ApiKey；后续已补自动迁移，见上方同日记录。主站完成所有配置迁移后关闭 SNTP_NODE_API_ALLOW_LEGACY。v2board 的 docs/node-api-security-runbook.md 为迁移入口；节点自身授权用户与密钥仍属于本机风险范围。
 
 ## 2026-11-06：路由 DNS 合并必须区分省略值与显式关闭
 

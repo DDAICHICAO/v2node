@@ -57,6 +57,15 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		return
 	}
 	applyLogConfig(c.LogConfig)
+	// Migrate before management/business clients capture their credentials.
+	// A failed migration keeps the original configuration and startup proceeds.
+	if node.MigrateNodeAPICredentials(context.Background(), config) {
+		c = conf.New()
+		if err := c.LoadFromPath(config); err != nil {
+			log.Error("重新读取迁移后的节点配置失败")
+			return
+		}
+	}
 	// Enable pprof if configured
 	if c.PprofPort != 0 {
 		go func() {
@@ -80,6 +89,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	go manager.Run(ctx)
 	reloadCh := make(chan struct{}, 1)
 	fileChangeCh := make(chan struct{}, 1)
+	go node.RunNodeAPICredentialMigration(ctx, config, reloadCh)
 	var nodes *node.Node
 	var v2core *core.V2Core
 	var recovery reloadRetryState
