@@ -1,5 +1,12 @@
 # LESSONS LEARNED
 
+## 2026-11-14：节点 API 凭据须绑定 NodeID 并移出 URL
+
+- 症状/链路：Nodes[].ApiKey 经 api/v2board/panel.go 放入 token query，若使用全局密钥，节点失陷会扩大为面板跨节点风险。仅节点端签名不能弥补所有节点持有同一根密钥的问题。
+- 修复：HTTP 改 Authorization 请求头并移除 token query，保持 WebSocket 的头部传输；拒绝错误 NodeID 的专用凭据、含账号/query/fragment 的 APIHost 和自动重定向。安装函数拒绝将绑定 NodeID 的凭据复制给另一 NodeID；多节点配置必须逐项指定密钥。
+- 验证：既有 user_test.go 先复现 URL 泄露/缺少请求头，再验证修复及跨节点配置、重定向；go test ./api/v2board -count=1、安装脚本语法/四项临时函数检查与差异检查通过。未新增永久测试文件，未构建或部署。
+- 发布/边界：先部署相邻 v2board 的 NodeApiAuthentication，再从主站安装命令取得每个节点自己的 ApiKey；旧配置不会自动换密钥。主站完成所有配置迁移后关闭 SNTP_NODE_API_ALLOW_LEGACY。v2board 的 docs/node-api-security-runbook.md 为迁移入口；节点自身授权用户与密钥仍属于本机风险范围。
+
 ## 2026-11-06：路由 DNS 合并必须区分省略值与显式关闭
 
 - 症状/链路：复核后台路由回显时发现 DNS 表单提供 script 和关闭开关，但 core/custom.go 合并遗漏 Script，布尔值只合并 true、TTL 只合并非零；显式 false/0 单独配置在严格编译时甚至被当作无效配置。

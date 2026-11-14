@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,7 +71,18 @@ type Client struct {
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
+	endpoint, err := url.Parse(c.APIHost)
+	if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
+		(endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+		return nil, errors.New("invalid panel API address")
+	}
+	if strings.HasPrefix(c.Key, "sntp-node-v1.") &&
+		!strings.HasPrefix(c.Key, "sntp-node-v1.v2node."+strconv.Itoa(c.NodeID)+".") {
+		return nil, errors.New("panel API credential belongs to another node")
+	}
 	client := resty.New()
+	client.SetRedirectPolicy(resty.NoRedirectPolicy())
+	client.SetHeader("Authorization", "Bearer "+c.Key)
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
 		retryCount = *c.RetryCount
@@ -92,6 +104,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	})
 	client.SetBaseURL(c.APIHost)
 	managedTLSClient := resty.New()
+	managedTLSClient.SetRedirectPolicy(resty.NoRedirectPolicy())
 	managedTLSClient.SetRetryCount(retryCount)
 	managedTLSClient.SetHeader("User-Agent", fmt.Sprintf("v2node go-resty/%s (https://github.com/go-resty/resty)", resty.Version))
 	if c.Timeout > 0 {
@@ -104,7 +117,6 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	queryParams := map[string]string{
 		"node_type": "v2node",
 		"node_id":   strconv.Itoa(c.NodeID),
-		"token":     c.Key,
 	}
 	if currentVersion := selfversion.Current(); currentVersion != "" {
 		queryParams["current_version"] = currentVersion
@@ -118,6 +130,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	}
 	client.SetQueryParams(queryParams)
 	client.OnBeforeRequest(func(_ *resty.Client, req *resty.Request) error {
+		req.QueryParam.Del("token")
 		if configuredMachineIP != "" || req.QueryParam.Get("machine_ip") != "" {
 			return nil
 		}

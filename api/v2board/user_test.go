@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/wyx2685/v2node/conf"
 )
 
 func TestMain(m *testing.M) {
@@ -540,5 +541,62 @@ func TestGetNodeInfoReturnsRepeatedHTTPError(t *testing.T) {
 		if _, err := c.GetNodeInfo(context.Background()); err == nil {
 			t.Fatalf("attempt %d hid panel error", attempt)
 		}
+	}
+}
+
+func TestPanelCredentialNeverAppearsInURL(t *testing.T) {
+	var gotURL, gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL, gotAuth = r.URL.String(), r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	zero := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 7, Key: "test-private-key", MachineIP: "8.8.8.8", RetryCount: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.client.R().Get("/api/v2/server/config"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotURL, "token=") || strings.Contains(gotURL, "test-private-key") || gotAuth != "Bearer test-private-key" {
+		t.Fatalf("unsafe node credential transport: queryHasSecret=%v, authorizationPresent=%v", strings.Contains(gotURL, "test-private-key"), gotAuth != "")
+	}
+}
+
+func TestPanelRejectsCredentialForDifferentNode(t *testing.T) {
+	_, err := New(&conf.NodeConfig{APIHost: "https://panel.example.com", NodeID: 8, Key: "sntp-node-v1.v2node.7." + strings.Repeat("a", 64)})
+	if err == nil {
+		t.Fatal("accepted a credential bound to another NodeID")
+	}
+}
+
+func TestPanelRejectsSecretInAPIHost(t *testing.T) {
+	for _, endpoint := range []string{"https://panel.example.com/?token=secret", "https://user:secret@panel.example.com/", "https://panel.example.com/#secret"} {
+		if _, err := New(&conf.NodeConfig{APIHost: endpoint, NodeID: 7, Key: "key"}); err == nil {
+			t.Fatal("accepted an APIHost containing credentials or metadata")
+		}
+	}
+}
+
+func TestPanelDoesNotForwardCredentialsOnRedirect(t *testing.T) {
+	var followed bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed = true
+	}))
+	defer target.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer server.Close()
+	zero := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 7, Key: "key", MachineIP: "8.8.8.8", RetryCount: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.client.R().Get("/api/v2/server/config")
+	if err == nil || followed {
+		t.Fatal("redirect forwarded a credential-bearing request")
 	}
 }

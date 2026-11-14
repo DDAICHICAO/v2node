@@ -105,6 +105,10 @@ generate_v2node_nodes_json() {
                 echo "node id must be a positive integer, or a comma-separated positive integer list: ${node_ids}" >&2
                 return 1
             fi
+            if [[ "$api_key" == sntp-node-v1.* && "$api_key" != "sntp-node-v1.v2node.${id}."* ]]; then
+                echo "the node-scoped ApiKey must match its NodeID; configure a separate key for each Nodes[] entry" >&2
+                return 1
+            fi
         done
 
         if [[ ${#ids[@]} -gt 1 && -n "$tls_certificate_token" ]]; then
