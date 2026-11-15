@@ -72,6 +72,122 @@ func TestApplyApiHostConfigTaskReplacesAllNodeApiHosts(t *testing.T) {
 	}
 }
 
+func legacyTransitionFixture(t *testing.T) (string, string, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	configPath, binaryPath, statePath := filepath.Join(dir, "config.json"), filepath.Join(dir, "v2node"), filepath.Join(dir, "update_state.json")
+	taskID := "v2node-transition:v5.0.4:0123456789abcdef0123456789abcdef"
+	for path, data := range map[string]string{
+		configPath: `{"Nodes":[{"NodeID":7,"ApiHost":"https://panel.example","ApiKey":"fixture-key"}]}`,
+		binaryPath: "new-program",
+		binaryPath + ".bak." + safeFilePart(taskID): "old-program",
+		statePath: `{"task_id":"` + taskID + `","version":"v5.0.4","status":"success"}`,
+	} {
+		if err := os.WriteFile(path, []byte(data), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return configPath, binaryPath, statePath, taskID
+}
+
+func TestLegacyTransitionRollsBackRejectedPreflight(t *testing.T) {
+	configPath, binaryPath, statePath, _ := legacyTransitionFixture(t)
+	before, _ := os.ReadFile(configPath)
+	transition, err := prepareLegacyTransition(context.Background(), configPath, binaryPath, statePath, "v5.0.4", func(context.Context, string) (NodeAPICredentialMigrationReport, error) {
+		return NodeAPICredentialMigrationReport{}, errors.New("credential_preflight_failed")
+	})
+	if err == nil || transition == nil {
+		t.Fatal("rejected identities must enter recovery")
+	}
+	if err := transition.Rollback("credential_preflight_failed"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(configPath)
+	program, _ := os.ReadFile(binaryPath)
+	if !bytes.Equal(before, after) || string(program) != "old-program" {
+		t.Fatal("recovery must preserve original config and restore original executable")
+	}
+	data, _ := os.ReadFile(statePath)
+	if !bytes.Contains(data, []byte(`"failed"`)) {
+		t.Fatal("old install success must become a failed transition")
+	}
+}
+
+func TestLegacyTransitionRestoresMigrationWhenRuntimeCannotStart(t *testing.T) {
+	configPath, binaryPath, statePath, _ := legacyTransitionFixture(t)
+	before, _ := os.ReadFile(configPath)
+	transition, err := prepareLegacyTransition(context.Background(), configPath, binaryPath, statePath, "v5.0.4", func(_ context.Context, path string) (NodeAPICredentialMigrationReport, error) {
+		return NodeAPICredentialMigrationReport{}, os.WriteFile(path, []byte(`{"Nodes":[{"NodeID":7,"ApiKey":"scoped-fixture"}]}`), 0600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transition.Rollback("transition_startup_failed"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(configPath)
+	if !bytes.Equal(before, after) {
+		t.Fatal("runtime failure must restore the pre-migration configuration")
+	}
+}
+
+func TestLegacyTransitionCommitDoesNotRepeatOnNextRestart(t *testing.T) {
+	configPath, binaryPath, statePath, _ := legacyTransitionFixture(t)
+	calls := 0
+	preflight := func(context.Context, string) (NodeAPICredentialMigrationReport, error) {
+		calls++
+		return NodeAPICredentialMigrationReport{}, nil
+	}
+	transition, err := prepareLegacyTransition(context.Background(), configPath, binaryPath, statePath, "v5.0.4", preflight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transition.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := prepareLegacyTransition(context.Background(), configPath, binaryPath, statePath, "v5.0.4", preflight)
+	if err != nil || second != nil || calls != 1 {
+		t.Fatalf("committed transition repeated: %v, calls %d", err, calls)
+	}
+}
+
+func TestLegacyTransitionPreservesConcurrentConfigEdits(t *testing.T) {
+	configPath, binaryPath, statePath, _ := legacyTransitionFixture(t)
+	transition, err := prepareLegacyTransition(context.Background(), configPath, binaryPath, statePath, "v5.0.4", func(context.Context, string) (NodeAPICredentialMigrationReport, error) {
+		return NodeAPICredentialMigrationReport{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := []byte(`{"Nodes":[],"operator_edit":true}`)
+	if err := os.WriteFile(configPath, edited, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := transition.Rollback("transition_startup_failed"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(configPath)
+	if !bytes.Equal(edited, after) {
+		t.Fatal("recovery overwrote an external configuration change")
+	}
+}
+
+func TestLegacyTransitionRecoversWhenOldUpdaterDidNotSaveState(t *testing.T) {
+	configPath, binaryPath, statePath, _ := legacyTransitionFixture(t)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	transition, err := prepareLegacyTransition(context.Background(), configPath, binaryPath, statePath, "v5.0.4", func(context.Context, string) (NodeAPICredentialMigrationReport, error) {
+		return NodeAPICredentialMigrationReport{}, errors.New("credential_preflight_failed")
+	})
+	if err == nil || transition == nil {
+		t.Fatal("recognized legacy backup must still protect startup when the old state write failed")
+	}
+	if err := transition.Rollback("credential_preflight_failed"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyApiHostConfigTaskCanMatchOldApiHost(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

@@ -8,14 +8,15 @@ import (
 )
 
 type UpdateTask struct {
-	Enabled     bool             `json:"enabled"`
-	TaskID      string           `json:"task_id"`
-	Type        string           `json:"type"`
-	Version     string           `json:"version"`
-	DownloadURL string           `json:"download_url"`
-	SHA256      string           `json:"sha256"`
-	AccessAudit *AccessAuditTask `json:"access_audit,omitempty"`
-	ApiHost     *ApiHostTask     `json:"api_host,omitempty"`
+	LegacyTransition bool             `json:"legacy_transition"`
+	Enabled          bool             `json:"enabled"`
+	TaskID           string           `json:"task_id"`
+	Type             string           `json:"type"`
+	Version          string           `json:"version"`
+	DownloadURL      string           `json:"download_url"`
+	SHA256           string           `json:"sha256"`
+	AccessAudit      *AccessAuditTask `json:"access_audit,omitempty"`
+	ApiHost          *ApiHostTask     `json:"api_host,omitempty"`
 }
 
 type AccessAuditTask struct {

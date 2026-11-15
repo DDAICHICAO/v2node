@@ -82,6 +82,11 @@ func (c *Controller) checkUpdateTask(ctx context.Context) {
 		go c.runApiHostConfigTask(*task)
 		return
 	}
+	// A legacy transition is replayed only so the new runtime can acknowledge
+	// its committed startup. Do not recursively install while startup is pending.
+	if task.LegacyTransition && localVersion() == task.Version {
+		return
+	}
 	if task.Version == "" {
 		return
 	}

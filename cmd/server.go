@@ -29,7 +29,7 @@ var (
 var serverCommand = cobra.Command{
 	Use:   "server",
 	Short: "Run v2node server",
-	Run:   serverHandle,
+	RunE:  serverHandle,
 	Args:  cobra.NoArgs,
 }
 
@@ -43,8 +43,29 @@ func init() {
 	command.AddCommand(&serverCommand)
 }
 
-func serverHandle(_ *cobra.Command, _ []string) {
+func serverHandle(_ *cobra.Command, _ []string) (runErr error) {
 	showVersion()
+	transition, transitionErr := node.PrepareLegacyUpgrade(context.Background(), config, version)
+	transitionCommitted := transition == nil
+	defer func() {
+		if transition == nil || transitionCommitted {
+			return
+		}
+		if err := transition.Rollback("transition_startup_failed"); err != nil {
+			log.WithError(err).Error("过渡升级回退失败，请检查本机备份")
+			runErr = err
+			return
+		}
+		transition.ReportRollback(context.Background())
+		if err := execLegacyRollback(transition.BinaryPath()); err != nil {
+			log.WithError(err).Error("原程序已恢复，启动原程序失败")
+			runErr = err
+		}
+	}()
+	if transitionErr != nil {
+		log.WithError(transitionErr).Error("过渡升级认证预检失败")
+		return transitionErr
+	}
 	if err := node.SetUpdateConfigPath(config); err != nil {
 		log.Error("节点升级配置路径无效")
 		return
@@ -142,6 +163,15 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		return nil
 	}
 	if err := startRuntime(); err != nil {
+		if transition != nil {
+			fields := log.Fields{"reason": "transition_runtime_failed"}
+			var failure *node.ConfigError
+			if errors.As(err, &failure) {
+				fields["node_id"], fields["stage"], fields["reason"] = failure.NodeID, failure.Stage, failure.Code
+			}
+			log.WithFields(fields).Error("过渡升级业务启动失败，准备恢复原程序")
+			return errors.New("transition_runtime_failed")
+		}
 		var fatal *reloadFatalError
 		if errors.As(err, &fatal) {
 			log.WithError(err).Error("启动失败且运行态无法清理，退出进程")
@@ -151,6 +181,15 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		reportStatus(err, lastAttemptDigest)
 		log.WithFields(log.Fields{"err": err, "retry_at": recovery.Next()}).Error("业务节点启动失败，管理通道继续运行，将退避重试")
 	} else {
+		if transition != nil {
+			if err := transition.Commit(); err != nil {
+				_ = nodes.Close()
+				_ = v2core.Close()
+				log.Error("过渡升级确认写入失败，准备恢复原程序")
+				return errors.New("transition_commit_failed")
+			}
+			transitionCommitted = true
+		}
 		reportStatus(nil, lastAttemptDigest)
 	}
 	defer func() {
