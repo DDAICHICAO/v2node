@@ -1,5 +1,13 @@
 # v2node 日志排查速查
 
+## 2026-11-15：v5.0.2 区分节点身份拒绝与普通迁移失败
+
+- `credential_identity_rejected` 表示换钥请求收到 HTTP 401/403；不会输出响应正文、节点密钥或面板地址，也不会降低认证要求。其他拒绝继续使用 `credential_request_rejected`，新密钥再次验证失败仍为 `credential_verification_failed`。
+- bootstrap 包装的 401/403 `ValidationError` 归因为 `authentication / node_authorization_rejected`，配置状态明确指向节点身份。主站须同步更新 `V2nodeConfigStatusService` 的固定错误码白名单与提示；旧版主站仍会按通用配置错误处理。
+- 本次两机故障的已确认原因是各四个旧密钥条目缺少对应 NodeID 的来源绑定，不能正常取配置或换钥；各两个已迁移条目配置请求为 200，但整组 bootstrap 失败，因此没有业务监听。不能以 systemd active 或个别接口 200 代替恢复验收。
+- 主站配套修复：后台仍按活跃窗口过滤展示，但不再把裁剪后的 `V2NODE_CAPABILITIES_INSTANCES_*` 写回，避免丢弃旧密钥迁移所需的已知来源。已丢失的绑定需要受信管理端核对归属，定向配置专用密钥；节点新版不能自行创建信任或领取其他 NodeID 密钥。
+- 发布验收：检查迁移报告与各 NodeID 实际密钥类别，复核配置和用户同步、全部业务监听、主站新鲜配置状态/运行上报以及实际代理连接。证书、DNS 凭据分发和整组原子配置切换机制保持原方式，无 SQL。
+
 ## 2026-11-06：接收面板托管的 CF 回源清单（本地实现，未发布）
 
 - 新能力 `cloudflare_origin_cidrs_v1`；`api/v2board` 在普通配置请求中声明，解码 `base_config.cloudflare_origin = {managed:true,cidrs:[...]}`。未下发、关闭托管或旧面板仍使用 `core/cloudflare_ips.go` 的默认/官方自动快照；不要用版本号代替能力判断。

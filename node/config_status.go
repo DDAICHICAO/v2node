@@ -15,6 +15,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/instance"
 	"github.com/wyx2685/v2node/conf"
 )
@@ -42,6 +43,10 @@ func newConfigError(cfg conf.NodeConfig, stage, code string, err error) error {
 	var certErr *certificateError
 	if errors.As(err, &certErr) {
 		stage, code = "certificate", certErr.code
+	}
+	var validationErr *panel.ValidationError
+	if errors.As(err, &validationErr) && (validationErr.StatusCode == http.StatusUnauthorized || validationErr.StatusCode == http.StatusForbidden) {
+		stage, code = "authentication", "node_authorization_rejected"
 	}
 	return &ConfigError{APIHost: cfg.APIHost, NodeID: cfg.NodeID, Stage: stage, Code: code, Err: err}
 }

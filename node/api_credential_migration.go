@@ -241,7 +241,7 @@ func credentialMigrationCode(err error) string {
 		switch err.Error() {
 		case "credential_update_busy", "credential_control_pending", "credential_config_not_writable",
 			"credential_config_invalid", "credential_config_ambiguous", "credential_config_changed",
-			"credential_https_required", "credential_transport_failed", "credential_request_rejected",
+			"credential_https_required", "credential_transport_failed", "credential_request_rejected", "credential_identity_rejected",
 			"credential_response_invalid", "credential_verification_failed", "credential_backup_failed", "credential_write_failed":
 			return err.Error()
 		}

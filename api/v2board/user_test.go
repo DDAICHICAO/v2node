@@ -707,3 +707,20 @@ func TestNodeAPICredentialExchangePreservesAPIHostPath(t *testing.T) {
 		t.Fatal("APIHost path prefix was lost")
 	}
 }
+
+func TestNodeAPICredentialExchangeIdentifiesAuthorizationRejection(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"message":"private-response-token"}`))
+			}))
+			defer server.Close()
+			client := &Client{client: resty.NewWithClient(server.Client()), APIHost: server.URL, NodeId: 7, Token: "private-legacy-key"}
+			key, err := client.ExchangeNodeAPICredential(context.Background())
+			if key != "" || err == nil || err.Error() != "credential_identity_rejected" {
+				t.Fatalf("expected bounded identity rejection, got key_present=%v err=%v", key != "", err)
+			}
+		})
+	}
+}

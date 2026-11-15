@@ -1,5 +1,13 @@
 # LESSONS LEARNED
 
+## 2026-11-15：节点认证失败应明确归因，旧来源缺口须受信恢复
+
+- 症状/链路：旧配置升级后服务 active，但整组没有监听；ApiKey → 配置/换钥 → bootstrap → 整组准备。现场八个旧密钥条目均为 403，另外四个专用密钥条目配置为 200。
+- 根因/恢复边界：主站旧身份按每个 NodeID 核对已知来源，缺失绑定会同时阻断普通请求和换钥。后台状态裁剪写回共享来源缓存存在迁移风险，主站配套保留来源历史；已缺失条目由管理员核实 SSH 主机归属后定向补专用密钥，节点不自行注册来源。
+- 修改：v5.0.2 将换钥 401/403 归为固定 `credential_identity_rejected`，配置状态为 `authentication / node_authorization_rejected`，主站同步识别。仍拒绝错误身份，不泄露响应/密钥，不改变整组原子切换、证书续期或 DNS 凭据方式。
+- 验证：先用既有测试文件复现错误归因，再验证 `go test ./api/v2board ./node ./cmd -count=1 -timeout 120s`；全部通过。主站隔离回归检查十项断言，覆盖状态清理后的授权保留、跨节点/未知来源拒绝和错误码归一化。实际发布、两机更新及真实代理验收须另据现场结果记录，不能用接口 200 代替。
+- 下次入口：`api/v2board/node_credential.go`、`node/api_credential_migration.go::credentialMigrationCode`、`node/config_status.go::newConfigError`、`docs/log-troubleshooting.md` 同日条目；主站 `docs/uniproxy-node-troubleshooting-runbook.md`。
+
 ## 2026-11-14：批量升级须自动迁移节点密钥并保留失败条目
 
 - 症状/链路：节点权限隔离后的手动 ApiKey 迁移难以覆盖几百个节点；仅升级程序不会更改旧配置。链路为 cmd/server.go → node/api_credential_migration.go → api/v2board/node_credential.go → 主站受限领钥接口 → 原子写回与配置重载。

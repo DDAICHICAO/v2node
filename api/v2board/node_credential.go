@@ -76,6 +76,9 @@ func (c *Client) fetchNodeAPICredential(ctx context.Context, token string) (stri
 		return "", errors.New("credential_transport_failed")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", errors.New("credential_identity_rejected")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", errors.New("credential_request_rejected")
 	}
