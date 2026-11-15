@@ -538,6 +538,9 @@ preflight_v2node_update() {
     if [[ ! -e "$config_path" ]]; then
         return 0
     fi
+    if [[ -n "$API_HOST_ARG" || -n "$NODE_ID_ARG" || -n "$API_KEY_ARG" ]]; then
+        echo -e "${yellow}检测到已有配置：预检和升级使用原配置，安装参数不会覆盖已有 ApiHost、NodeID 或 ApiKey；身份被拒绝的条目需核实后单独修正。${plain}"
+    fi
     if ! chmod +x "$candidate"; then
         return 1
     fi
