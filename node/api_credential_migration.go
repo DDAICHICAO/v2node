@@ -87,6 +87,14 @@ func RunNodeAPICredentialMigration(ctx context.Context, path string, reloadCh ch
 }
 
 func migrateNodeAPICredentials(ctx context.Context, path string, exchange func(context.Context, conf.NodeConfig) (string, error)) (NodeAPICredentialMigrationReport, error) {
+	return withNodeCredentialLock(ctx, path, exchange, false)
+}
+
+func migrateNodeAPICredentialsForUpgrade(ctx context.Context, path string, exchange func(context.Context, conf.NodeConfig) (string, error)) (NodeAPICredentialMigrationReport, error) {
+	return withNodeCredentialLock(ctx, path, exchange, true)
+}
+
+func withNodeCredentialLock(ctx context.Context, path string, exchange func(context.Context, conf.NodeConfig) (string, error), strict bool) (NodeAPICredentialMigrationReport, error) {
 	report := NodeAPICredentialMigrationReport{Results: []NodeAPICredentialMigrationResult{}}
 	if !updateRunMu.TryLock() {
 		return report, errors.New("credential_update_busy")
@@ -97,6 +105,13 @@ func migrateNodeAPICredentials(ctx context.Context, path string, exchange func(c
 		return report, errors.New("credential_update_busy")
 	}
 	defer release()
+	return migrateNodeCredentialsLocked(ctx, path, exchange, strict)
+}
+
+// The caller owns both update locks. Runtime migration remains best effort;
+// upgrades require every entry to authenticate before any config is saved.
+func migrateNodeCredentialsLocked(ctx context.Context, path string, exchange func(context.Context, conf.NodeConfig) (string, error), strict bool) (NodeAPICredentialMigrationReport, error) {
+	report := NodeAPICredentialMigrationReport{Results: []NodeAPICredentialMigrationResult{}}
 	// Finish any prepared cleanup and its receipt before changing control IDs.
 	if _, err := os.Lstat(path + ".orphan-control.json"); !os.IsNotExist(err) {
 		return report, errors.New("credential_control_pending")
@@ -135,6 +150,9 @@ func migrateNodeAPICredentials(ctx context.Context, path string, exchange func(c
 	if cfg.LoadFromPath(path) != nil || len(cfg.NodeConfigs) != len(entries) {
 		return report, errors.New("credential_config_invalid")
 	}
+	if strict && len(entries) == 0 {
+		return report, errors.New("credential_config_invalid")
+	}
 	latest, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, latest) {
 		return report, errors.New("credential_config_changed")
@@ -153,9 +171,9 @@ func migrateNodeAPICredentials(ctx context.Context, path string, exchange func(c
 		entry := cfg.NodeConfigs[i]
 		result := NodeAPICredentialMigrationResult{NodeID: entry.NodeID, Status: "pending"}
 		switch {
-		case panel.IsNodeAPICredentialFor(entry.Key, entry.NodeID):
+		case !strict && panel.IsNodeAPICredentialFor(entry.Key, entry.NodeID):
 			result.Status = "already_scoped"
-		case strings.HasPrefix(entry.Key, "sntp-node-"):
+		case strings.HasPrefix(entry.Key, "sntp-node-") && !panel.IsNodeAPICredentialFor(entry.Key, entry.NodeID):
 			result.Code = "credential_scope_invalid"
 		default:
 			endpoint, parseErr := url.Parse(entry.APIHost)
@@ -170,13 +188,28 @@ func migrateNodeAPICredentials(ctx context.Context, path string, exchange func(c
 				result.Code = credentialMigrationCode(exchangeErr)
 			} else if !panel.IsNodeAPICredentialFor(key, entry.NodeID) {
 				result.Code = "credential_scope_invalid"
+			} else if panel.IsNodeAPICredentialFor(entry.Key, entry.NodeID) && key != entry.Key {
+				result.Code = "credential_verification_failed"
 			} else {
-				entries[i]["ApiKey"], _ = json.Marshal(key)
 				result.Status = "verified"
-				changed = true
+				if key != entry.Key {
+					entries[i]["ApiKey"], _ = json.Marshal(key)
+					changed = true
+				}
 			}
 		}
 		report.Results = append(report.Results, result)
+	}
+	if strict {
+		for _, result := range report.Results {
+			if result.Status == "pending" {
+				return report, errors.New("credential_preflight_failed")
+			}
+		}
+		latest, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(before, latest) {
+			return report, errors.New("credential_config_changed")
+		}
 	}
 	if !changed {
 		return report, nil
@@ -202,6 +235,27 @@ func migrateNodeAPICredentials(ctx context.Context, path string, exchange func(c
 		}
 	}
 	return report, nil
+}
+
+func exchangeNodeCredential(ctx context.Context, cfg conf.NodeConfig) (string, error) {
+	client, err := panel.New(&cfg)
+	if err != nil {
+		return "", errors.New("credential_config_invalid")
+	}
+	return client.ExchangeNodeAPICredential(ctx)
+}
+
+// PreflightNodeAPIUpgrade validates every configured identity over HTTPS and
+// commits migration only after the whole batch succeeds. It never starts runtime.
+func PreflightNodeAPIUpgrade(ctx context.Context, path string) (NodeAPICredentialMigrationReport, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	report, err := migrateNodeAPICredentialsForUpgrade(ctx, path, exchangeNodeCredential)
+	report.CheckedAt = time.Now().Unix()
+	if err != nil {
+		report.Error = credentialMigrationCode(err)
+	}
+	return report, err
 }
 
 func writeNodeCredentialConfig(path string, before, after []byte) error {
@@ -240,6 +294,7 @@ func credentialMigrationCode(err error) string {
 	if err != nil {
 		switch err.Error() {
 		case "credential_update_busy", "credential_control_pending", "credential_config_not_writable",
+			"credential_preflight_failed", "credential_scope_invalid", "credential_timeout",
 			"credential_config_invalid", "credential_config_ambiguous", "credential_config_changed",
 			"credential_https_required", "credential_transport_failed", "credential_request_rejected", "credential_identity_rejected",
 			"credential_response_invalid", "credential_verification_failed", "credential_backup_failed", "credential_write_failed":

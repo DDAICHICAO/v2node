@@ -1,6 +1,7 @@
 package node
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -430,5 +431,133 @@ func TestNodeAPICredentialMigrationHandlesHundredsOfEntries(t *testing.T) {
 			t.Fatal("batch migration reused a credential across node IDs")
 		}
 		seen[entry.Key] = true
+	}
+}
+
+func TestNodeAPIUpgradePreflightDoesNotSavePartialMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := []byte(`{"Unknown":{"large":9007199254740993},"Nodes":[{"ApiHost":"https://panel.example","NodeID":7,"ApiKey":"legacy"},{"ApiHost":"https://panel.example","NodeID":8,"ApiKey":"legacy"}]}`)
+	if err := os.WriteFile(path, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := migrateNodeAPICredentialsForUpgrade(context.Background(), path, func(_ context.Context, cfg conf.NodeConfig) (string, error) {
+		if cfg.NodeID == 8 {
+			return "", errors.New("credential_identity_rejected")
+		}
+		return "sntp-node-v1.v2node.7." + strings.Repeat("a", 64), nil
+	})
+	after, _ := os.ReadFile(path)
+	if err == nil || report.Changed || !bytes.Equal(before, after) {
+		t.Fatal("upgrade preflight saved partial credentials or accepted a rejected node")
+	}
+	if _, err := os.Stat(path + ".node-api-credential.bak"); !os.IsNotExist(err) {
+		t.Fatal("failed preflight wrote a migration backup")
+	}
+	if len(report.Results) != 2 || report.Results[1].Code != "credential_identity_rejected" {
+		t.Fatal("preflight did not identify the rejected node")
+	}
+}
+
+func TestNodeAPIUpgradePreflightVerifiesExistingScopedCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	key := "sntp-node-v1.v2node.7." + strings.Repeat("a", 64)
+	before := []byte(`{"Nodes":[{"ApiHost":"https://panel.example","NodeID":7,"ApiKey":"` + key + `"}]}`)
+	if err := os.WriteFile(path, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	report, err := migrateNodeAPICredentialsForUpgrade(context.Background(), path, func(_ context.Context, cfg conf.NodeConfig) (string, error) {
+		calls++
+		return "", errors.New("credential_identity_rejected")
+	})
+	after, _ := os.ReadFile(path)
+	if calls != 1 || err == nil || report.Changed || !bytes.Equal(before, after) {
+		t.Fatal("upgrade trusted a scoped credential by format without panel validation")
+	}
+}
+
+func TestNodeAPIUpgradePreflightRejectsUnreadyConfigurations(t *testing.T) {
+	scoped := "sntp-node-v1.v2node.7." + strings.Repeat("a", 64)
+	for _, input := range []string{
+		`{"Nodes":[]}`,
+		`{"Nodes":[{"ApiHost":"http://panel.example","NodeID":7,"ApiKey":"` + scoped + `"}]}`,
+		`{"Nodes":[{"ApiHost":"https://panel.example","NodeID":7,"ApiKey":"sntp-node-v1.v2node.8.` + strings.Repeat("a", 64) + `"}]}`,
+	} {
+		t.Run(input[:min(35, len(input))], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			before := []byte(input)
+			if err := os.WriteFile(path, before, 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := migrateNodeAPICredentialsForUpgrade(context.Background(), path, func(context.Context, conf.NodeConfig) (string, error) {
+				t.Error("unready config attempted exchange")
+				return "", nil
+			})
+			after, _ := os.ReadFile(path)
+			if err == nil || !bytes.Equal(before, after) {
+				t.Fatal("upgrade accepted an empty, insecure or mismatched configuration")
+			}
+		})
+	}
+}
+
+func TestNodeAPIUpgradePreflightMigratesAllAndChecksExistingKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	scoped := "sntp-node-v1.v2node.8." + strings.Repeat("b", 64)
+	before := []byte(`{"Unknown":{"large":9007199254740993},"Nodes":[{"ApiHost":"https://panel.example","NodeID":7,"ApiKey":"legacy"},{"ApiHost":"https://panel.example","NodeID":8,"ApiKey":"` + scoped + `"}]}`)
+	if err := os.WriteFile(path, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int]int{}
+	report, err := migrateNodeAPICredentialsForUpgrade(context.Background(), path, func(_ context.Context, cfg conf.NodeConfig) (string, error) {
+		seen[cfg.NodeID]++
+		if cfg.NodeID == 8 {
+			return scoped, nil
+		}
+		return "sntp-node-v1.v2node.7." + strings.Repeat("a", 64), nil
+	})
+	after, _ := os.ReadFile(path)
+	backup, _ := os.ReadFile(path + ".node-api-credential.bak")
+	if err != nil || !report.Changed || seen[7] != 1 || seen[8] != 1 || !bytes.Equal(before, backup) || !bytes.Contains(after, []byte("9007199254740993")) {
+		t.Fatalf("all-node preflight failed: %v", err)
+	}
+}
+
+func TestNodeAPIUpgradeTaskPreflightsActualConfigUnderUpdateLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom.json")
+	if err := os.WriteFile(path, []byte(`{"Nodes":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	previous := updateConfigPath
+	defer func() { updateConfigPath = previous }()
+	if err := SetUpdateConfigPath(path); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	w := zip.NewWriter(&archive)
+	f, err := w.Create("v2node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("candidate must never be installed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive.Bytes())
+	}))
+	defer server.Close()
+	updateRunMu.Lock()
+	defer updateRunMu.Unlock()
+	release, acquired, err := acquireUpdateLock()
+	if err != nil || !acquired {
+		t.Fatal("could not acquire updater lock")
+	}
+	defer release()
+	err = performUpdate(panel.UpdateTask{TaskID: "preflight-regression", DownloadURL: server.URL}, func(string, string) {})
+	if err == nil || !strings.Contains(err.Error(), "credential_config_invalid") {
+		t.Fatalf("update did not reject actual config before installation under its existing locks: %v", err)
 	}
 }

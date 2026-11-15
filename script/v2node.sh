@@ -194,15 +194,20 @@ update() {
     else
         version=$2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/install.sh) $version
-    if [[ $? == 0 ]]; then
+    local installer
+    installer=$(mktemp /tmp/v2node-update-installer.XXXXXX) || return 1
+    if ! curl -fLsS https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/install.sh -o "$installer"; then
+        rm -f "$installer"
+        return 1
+    fi
+    if bash "$installer" "$version"; then
+        rm -f "$installer"
         echo -e "${green}更新完成，已自动重启 v2node，请使用 v2node log 查看运行日志${plain}"
         exit
     fi
-
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
+    rm -f "$installer"
+    echo -e "${red}更新失败，安装器已中止，请检查预检结果${plain}"
+    return 1
 }
 
 config() {

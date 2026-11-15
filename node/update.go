@@ -33,6 +33,16 @@ const (
 )
 
 var updateRunMu sync.Mutex
+var updateConfigPath = "/etc/v2node/config.json"
+
+// Called once before any runtime/update goroutines start.
+func SetUpdateConfigPath(path string) error {
+	absolute, err := filepath.Abs(path)
+	if err == nil {
+		updateConfigPath = absolute
+	}
+	return err
+}
 
 type updateState struct {
 	TaskID    string `json:"task_id"`
@@ -220,6 +230,20 @@ func performUpdate(task panel.UpdateTask, report func(status, message string)) e
 	}
 	if files.Binary == "" {
 		return fmt.Errorf("update package does not contain v2node binary")
+	}
+	// runUpdateTask already owns both update locks. Reacquiring them here would
+	// reject our own migration; validate the entire actual config under that lock.
+	report(updateStatusInstalling, "verifying all configured node credentials")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	preflight, err := migrateNodeCredentialsLocked(ctx, updateConfigPath, exchangeNodeCredential, true)
+	if err != nil {
+		for _, result := range preflight.Results {
+			if result.Status == "pending" {
+				log.WithFields(log.Fields{"node_id": result.NodeID, "reason": result.Code}).Warn("节点升级预检失败，保留当前程序")
+			}
+		}
+		return fmt.Errorf("节点升级预检失败，保留当前程序：%s", credentialMigrationCode(err))
 	}
 
 	targetBinary := installedBinaryPath()

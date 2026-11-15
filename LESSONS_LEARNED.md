@@ -1,5 +1,14 @@
 # LESSONS LEARNED
 
+## 2026-11-15：节点升级必须在替换程序前验证整份配置
+
+- 索引：NODE-UPGRADE-PREFLIGHT-20261115。
+- 症状/根因：旧来源绑定丢失会阻止部分 NodeID 换钥，旧安装器和后台升级器仍直接替换并重启；整组 bootstrap 因单项鉴权失败而没有业务监听。运行期 best-effort 迁移不能充当升级准入。
+- 修复链：安装器候选程序 node-api-preflight → 对全部 Nodes 验证既有身份及返回凭据 → 全部成功才原子迁移 → 替换/重启。已专用密钥也向主站验证；失败不保存部分结果。CLI 失败返回非零并输出固定 ready 字段，拒绝旧 CLI 错误返回 0。自更新在已有更新锁内使用实际 --config 路径执行同样预检，不嵌套拿锁。
+- 兼容边界：新能力 node_api_upgrade_preflight_v1；主站拒绝向旧升级器发放二进制升级任务，包括已排队任务。首次过渡须使用最新安装脚本，之后后台单台/批量升级均可。默认安装器检测自定义运行配置后中止，避免验证错误文件或覆盖服务参数；首次安装无已有配置时保留原安装流程。
+- 验证：node/api/v2board/cmd 三包检查；既有测试覆盖整批拒绝、专用密钥服务端拒绝、空/HTTP/范围错误、混合迁移和大整数保留、自更新持锁且采用实际配置。隔离 shell 验证失败不替换、成功顺序、旧 CLI 零退出拒绝和首次安装；配套主站内存 SQLite 验证旧版任务拒绝及配置任务继续。发行和线上验收另记实际结果。
+- 下次入口：node/api_credential_migration.go、node/update.go、cmd/node_api_preflight.go、script/install.sh、script/v2node.sh；相邻主站 docs/node-api-security-runbook.md。不扩大来源授权，不修改证书续期、APP_KEY 或 SQL；预检是认证检查，不代替升级后的业务验收。
+
 ## 2026-11-15：节点认证失败应明确归因，旧来源缺口须受信恢复
 
 - 症状/链路：旧配置升级后服务 active，但整组没有监听；ApiKey → 配置/换钥 → bootstrap → 整组准备。现场八个旧密钥条目均为 403，另外四个专用密钥条目配置为 200。

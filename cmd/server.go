@@ -45,6 +45,10 @@ func init() {
 
 func serverHandle(_ *cobra.Command, _ []string) {
 	showVersion()
+	if err := node.SetUpdateConfigPath(config); err != nil {
+		log.Error("节点升级配置路径无效")
+		return
+	}
 	c := conf.New()
 	err := c.LoadFromPath(config)
 	log.SetFormatter(&log.TextFormatter{

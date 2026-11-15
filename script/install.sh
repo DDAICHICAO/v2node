@@ -424,12 +424,11 @@ EOF
             systemctl restart v2node
         fi
         sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
+        if check_status; then
             echo -e "${green}v2node 重启成功${plain}"
         else
             echo -e "${red}v2node 可能启动失败，请使用 v2node log 查看日志信息${plain}"
+            exit 1
         fi
 }
 
@@ -507,6 +506,53 @@ replace_v2node_install_dir() {
     fi
 }
 
+preflight_v2node_update() {
+    local candidate="$1"
+    local config_path="${V2NODE_CONFIG_PATH:-/etc/v2node/config.json}"
+    local output
+    local service_pid="" running_config="/etc/v2node/config.json" arg
+    local -a service_args=()
+    if command -v systemctl >/dev/null 2>&1; then
+        service_pid=$(systemctl show v2node --property=MainPID --value 2>/dev/null) || service_pid=""
+    elif [[ -r /run/v2node.pid ]]; then
+        read -r service_pid < /run/v2node.pid
+    fi
+    if [[ "$service_pid" =~ ^[1-9][0-9]*$ && -r "/proc/${service_pid}/cmdline" ]]; then
+        mapfile -d '' -t service_args < "/proc/${service_pid}/cmdline"
+        for ((arg=0; arg<${#service_args[@]}; arg++)); do
+            case "${service_args[$arg]}" in
+                --config|-c) running_config="${service_args[$((arg+1))]:-}" ;;
+                --config=*) running_config="${service_args[$arg]#--config=}" ;;
+                -c=*) running_config="${service_args[$arg]#-c=}" ;;
+            esac
+        done
+        if [[ "$running_config" != "$config_path" ]]; then
+            echo -e "${red}运行服务使用自定义配置，已中止默认路径升级；请保留原服务参数使用受控升级流程。${plain}"
+            return 1
+        fi
+    fi
+    if [[ "$config_path" != "/etc/v2node/config.json" ]]; then
+        echo -e "${red}此安装器仅管理默认配置路径；自定义配置请使用具备预检能力的后台升级器。${plain}"
+        return 1
+    fi
+    if [[ ! -e "$config_path" ]]; then
+        return 0
+    fi
+    if ! chmod +x "$candidate"; then
+        return 1
+    fi
+    if ! output=$("$candidate" node-api-preflight --config "$config_path"); then
+        printf '%s\n' "$output"
+        echo -e "${red}升级前认证预检未通过，已中止；保留原程序与运行服务。请根据节点编号及结果码检查身份配置。${plain}"
+        return 1
+    fi
+    printf '%s\n' "$output"
+    if ! printf '%s\n' "$output" | grep -Eq '"upgrade_preflight_ready"[[:space:]]*:[[:space:]]*true'; then
+        echo -e "${red}目标版本未提供有效预检结果，已中止升级。${plain}"
+        return 1
+    fi
+}
+
 install_v2node() {
     local version_param="$1"
     local work_dir
@@ -536,6 +582,10 @@ install_v2node() {
     mkdir -p "$package_dir"
     if ! unzip -q "$archive_path" -d "$package_dir"; then
         echo -e "${red}Failed to extract v2node archive${plain}"
+        rm -rf "$work_dir"
+        exit 1
+    fi
+    if ! preflight_v2node_update "${package_dir}/v2node"; then
         rm -rf "$work_dir"
         exit 1
     fi

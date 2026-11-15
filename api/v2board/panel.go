@@ -23,6 +23,7 @@ import (
 // Panel is the interface for different panel's api.
 
 var deviceLimitCapabilities = []string{
+	"node_api_upgrade_preflight_v1",
 	"socks5_users_v1",
 	"cloudflare_origin_cidrs_v1",
 	"titan_v3_native_v1",
