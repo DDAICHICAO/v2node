@@ -6,6 +6,7 @@
 - 根因/恢复边界：主站旧身份按每个 NodeID 核对已知来源，缺失绑定会同时阻断普通请求和换钥。后台状态裁剪写回共享来源缓存存在迁移风险，主站配套保留来源历史；已缺失条目由管理员核实 SSH 主机归属后定向补专用密钥，节点不自行注册来源。
 - 修改：v5.0.2 将换钥 401/403 归为固定 `credential_identity_rejected`，配置状态为 `authentication / node_authorization_rejected`，主站同步识别。仍拒绝错误身份，不泄露响应/密钥，不改变整组原子切换、证书续期或 DNS 凭据方式。
 - 验证：先用既有测试文件复现错误归因，再验证 `go test ./api/v2board ./node ./cmd -count=1 -timeout 120s`；全部通过。主站隔离回归检查十项断言，覆盖状态清理后的授权保留、跨节点/未知来源拒绝和错误码归一化。实际发布、两机更新及真实代理验收须另据现场结果记录，不能用接口 200 代替。
+- 最终交付：v5.0.2 已正式设为 latest，标签对应 `a6b1d54`、双架构构建及四个附件核对通过；两机备份升级后各六个监听、版本/文件哈希一致。主站 16:29 通过已有 `./update-code.sh` 部署配套 `999e01995`，16:30 十二个节点均 v5.0.2/applied、失败阻塞为 0，配置请求及运行上报新鲜。身份被拒时状态上报也可能被拒，必须保留本机日志诊断入口。未完成全协议真实客户端认证验收，未改变证书方式；临时包清理、受限回滚备份保留。
 - 下次入口：`api/v2board/node_credential.go`、`node/api_credential_migration.go::credentialMigrationCode`、`node/config_status.go::newConfigError`、`docs/log-troubleshooting.md` 同日条目；主站 `docs/uniproxy-node-troubleshooting-runbook.md`。
 
 ## 2026-11-14：批量升级须自动迁移节点密钥并保留失败条目
