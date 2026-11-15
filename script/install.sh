@@ -672,20 +672,19 @@ EOF
             systemctl start v2node
         fi
         sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
+        if check_status; then
             echo -e "${green}v2node 重启成功${plain}"
         else
             echo -e "${red}v2node 可能启动失败，请使用 v2node log 查看日志信息${plain}"
+            exit 1
         fi
         first_install=false
     fi
 
 
     if ! download_file_with_fallback /usr/bin/v2node \
-        "https://cdn.jsdelivr.net/gh/DDAICHICAO/v2node@dev/script/v2node.sh" \
-        "https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/v2node.sh"; then
+        "https://raw.githubusercontent.com/DDAICHICAO/v2node/dev/script/v2node.sh" \
+        "https://cdn.jsdelivr.net/gh/DDAICHICAO/v2node@dev/script/v2node.sh"; then
         echo -e "${red}Failed to download v2node management script${plain}"
         exit 1
     fi
