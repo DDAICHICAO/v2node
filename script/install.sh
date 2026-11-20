@@ -40,6 +40,7 @@ VERSION_ARG=""
 API_HOST_ARG=""
 NODE_ID_ARG=""
 API_KEY_ARG=""
+NODE_API_KEYS_ARG=()
 TLS_CERTIFICATE_TOKEN_ARG="${TLS_CERTIFICATE_TOKEN:-}"
 ACCESS_AUDIT_ENABLED_ARG="${ACCESS_AUDIT_ENABLED:-false}"
 ACCESS_AUDIT_ENDPOINT_ARG="${ACCESS_AUDIT_ENDPOINT:-}"
@@ -81,32 +82,55 @@ generate_v2node_nodes_json() {
         local node_ids="$2"
         local api_key="$3"
         local tls_certificate_token="$4"
-        local compact_node_ids
+        shift 4
+        local compact_node_ids id key i comma
         local ids=()
-        local id
-        local i
-        local comma
+        local -A scoped_keys=() seen_ids=()
         local token_json=""
 
         compact_node_ids=$(printf '%s' "$node_ids" | tr -d '[:space:]')
-        if [[ -z "$compact_node_ids" ]]; then
-            echo "node id is required" >&2
+        if [[ ! "$compact_node_ids" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; then
+            echo "--node-id must be a positive integer or a comma-separated positive integer list" >&2
             return 1
         fi
-
         IFS=',' read -r -a ids <<< "$compact_node_ids"
-        if [[ ${#ids[@]} -eq 0 ]]; then
-            echo "node id is required" >&2
-            return 1
+
+        if (( $# > 0 )); then
+            if [[ -n "$api_key" ]]; then
+                echo "use either --api-key or --node-api-key" >&2
+                return 1
+            fi
+            for key in "$@"; do
+                if [[ ! "$key" =~ ^sntp-node-v1\.v2node\.([1-9][0-9]{0,9})\.[a-f0-9]{64}$ ]]; then
+                    echo "invalid --node-api-key format" >&2
+                    return 1
+                fi
+                id=${BASH_REMATCH[1]}
+                if [[ -n "${scoped_keys[$id]:-}" ]]; then
+                    echo "duplicate --node-api-key for NodeID ${id}" >&2
+                    return 1
+                fi
+                scoped_keys[$id]=$key
+            done
+            if [[ ${#scoped_keys[@]} -ne ${#ids[@]} ]]; then
+                echo "provide exactly one --node-api-key per --node-id entry" >&2
+                return 1
+            fi
         fi
 
         for id in "${ids[@]}"; do
-            if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
-                echo "node id must be a positive integer, or a comma-separated positive integer list: ${node_ids}" >&2
+            if [[ -n "${seen_ids[$id]:-}" ]]; then
+                echo "duplicate --node-id: ${id}" >&2
                 return 1
             fi
-            if [[ "$api_key" == sntp-node-v1.* && "$api_key" != "sntp-node-v1.v2node.${id}."* ]]; then
-                echo "the node-scoped ApiKey must match its NodeID; configure a separate key for each Nodes[] entry" >&2
+            seen_ids[$id]=1
+            if (( $# > 0 )); then
+                if [[ -z "${scoped_keys[$id]:-}" ]]; then
+                    echo "missing --node-api-key for NodeID ${id}" >&2
+                    return 1
+                fi
+            elif [[ "$api_key" == sntp-node-v1.* && "$api_key" != "sntp-node-v1.v2node.${id}."* ]]; then
+                echo "the node-scoped ApiKey must match its NodeID; use one --node-api-key per NodeID for multi-node install" >&2
                 return 1
             fi
         done
@@ -120,6 +144,8 @@ generate_v2node_nodes_json() {
         fi
 
         for i in "${!ids[@]}"; do
+            id=${ids[$i]}
+            key=${scoped_keys[$id]:-$api_key}
             comma=","
             if [[ "$i" -eq $((${#ids[@]} - 1)) ]]; then
                 comma=""
@@ -127,8 +153,8 @@ generate_v2node_nodes_json() {
             cat <<EOF
         {
             "ApiHost": "${api_host}",
-            "NodeID": ${ids[$i]},
-            "ApiKey": "${api_key}"${token_json},
+            "NodeID": ${id},
+            "ApiKey": "${key}"${token_json},
             "Timeout": 15
         }${comma}
 EOF
@@ -137,6 +163,10 @@ EOF
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
+        if [[ "$1" == --* && "$1" != --help && ( $# -lt 2 || "$2" == --* ) ]]; then
+            echo "缺少参数值: $1" >&2
+            return 1
+        fi
         case "$1" in
             --api-host)
                 API_HOST_ARG="$2"; shift 2 ;;
@@ -144,6 +174,8 @@ parse_args() {
                 NODE_ID_ARG="$2"; shift 2 ;;
             --api-key)
                 API_KEY_ARG="$2"; shift 2 ;;
+            --node-api-key)
+                NODE_API_KEYS_ARG+=("$2"); shift 2 ;;
             --tls-certificate-token)
                 TLS_CERTIFICATE_TOKEN_ARG="$2"; shift 2 ;;
             --access-audit-enabled)
@@ -173,6 +205,7 @@ parse_args() {
             --sntp-access)
                 SNTP_ACCESS_ARG="$2"; shift 2 ;;
             -h|--help)
+                echo "多节点专用密钥选项: --node-id ID[,ID...] --node-api-key KEY [--node-api-key KEY ...]"
                 echo "受管证书选项: --tls-certificate-token TOKEN（仅支持单个 --node-id；多节点请分别配置 Nodes[]）"
                 echo "用法: $0 [版本号] [--api-host URL] [--node-id ID[,ID...]] [--api-key KEY] [--access-audit-enabled true|false] [--access-audit-endpoint URL] [--access-audit-token TOKEN]"
                 exit 0 ;;
@@ -187,6 +220,22 @@ parse_args() {
                 fi ;;
         esac
     done
+}
+
+has_bootstrap_identity_args() {
+    [[ -n "$API_HOST_ARG" || -n "$NODE_ID_ARG" || -n "$API_KEY_ARG" || ${#NODE_API_KEYS_ARG[@]} -gt 0 ]]
+}
+
+validate_bootstrap_identity() {
+    local config_path="$1"
+    if [[ -e "$config_path" ]] || ! has_bootstrap_identity_args; then
+        return 0
+    fi
+    if [[ -z "$API_HOST_ARG" || -z "$NODE_ID_ARG" || ( -z "$API_KEY_ARG" && ${#NODE_API_KEYS_ARG[@]} -eq 0 ) ]]; then
+        echo "首次自动配置需要同时提供 --api-host、--node-id 和节点密钥" >&2
+        return 1
+    fi
+    generate_v2node_nodes_json "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG" "$TLS_CERTIFICATE_TOKEN_ARG" "${NODE_API_KEYS_ARG[@]}" >/dev/null
 }
 
 arch=$(uname -m)
@@ -346,6 +395,7 @@ generate_v2node_config() {
         local node_id="$2"
         local api_key="$3"
         local tls_certificate_token="$4"
+        shift 4
         local access_audit_enabled
         local sntp_access
         local access_audit_batch_size
@@ -376,8 +426,7 @@ generate_v2node_config() {
         access_flow_spool_path="${ACCESS_FLOW_SPOOL_PATH_ARG:-/var/lib/v2node/access-audit-spool/flow.db}"
         access_flow_max_spool_bytes=$(positive_int_or_default "$ACCESS_FLOW_MAX_SPOOL_BYTES_ARG" "268435456")
         access_flow_max_spool_age="${ACCESS_FLOW_MAX_SPOOL_AGE_ARG:-24h}"
-        if ! nodes_json=$(generate_v2node_nodes_json "$api_host" "$node_id" "$api_key" "$tls_certificate_token"); then
-            echo -e "${red}Invalid --node-id: ${node_id}${plain}"
+        if ! nodes_json=$(generate_v2node_nodes_json "$api_host" "$node_id" "$api_key" "$tls_certificate_token" "$@"); then
             return 1
         fi
 
@@ -538,7 +587,7 @@ preflight_v2node_update() {
     if [[ ! -e "$config_path" ]]; then
         return 0
     fi
-    if [[ -n "$API_HOST_ARG" || -n "$NODE_ID_ARG" || -n "$API_KEY_ARG" ]]; then
+    if has_bootstrap_identity_args; then
         echo -e "${yellow}检测到已有配置：预检和升级使用原配置，安装参数不会覆盖已有 ApiHost、NodeID 或 ApiKey；身份被拒绝的条目需核实后单独修正。${plain}"
     fi
     if ! chmod +x "$candidate"; then
@@ -657,8 +706,8 @@ EOF
 
     if [[ ! -f /etc/v2node/config.json ]]; then
         # 如果通过 CLI 传入了完整参数，则直接生成配置并跳过交互
-        if [[ -n "$API_HOST_ARG" && -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
-            if generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG" "$TLS_CERTIFICATE_TOKEN_ARG"; then
+        if has_bootstrap_identity_args; then
+            if generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG" "$TLS_CERTIFICATE_TOKEN_ARG" "${NODE_API_KEYS_ARG[@]}"; then
                 echo -e "${green}已根据参数生成 /etc/v2node/config.json${plain}"
                 first_install=false
             else
@@ -735,7 +784,8 @@ EOF
     fi
 }
 
-parse_args "$@"
+parse_args "$@" || exit 1
+validate_bootstrap_identity /etc/v2node/config.json || exit 1
 echo -e "${green}开始安装${plain}"
 install_base
 install_v2node "$VERSION_ARG"
