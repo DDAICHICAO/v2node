@@ -41,6 +41,7 @@ var deviceLimitCapabilities = []string{
 	"uuid_ip_fanout_reservation_v1",
 	"device_limit_event_report",
 	"managed_tls_certificate_v1",
+	"reference_certificate_v1",
 	"managed_tls_native_prepare_v1",
 	managedTLSAutoCredentialCapability,
 	"managed_tls_domain_migration_v1",

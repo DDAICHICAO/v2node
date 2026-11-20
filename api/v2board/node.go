@@ -144,22 +144,23 @@ type UUIDIPFanoutReservationConfig struct {
 }
 
 type TlsSettings struct {
-	ServerName         string   `json:"server_name"`
-	ServerNames        []string `json:"server_names"`
-	Dest               string   `json:"dest"`
-	ServerPort         string   `json:"server_port"`
-	ShortId            string   `json:"short_id"`
-	ShortIds           []string `json:"short_ids"`
-	PrivateKey         string   `json:"private_key"`
-	Mldsa65Seed        string   `json:"mldsa65Seed"`
-	Xver               uint64   `json:"xver,string"`
-	CertMode           string   `json:"cert_mode"`
-	CertFile           string   `json:"cert_file"`
-	KeyFile            string   `json:"key_file"`
-	Provider           string   `json:"provider"`
-	DNSEnv             string   `json:"dns_env"`
-	RejectUnknownSni   string   `json:"reject_unknown_sni"`
-	CertificateScopeID uint64   `json:"certificate_scope_id"`
+	ServerName          string   `json:"server_name"`
+	ServerNames         []string `json:"server_names"`
+	Dest                string   `json:"dest"`
+	ServerPort          string   `json:"server_port"`
+	ShortId             string   `json:"short_id"`
+	ShortIds            []string `json:"short_ids"`
+	PrivateKey          string   `json:"private_key"`
+	Mldsa65Seed         string   `json:"mldsa65Seed"`
+	Xver                uint64   `json:"xver,string"`
+	CertMode            string   `json:"cert_mode"`
+	CertFile            string   `json:"cert_file"`
+	KeyFile             string   `json:"key_file"`
+	Provider            string   `json:"provider"`
+	DNSEnv              string   `json:"dns_env"`
+	RejectUnknownSni    string   `json:"reject_unknown_sni"`
+	CertificateRevision string   `json:"certificate_revision,omitempty"`
+	CertificateScopeID  uint64   `json:"certificate_scope_id"`
 }
 
 func (t *TlsSettings) UnmarshalJSON(data []byte) error {
@@ -311,6 +312,13 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	kf := cm.TlsSettings.KeyFile
 	if cm.TlsSettings.CertMode == "managed" {
 		cf, kf = managedTLSCertificatePaths(c.NodeId)
+	}
+	if cm.TlsSettings.CertMode == "reference" {
+		cf, kf, err = c.referenceCertificate(ctx, cm.TlsSettings.CertificateRevision, "/etc/v2node/certificates")
+		if err != nil {
+			return nil, err
+		}
+		cm.TlsSettings.CertMode = "file"
 	}
 	if cf == "" {
 		cf = filepath.Join("/etc/v2node/", cm.Protocol+strconv.Itoa(c.NodeId)+".cer")
